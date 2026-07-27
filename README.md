@@ -1,6 +1,6 @@
 # Laconic – Compress what a coding agent carries, not what it says.
 
-> **Status: early package release.** `laconic` 0.0.1 establishes the importable package, CLI, and verification surface; codec behavior remains design-stage work.
+> **Status: early package release.** `laconic` 0.2.0 ships the handle ledger and the file observation encoder — the largest single lever, replacing whole-file reads with a structural outline plus the requested span. Command, search, and action encoding are not yet implemented.
 
 Most of what fills a coding agent's context window is never read by a human — file contents, command output, patches, search hits — and it is re-ingested on every turn of a session. Laconic is a codec for that traffic: it re-encodes observations and actions at the tool boundary, keeps every elision recoverable, and renders prose for a human only on demand.
 
