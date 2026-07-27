@@ -35,7 +35,7 @@ dev = [
 ]
 
 [tool.ruff]
-extend-exclude = ["docs", "scripts/measure_session_composition.py"]
+extend-exclude = ["docs"]
 line-length = 100
 target-version = "py312"
 
