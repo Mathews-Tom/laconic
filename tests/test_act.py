@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from laconic.codec.act import AnchoredEdit, StaleAnchorError, _resolve_symbol
-from laconic.codec.outline import Symbol
+from laconic.codec.outline import Symbol, TreeSitterOutliner
 from laconic.ledger import Ledger, ObservationKind, UnknownHandleError
 
 # --- Model: AnchoredEdit construction and pure symbol resolution -----------
@@ -256,3 +256,206 @@ def test_materialize_uses_an_injected_outliner(tmp_path: Path) -> None:
             # FallbackOutliner never reports structure, so even a present
             # symbol resolves as unoutlinable through it.
             edit.to_tool_input(ledger, outliner=FallbackOutliner())
+
+
+# --- Drift resilience: sequential edits shifting line numbers --------------
+
+
+def _apply(source: str, tool_input: dict[str, object]) -> str:
+    """Simulate a host tool applying a materialized ``{path, old, new}`` edit.
+
+    Asserts the precondition a real first-match host implies: ``old`` must
+    be present and name exactly one region, or applying it by replacing
+    the first match is itself a silent best-guess. Checked via ``find``/
+    ``rfind`` agreement plus a presence check -- ``find`` and ``rfind``
+    both return ``-1`` for an absent ``old``, which would otherwise read as
+    "unique" and let ``replace`` silently no-op instead of failing on the
+    drift this suite exists to catch. ``str.count`` is avoided outright:
+    it scans non-overlapping matches only and can under-report a
+    self-overlapping periodic ``old`` as unique.
+    """
+    old = str(tool_input["old"])
+    first, last = source.find(old), source.rfind(old)
+    assert first != -1, f"materialized old is not present in source: {old!r}"
+    assert first == last, f"materialized old is not positionally unique in source: {old!r}"
+    return source.replace(old, str(tool_input["new"]), 1)
+
+
+def test_drift_a_later_anchored_edit_survives_line_drift_from_an_earlier_edit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "widget.py"
+    original = "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        handle = _register_file(ledger, path, original)
+
+        # Earlier edit in the same session: grows alpha's body, pushing
+        # beta several lines further down than the handle's original
+        # registration recorded it at.
+        first = AnchoredEdit(
+            handle=handle,
+            anchor="alpha",
+            anchor_occurrence=1,
+            replacement="def alpha():\n    a = 1\n    b = 2\n    c = 3\n    return a + b + c",
+        )
+        first_input = first.to_tool_input(ledger)
+        assert first_input["old"] == "def alpha():\n    return 1"
+        path.write_text(_apply(path.read_text(encoding="utf-8"), first_input), encoding="utf-8")
+
+        # Anchoring on the symbol name, not a line number, is what lets this
+        # second edit -- built from the same handle -- still find beta.
+        second = AnchoredEdit(
+            handle=handle,
+            anchor="beta",
+            anchor_occurrence=1,
+            replacement="def beta():\n    return 42",
+        )
+        second_input = second.to_tool_input(ledger)
+
+    assert second_input == {
+        "path": str(path),
+        "old": "def beta():\n    return 2",
+        "new": "def beta():\n    return 42",
+    }
+
+
+def test_drift_a_later_edit_sees_an_earlier_edits_own_change_not_the_registered_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Discriminates the freshness mechanism directly: a regression that
+    resolved against the ledger's stale first-read snapshot (``record.raw``)
+    instead of the current on-disk file would still see beta's *original*
+    body here, not what the first edit actually wrote."""
+    path = tmp_path / "widget.py"
+    original = "def beta():\n    return 1\n"
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        handle = _register_file(ledger, path, original)
+
+        first = AnchoredEdit(
+            handle=handle,
+            anchor="beta",
+            anchor_occurrence=1,
+            replacement="def beta():\n    return 2",
+        )
+        first_input = first.to_tool_input(ledger)
+        assert first_input["old"] == "def beta():\n    return 1"
+        path.write_text(_apply(path.read_text(encoding="utf-8"), first_input), encoding="utf-8")
+
+        second = AnchoredEdit(
+            handle=handle,
+            anchor="beta",
+            anchor_occurrence=1,
+            replacement="def beta():\n    return 3",
+        )
+        second_input = second.to_tool_input(ledger)
+
+    assert second_input["old"] == "def beta():\n    return 2"
+
+
+def test_drift_occurrence_disambiguation_survives_line_drift_from_an_earlier_edit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "widget.py"
+    original = (
+        "def handler():\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def middle():\n"
+        "    return 0\n"
+        "\n"
+        "\n"
+        "def handler():\n"
+        "    return 2\n"
+    )
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        handle = _register_file(ledger, path, original)
+
+        grow_middle = AnchoredEdit(
+            handle=handle,
+            anchor="middle",
+            anchor_occurrence=1,
+            replacement="def middle():\n    a = 1\n    b = 2\n    return a + b",
+        )
+        grow_input = grow_middle.to_tool_input(ledger)
+        path.write_text(_apply(path.read_text(encoding="utf-8"), grow_input), encoding="utf-8")
+
+        # The second "handler" has drifted further down than its original
+        # registration; occurrence=2 must still name it, not the first.
+        second_handler = AnchoredEdit(
+            handle=handle,
+            anchor="handler",
+            anchor_occurrence=2,
+            replacement="def handler():\n    return 99",
+        )
+        result = second_handler.to_tool_input(ledger)
+
+    assert result["old"] == "def handler():\n    return 2"
+
+
+def test_drift_a_stale_anchor_from_an_earlier_removal_fails_loudly_mid_session(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "widget.py"
+    original = "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        handle = _register_file(ledger, path, original)
+
+        remove_beta = AnchoredEdit(
+            handle=handle, anchor="beta", anchor_occurrence=1, replacement=""
+        )
+        remove_input = remove_beta.to_tool_input(ledger)
+        path.write_text(_apply(path.read_text(encoding="utf-8"), remove_input), encoding="utf-8")
+
+        stale = AnchoredEdit(handle=handle, anchor="beta", anchor_occurrence=1, replacement="X")
+        with pytest.raises(StaleAnchorError, match="beta"):
+            stale.to_tool_input(ledger)
+
+
+# --- Round-trip: codec-materialized edit vs. a direct edit -----------------
+
+
+def _direct_splice(source: str, symbol: Symbol, replacement: str) -> str:
+    """Apply ``replacement`` over ``symbol``'s span by direct line splicing.
+
+    This is the "direct edit" ground truth: what a caller would produce by
+    editing the file itself, with no codec involved.
+    """
+    lines = source.split("\n")
+    spliced = lines[: symbol.start_line - 1] + replacement.split("\n") + lines[symbol.end_line :]
+    return "\n".join(spliced)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "def beta():\n    return 99",
+        "def beta():\n    a = 1\n    b = 2\n    return a + b",
+        "def beta():\n    pass",
+    ],
+)
+def test_round_trip_produces_a_byte_identical_result_to_a_direct_edit(
+    tmp_path: Path, replacement: str
+) -> None:
+
+    path = tmp_path / "widget.py"
+    source = (
+        "def alpha():\n    return 1\n\n\n"
+        "def beta():\n    return 2\n\n\n"
+        "def gamma():\n    return 3\n"
+    )
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        handle = _register_file(ledger, path, source)
+        edit = AnchoredEdit(
+            handle=handle, anchor="beta", anchor_occurrence=1, replacement=replacement
+        )
+        tool_input = edit.to_tool_input(ledger)
+
+    via_codec = _apply(source, tool_input)
+
+    outline = TreeSitterOutliner().outline(str(path), source)
+    symbol = next(symbol for symbol in outline.symbols if symbol.name == "beta")
+    direct = _direct_splice(source, symbol, replacement)
+
+    assert via_codec == direct
+    assert via_codec.encode("utf-8") == direct.encode("utf-8")
