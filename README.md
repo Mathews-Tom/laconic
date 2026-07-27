@@ -1,6 +1,4 @@
-# Laconic
-
-Compress what a coding agent carries, not what it says.
+# Laconic – Compress what a coding agent carries, not what it says.
 
 > **Status: design stage.** This repository currently contains the system design and the measurement work behind it. There is no installable package yet.
 
@@ -8,11 +6,11 @@ Most of what fills a coding agent's context window is never read by a human — 
 
 ## Documentation
 
-| Document | What's in it |
-|---|---|
-| [`docs/pitch.md`](docs/pitch.md) | The short version: the problem, the measurement, what is and isn't claimed |
-| [`docs/overview.md`](docs/overview.md) | What Laconic is, why, the evidence, prior work, and the pre-registered gates |
-| [`docs/system-design.md`](docs/system-design.md) | Architecture, components, data model, and the evaluation harness |
+| Document                                         | What's in it                                                                 |
+| ------------------------------------------------ | ---------------------------------------------------------------------------- |
+| [`docs/pitch.md`](docs/pitch.md)                 | The short version: the problem, the measurement, what is and isn't claimed   |
+| [`docs/overview.md`](docs/overview.md)           | What Laconic is, why, the evidence, prior work, and the pre-registered gates |
+| [`docs/system-design.md`](docs/system-design.md) | Architecture, components, data model, and the evaluation harness             |
 
 ## Measurement
 
