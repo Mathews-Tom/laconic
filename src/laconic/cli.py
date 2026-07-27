@@ -5,19 +5,24 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from laconic import __version__
+from laconic.codec.encoders.file import FileEncoder
 from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_models
+from laconic.ledger import Ledger
 from laconic.replay.corpus import (
     Channels,
     CorpusScan,
     EmptyCorpusError,
     Expectation,
+    JsonValue,
     MalformedRecordError,
     compare_expectation,
     expectation,
+    find_transcripts,
+    iter_records,
     scan_corpus,
 )
 
@@ -32,6 +37,7 @@ EXIT_MISMATCH = 1
 EXIT_NO_CORPUS = 3
 EXIT_NO_EXPECTATION = 4
 EXIT_MALFORMED_RECORD = 5
+EXIT_REPORT_REQUIRES_CODEC = 6
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="compare the measurement against a committed expected-values file",
     )
+    measure.add_argument(
+        "--codec",
+        choices=["on", "off"],
+        default="off",
+        help="engage the observation codec (currently: file reads only) before reporting",
+    )
+    measure.add_argument(
+        "--report",
+        choices=["reduction"],
+        help="print an additional codec report; 'reduction' requires --codec on",
+    )
     measure.set_defaults(handler=_measure)
     return parser
 
@@ -78,6 +95,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _measure(args: argparse.Namespace) -> int:
+    if args.report is not None and args.codec != "on":
+        print(
+            f"laconic measure: --report {args.report} requires --codec on",
+            file=sys.stderr,
+        )
+        return EXIT_REPORT_REQUIRES_CODEC
+
     paths: list[Path] = list(args.paths)
     try:
         result = scan_corpus(paths)
@@ -106,9 +130,14 @@ def _measure(args: argparse.Namespace) -> int:
     _report(result)
 
     expected_file: Path | None = args.expect
-    if expected_file is None:
-        return EXIT_OK
-    return _check_expectation(expected_file, expectation(result))
+    exit_code = EXIT_OK
+    if expected_file is not None:
+        exit_code = _check_expectation(expected_file, expectation(result))
+
+    if args.codec == "on" and args.report == "reduction":
+        _report_reduction(paths)
+
+    return exit_code
 
 
 def _check_expectation(expected_file: Path, measured: Expectation) -> int:
@@ -223,3 +252,84 @@ def _report_top_tools(channels: Channels) -> None:
         calls = channels.calls_by_tool[name]
         mean = f"{chars // calls:,}" if calls else "n/a"
         print(f"  {name:26}{chars:>12,} chars  calls={calls:<6} mean={mean}")
+
+
+def _report_reduction(paths: Sequence[Path]) -> None:
+    """Run the file observation encoder over every ``Read`` result under
+    ``paths`` and report gross encoded volume against raw volume.
+
+    This is a *gross* comparison: it never subtracts follow-up reads the
+    codec might induce. Net accounting is ``laconic replay``'s job, added in
+    M8 — reporting it here would let this milestone claim a savings number
+    it has no way to have earned honestly.
+    """
+    reads = 0
+    seen_handles: set[str] = set()
+    raw_total = 0
+    encoded_total = 0
+    with Ledger(":memory:", "measure-reduction") as ledger:
+        encoder = FileEncoder(ledger)
+        for turn, (subject, raw, request) in enumerate(_iter_file_reads(paths)):
+            record = encoder.encode(subject, raw, request, turn=turn)
+            reads += 1
+            if record.handle in seen_handles:
+                continue
+            seen_handles.add(record.handle)
+            raw_total += record.raw_chars
+            encoded_total += record.encoded_chars
+
+    print("\nFile observation encoder — gross reduction (induced reads: see M8):")
+    print(f"  Read tool results seen:   {reads:,}")
+    print(f"  unique payloads encoded:  {len(seen_handles):,}")
+    if raw_total == 0:
+        print("  no Read observations found in this corpus")
+        return
+    reduction = 100 * (1 - encoded_total / raw_total)
+    print(f"  raw volume:      {raw_total:>10,} chars")
+    print(f"  encoded volume:  {encoded_total:>10,} chars")
+    print(f"  reduction:       {reduction:>9.2f}%")
+
+
+def _iter_file_reads(paths: Sequence[Path]) -> Iterator[tuple[str, str, dict[str, JsonValue]]]:
+    """Yield ``(subject, raw content, tool input)`` for every ``Read`` tool
+    result found under ``paths``, matched by ``tool_use_id``.
+    """
+    for transcript in find_transcripts(list(paths)):
+        pending: dict[str, tuple[str, dict[str, JsonValue]]] = {}
+        for _, record in iter_records(transcript):
+            if record is None:
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            record_type = record.get("type")
+            if record_type == "assistant" and isinstance(content, list):
+                for block in content:
+                    if not (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") == "Read"
+                    ):
+                        continue
+                    tool_input = block.get("input")
+                    tool_id = block.get("id")
+                    path = tool_input.get("path") if isinstance(tool_input, dict) else None
+                    if (
+                        isinstance(path, str)
+                        and isinstance(tool_id, str)
+                        and isinstance(tool_input, dict)
+                    ):
+                        pending[tool_id] = (path, tool_input)
+            elif record_type == "user" and isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    tool_id = block.get("tool_use_id")
+                    entry = pending.pop(tool_id, None) if isinstance(tool_id, str) else None
+                    if entry is None:
+                        continue
+                    body = block.get("content")
+                    if isinstance(body, str):
+                        subject, request = entry
+                        yield subject, body, request
