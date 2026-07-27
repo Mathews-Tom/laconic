@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-28
+
 ### Added
 
 - The command observation encoder (`laconic.codec.encoders.command.CommandEncoder`): error-salient head/tail elision for `Bash` results, backed by a shared elision engine (`laconic.codec.encoders._elision`) that keeps every stderr, non-zero-exit, traceback, exception, or failing-assertion line either shown directly in the encoded output or counted in a visible marker — never silently dropped — wherever in the output it falls, with the complete payload always one `expand` call away regardless. A non-zero exit status renders as an unconditional `exit N` header line neither the recognizer nor the elision pass ever touches. Consecutive duplicate lines collapse to one instance with a `[xN]` repeat count folded in, preserving the order of every surviving line. Structured recognizers summarize recognized pytest and build-tool (mypy/ruff/tsc/cargo/clang-shaped) output instead of truncating it — but only once the input is long enough that generic elision would have applied anyway, so recognizing a tool's shape never makes error visibility worse than not recognizing it.
@@ -40,6 +42,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Initial packaging, lint, strict typing, test, and CI surface, with an importable `laconic` package and a `laconic` console script exposing `--version` and `--help`.
 
-[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.0.1...v0.2.0
 [0.0.1]: https://github.com/Mathews-Tom/Laconic/releases/tag/v0.0.1
