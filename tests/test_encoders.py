@@ -28,6 +28,7 @@ from laconic.codec.encoders._elision import (
 )
 from laconic.codec.encoders.fallback import FallbackEncoder
 from laconic.codec.encoders.file import FileEncoder
+from laconic.codec.observe import ObservationCodec
 from laconic.codec.outline import Outline, Symbol
 from laconic.codec.span import (
     DEFAULT_SPAN_BUDGET,
@@ -677,3 +678,29 @@ def test_fallback_encoder_never_drops_a_non_zero_exit_code_regardless_of_elision
     with memory_ledger() as ledger:
         record = FallbackEncoder(ledger).encode("SomeTool", raw, {"exit_code": exit_code}, turn=0)
         assert f"exit {exit_code}" in record.encoded
+
+
+# --- ObservationCodec dispatch -----------------------------------------------
+
+
+def test_observation_codec_dispatches_read_to_the_file_encoder() -> None:
+    with memory_ledger() as ledger:
+        record = ObservationCodec(ledger).encode("Read", "f.py", PYTHON_SOURCE, {}, turn=0)
+        assert record.kind == ObservationKind.FILE
+
+
+def test_observation_codec_dispatches_an_unrecognized_tool_to_the_fallback_encoder() -> None:
+    with memory_ledger() as ledger:
+        record = ObservationCodec(ledger).encode(
+            "SomeFutureTool", "subject", "raw text", {}, turn=0
+        )
+        assert record.kind == ObservationKind.OTHER
+
+
+@PROPERTY
+@given(tool_name=st.text(max_size=30), raw=st.text(st.characters(), max_size=500))
+def test_observation_codec_never_raises_for_an_unrecognized_tool_name(
+    tool_name: str, raw: str
+) -> None:
+    with memory_ledger() as ledger:
+        ObservationCodec(ledger).encode(tool_name, "subject", raw, {}, turn=0)
