@@ -7,11 +7,17 @@ request or a region of source must also be materialized. This module is
 that resolution, factored out so it can be tested against the outline and
 line-count axes independently of the encoder that renders the result.
 
-Two request keys are understood, both optional and both 1-based:
+Three request keys are understood, all optional and 1-based:
 
 - ``offset`` — the first line the caller explicitly asked to see.
 - ``limit`` — how many lines from ``offset`` (default 1) the caller asked
   to see.
+- ``edit_target`` — a ``(start, end)`` pair the caller has declared it is
+  about to edit. A declared edit target is *never* elided: it always
+  appears in the resolved ranges, regardless of what the outline or the
+  ``offset``/``limit`` pair would otherwise have decided, because eliding
+  the very region a future action anchors to would make that action fail
+  against a file the model never actually saw.
 
 Malformed or out-of-range values are treated as absent rather than raised:
 ``request`` carries values from the tool call that produced the raw
@@ -34,6 +40,7 @@ DEFAULT_SPAN_BUDGET = 120
 
 REQUEST_OFFSET_KEY = "offset"
 REQUEST_LIMIT_KEY = "limit"
+REQUEST_EDIT_TARGET_KEY = "edit_target"
 
 
 class InvalidRangeError(ValueError):
@@ -89,6 +96,23 @@ def _requested_range(request: Mapping[str, object], total_lines: int) -> LineRan
     return LineRange(offset, end)
 
 
+def _edit_target_range(request: Mapping[str, object], total_lines: int) -> LineRange | None:
+    """The protected range ``edit_target`` names, if present and valid.
+
+    Unlike ``offset``/``limit``, an endpoint past the end of the file is
+    clamped rather than discarded: "the edit lands after the last line" is
+    a legitimate target (an append), not a malformed request.
+    """
+    value = request.get(REQUEST_EDIT_TARGET_KEY)
+    if not isinstance(value, tuple | list) or len(value) != 2:
+        return None
+    start = _bounded_int(value[0], minimum=1)
+    end = _bounded_int(value[1], minimum=1)
+    if start is None or end is None or end < start:
+        return None
+    return LineRange(min(start, total_lines), min(end, total_lines))
+
+
 def resolve_span(
     request: Mapping[str, object],
     outline: Outline,
@@ -98,22 +122,29 @@ def resolve_span(
 ) -> tuple[LineRange, ...]:
     """Resolve which lines of the raw file must be shown verbatim.
 
-    Returns an empty tuple when the structural summary alone answers the
-    request — the caller asked for nothing specific and the outline carries
-    symbols. Returns exactly one range for an explicit ``offset``/``limit``
-    request. Returns a positional fallback window, bounded by
-    ``span_budget``, when the outline carries no symbols at all: with no
-    structural information to summarize, showing nothing would make the
-    encoding useless, so this degrades to head-of-file span scoping —
-    ``docs/system-design.md`` §2.2's "degrade to head/tail span scoping
-    rather than failing" for the no-grammar case.
+    A declared ``edit_target`` always wins: it is returned (unioned with an
+    explicit ``offset``/``limit`` request, if both are present) regardless
+    of what the outline or fallback logic below would otherwise decide.
+    Absent a target, returns an empty tuple when the structural summary
+    alone answers the request — the caller asked for nothing specific and
+    the outline carries symbols. Returns exactly one range for an explicit
+    ``offset``/``limit`` request. Returns a positional fallback window,
+    bounded by ``span_budget``, when the outline carries no symbols at
+    all: with no structural information to summarize, showing nothing
+    would make the encoding useless, so this degrades to head-of-file span
+    scoping — ``docs/system-design.md`` §2.2's "degrade to head/tail span
+    scoping rather than failing" for the no-grammar case.
     """
     if total_lines <= 0:
         return ()
 
+    target = _edit_target_range(request, total_lines)
     requested = _requested_range(request, total_lines)
-    if requested is not None:
-        return (requested,)
+    protected = (
+        requested if target is None else (target if requested is None else target.union(requested))
+    )
+    if protected is not None:
+        return (protected,)
 
     if outline.symbols:
         return ()

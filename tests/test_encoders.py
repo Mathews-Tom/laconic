@@ -153,6 +153,55 @@ def test_span_resolution_never_raises_for_unrecognized_request_keys() -> None:
     assert resolve_span(request, _WITH_SYMBOLS, total_lines=100) == ()
 
 
+# --- resolve_span: edit_target never-elide rule ---------------------------
+
+
+def test_span_resolution_edit_target_is_never_elided_even_when_the_outline_suffices() -> None:
+    request = {"edit_target": (3, 5)}
+    assert resolve_span(request, _WITH_SYMBOLS, total_lines=100) == (LineRange(3, 5),)
+
+
+def test_span_resolution_edit_target_is_shown_with_no_outline_and_no_other_request() -> None:
+    request = {"edit_target": (200, 205)}
+    assert resolve_span(request, _NO_SYMBOLS, total_lines=500) == (LineRange(200, 205),)
+
+
+def test_span_resolution_edit_target_accepts_a_list_pair_too() -> None:
+    request = {"edit_target": [3, 5]}
+    assert resolve_span(request, _WITH_SYMBOLS, total_lines=100) == (LineRange(3, 5),)
+
+
+def test_span_resolution_edit_target_unions_with_an_explicit_request() -> None:
+    request = {"offset": 1, "limit": 3, "edit_target": (10, 12)}
+    assert resolve_span(request, _WITH_SYMBOLS, total_lines=100) == (LineRange(1, 12),)
+
+
+def test_span_resolution_edit_target_beyond_eof_is_clamped_not_dropped() -> None:
+    request = {"edit_target": (48, 60)}
+    assert resolve_span(request, _NO_SYMBOLS, total_lines=50) == (LineRange(48, 50),)
+
+
+@pytest.mark.parametrize(
+    "edit_target",
+    [None, (), (1,), (1, 2, 3), (0, 5), (5, 2), ("a", "b"), "1-5"],
+)
+def test_span_resolution_ignores_a_malformed_edit_target(edit_target: object) -> None:
+    request = {"edit_target": edit_target}
+    assert resolve_span(request, _WITH_SYMBOLS, total_lines=100) == ()
+
+
+@PROPERTY
+@given(start=st.integers(min_value=1, max_value=300), end=st.integers(min_value=1, max_value=300))
+def test_span_resolution_edit_target_is_always_covered_by_the_result(start: int, end: int) -> None:
+    if end < start:
+        start, end = end, start
+    total_lines = 200
+    request = {"edit_target": (start, end)}
+    (resolved,) = resolve_span(request, _WITH_SYMBOLS, total_lines, span_budget=10)
+    assert resolved.start <= min(start, total_lines)
+    assert resolved.end >= min(end, total_lines)
+
+
 # --- properties ---------------------------------------------------------
 
 
@@ -302,3 +351,22 @@ def test_file_encoder_encoding_always_recovers_the_exact_raw_payload(raw: str) -
     with memory_ledger() as ledger:
         record = FileEncoder(ledger).encode("f.py", raw, {}, turn=0)
         assert ledger.expand(record.handle) == raw
+
+
+def test_file_encoder_never_elides_a_declared_edit_target() -> None:
+    with memory_ledger() as ledger:
+        encoder = FileEncoder(ledger)
+        # fn_10 sits around lines 31-32; asking for nothing but the outline
+        # would normally elide it entirely.
+        record = encoder.encode("f.py", PYTHON_SOURCE, {"edit_target": (31, 32)}, turn=0)
+        assert "span 31-32:" in record.encoded
+        assert "fn_10" in record.encoded
+
+
+def test_file_encoder_edit_target_survives_alongside_a_fallback_file() -> None:
+    with memory_ledger() as ledger:
+        encoder = FileEncoder(ledger)
+        record = encoder.encode(
+            "notes.xyz", UNKNOWN_EXTENSION_SOURCE, {"edit_target": (250, 252)}, turn=0
+        )
+        assert "span 250-252:" in record.encoded
