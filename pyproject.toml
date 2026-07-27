@@ -9,3 +9,17 @@ description = "A context-loop codec for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.0",
+]
+
+[tool.ruff]
+extend-exclude = ["docs", "scripts/measure_session_composition.py"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
