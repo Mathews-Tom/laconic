@@ -42,11 +42,23 @@ COMPRESSION_LEVEL = 3
 
 #: Stamped into ``PRAGMA user_version`` so a database written by a later,
 #: structurally different schema is refused instead of silently half-matched.
-SCHEMA_VERSION = 1
+#: Version 2 added ``compactions.projected_turns``, ``.accepted``, and
+#: ``.reason``: version 1's six columns could not distinguish one decline
+#: from another, which contradicts both this table's purpose and
+#: ``DEVELOPMENT_PLAN.md`` §6 M7's "declined attempts with reasons" scope.
+SCHEMA_VERSION = 2
 
 #: ``docs/system-design.md`` §5.1. ``raw_chars`` and ``encoded_chars`` are
 #: stored rather than re-derived so realised compression is reportable without
 #: decompressing every row, and a declined compaction leaves an auditable row.
+#:
+#: ``compactions.applied`` and ``.accepted`` are deliberately distinct:
+#: ``accepted`` is the residency manager's verdict that a compaction would
+#: pay off; ``applied`` is whether the prefix was actually rewritten inside
+#: a live session, which is a later milestone's responsibility. Writing
+#: ``applied = accepted`` would claim a cache write happened, and a real
+#: bill was paid, when nothing was rewritten — exactly the flattering
+#: accounting ``docs/system-design.md`` §9.4 exists to prevent.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
     session_id    TEXT    NOT NULL,
@@ -73,10 +85,22 @@ CREATE TABLE IF NOT EXISTS compactions (
     prefix_before   INTEGER NOT NULL,
     prefix_after    INTEGER NOT NULL,
     breakeven_turns REAL    NOT NULL,
-    applied         INTEGER NOT NULL,
+    projected_turns INTEGER,
+    accepted        INTEGER NOT NULL DEFAULT 0,
+    applied         INTEGER NOT NULL DEFAULT 0,
+    reason          TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (session_id, turn)
 );
 """
+
+#: Columns a version-1 database's ``compactions`` table predates. Added with
+#: ``ALTER TABLE`` rather than by recreating the table, so existing rows —
+#: none in practice, since version 1 shipped with no writer — survive.
+_V2_COMPACTION_COLUMNS = (
+    "ALTER TABLE compactions ADD COLUMN projected_turns INTEGER",
+    "ALTER TABLE compactions ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE compactions ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
+)
 
 
 #: A span reference is ``<handle>:<first>-<last>``, both 1-based, inclusive.
@@ -195,6 +219,14 @@ class SchemaVersionError(RuntimeError):
     """Raised when a database was written by a newer ledger schema."""
 
 
+class DuplicateCompactionError(RuntimeError):
+    """Raised when a session already logged a compaction decision for a turn.
+
+    One verdict per session and turn: a repeat must not silently overwrite
+    an earlier decision's arithmetic.
+    """
+
+
 class Ledger:
     """Content-addressed store of observations, one session per instance.
 
@@ -230,9 +262,23 @@ class Ledger:
                 f"and this build understands {SCHEMA_VERSION}"
             )
         # ``executescript`` commits any pending transaction and DDL opens
-        # none, so there is no transaction to wrap here.
+        # none, so there is no transaction to wrap here. A fresh (version 0)
+        # database gets the current, already-final table shape from this
+        # alone; only a real version-1 database predates it.
         self._db.executescript(SCHEMA)
+        if version == 1:
+            self._migrate_v1_compactions()
         self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_v1_compactions(self) -> None:
+        """Add the columns a version-1 ``compactions`` table predates.
+
+        Existing rows are preserved: ``ALTER TABLE ADD COLUMN`` extends every
+        row with the column's default rather than rewriting the table.
+        """
+        with self._db:
+            for statement in _V2_COMPACTION_COLUMNS:
+                self._db.execute(statement)
 
     def _recover_counters(self) -> dict[ObservationKind, int]:
         """Resume handle numbering from what this session already stored.
@@ -322,6 +368,66 @@ class Ledger:
         if not colon:
             return record.raw
         return "\n".join(_select_lines(record.raw, span, ref))
+
+    def record_compaction(
+        self,
+        turn: int,
+        prefix_before: int,
+        prefix_after: int,
+        breakeven_turns: float,
+        projected_turns: int | None,
+        accepted: bool,
+        reason: str,
+        applied: bool = False,
+    ) -> None:
+        """Append one audit row to the ``compactions`` table.
+
+        Every compaction decision is recorded here, accepted or declined
+        (``docs/system-design.md`` §5.1, §9.4): a tool that quietly busts
+        your cache to shrink your context raises your bill while reporting a
+        saving, so the arithmetic behind every decision — and ``reason`` for
+        it — must stay reconstructible later, not only the ones that ran.
+
+        ``accepted`` is the verdict this decision reached; ``applied``
+        defaults to ``False`` and is deliberately a separate fact — whether
+        the prefix was actually rewritten inside a live session is a later
+        milestone's responsibility, and conflating the two would claim a
+        real cache write happened when nothing was rewritten.
+
+        One row per session and turn: a second decision recorded for a turn
+        already logged raises ``DuplicateCompactionError`` rather than
+        silently overwriting the earlier verdict.
+        """
+        if turn < 0:
+            raise ValueError(f"turn must not be negative: {turn}")
+        if prefix_before < 0 or prefix_after < 0:
+            raise ValueError(
+                f"prefix sizes must not be negative: {prefix_before=}, {prefix_after=}"
+            )
+        if not reason:
+            raise ValueError("reason must not be empty")
+        try:
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO compactions (session_id, turn, prefix_before, prefix_after, "
+                    "breakeven_turns, projected_turns, accepted, applied, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self._session,
+                        turn,
+                        prefix_before,
+                        prefix_after,
+                        breakeven_turns,
+                        projected_turns,
+                        int(accepted),
+                        int(applied),
+                        reason,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise DuplicateCompactionError(
+                f"session {self._session!r} already logged a compaction decision for turn {turn}"
+            ) from error
 
     def _find(self, subject: str, sha: str) -> Record | None:
         row = self._db.execute(

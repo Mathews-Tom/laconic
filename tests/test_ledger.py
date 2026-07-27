@@ -14,6 +14,7 @@ import pytest
 import laconic.ledger
 from laconic.ledger import (
     SCHEMA_VERSION,
+    DuplicateCompactionError,
     InvalidSpanError,
     Ledger,
     ObservationKind,
@@ -107,7 +108,10 @@ def test_schema_initialisation_preserves_existing_rows(tmp_path: Path) -> None:
     with Ledger(db_path, "s1"):
         pass
     with inspect(db_path) as db, db:
-        db.execute("INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?)", ("s1", 1, 100, 40, 3.5, 1))
+        db.execute(
+            "INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("s1", 1, 100, 40, 3.5, 5, 1, 1, "test reason"),
+        )
 
     with Ledger(db_path, "s1"):
         pass
@@ -212,7 +216,10 @@ def test_closing_releases_the_file(tmp_path: Path) -> None:
     ledger.close()
     ledger.close()  # idempotent
     with inspect(db_path) as db, db:
-        db.execute("INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?)", ("s1", 1, 10, 5, 1.0, 0))
+        db.execute(
+            "INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("s1", 1, 10, 5, 1.0, 3, 0, 0, "test"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -572,3 +579,180 @@ def test_expand_reaches_content_registered_before_a_reopen(tmp_path: Path) -> No
         ledger.register(ObservationKind.COMMAND, "pytest -q", raw, "B1", 1)
     with Ledger(db_path, "s1") as reopened:
         assert reopened.expand("B1:2-3") == "across\nprocesses"
+
+
+# --- Compaction audit writer (M7) -------------------------------------------
+
+
+def test_record_compaction_writes_the_full_audit_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.db"
+    with Ledger(db_path, "s1") as ledger:
+        ledger.record_compaction(
+            turn=1,
+            prefix_before=100_000,
+            prefix_after=40_000,
+            breakeven_turns=8.5,
+            projected_turns=9,
+            accepted=True,
+            reason="clears break-even",
+        )
+    with inspect(db_path) as db:
+        row = db.execute(
+            "SELECT session_id, turn, prefix_before, prefix_after, breakeven_turns, "
+            "projected_turns, accepted, applied, reason FROM compactions"
+        ).fetchone()
+    assert row == ("s1", 1, 100_000, 40_000, 8.5, 9, 1, 0, "clears break-even")
+
+
+def test_record_compaction_defaults_applied_to_false(tmp_path: Path) -> None:
+    """M7 never applies a compaction; the writer's default must match, since
+    a caller that forgets the keyword must not accidentally claim one ran."""
+    db_path = tmp_path / "ledger.db"
+    with Ledger(db_path, "s1") as ledger:
+        ledger.record_compaction(
+            turn=1,
+            prefix_before=100,
+            prefix_after=40,
+            breakeven_turns=1.0,
+            projected_turns=5,
+            accepted=True,
+            reason="x",
+        )
+    with inspect(db_path) as db:
+        assert db.execute("SELECT applied FROM compactions").fetchone() == (0,)
+
+
+def test_record_compaction_rejects_a_duplicate_turn(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        ledger.record_compaction(
+            turn=1,
+            prefix_before=100,
+            prefix_after=40,
+            breakeven_turns=1.0,
+            projected_turns=5,
+            accepted=True,
+            reason="x",
+        )
+        with pytest.raises(DuplicateCompactionError, match="turn 1"):
+            ledger.record_compaction(
+                turn=1,
+                prefix_before=200,
+                prefix_after=40,
+                breakeven_turns=1.0,
+                projected_turns=5,
+                accepted=True,
+                reason="y",
+            )
+
+
+def test_record_compaction_isolates_sessions_sharing_a_database(tmp_path: Path) -> None:
+    """Two sessions may each log a decision for the same turn number."""
+    db_path = tmp_path / "ledger.db"
+    with Ledger(db_path, "s1") as first, Ledger(db_path, "s2") as second:
+        first.record_compaction(
+            turn=1,
+            prefix_before=100,
+            prefix_after=40,
+            breakeven_turns=1.0,
+            projected_turns=5,
+            accepted=True,
+            reason="a",
+        )
+        second.record_compaction(
+            turn=1,
+            prefix_before=200,
+            prefix_after=80,
+            breakeven_turns=2.0,
+            projected_turns=3,
+            accepted=False,
+            reason="b",
+        )
+    with inspect(db_path) as db:
+        rows = db.execute(
+            "SELECT session_id, reason FROM compactions ORDER BY session_id"
+        ).fetchall()
+    assert rows == [("s1", "a"), ("s2", "b")]
+
+
+def test_record_compaction_rejects_a_negative_turn(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        with pytest.raises(ValueError, match="turn"):
+            ledger.record_compaction(
+                turn=-1,
+                prefix_before=100,
+                prefix_after=40,
+                breakeven_turns=1.0,
+                projected_turns=5,
+                accepted=True,
+                reason="x",
+            )
+
+
+def test_record_compaction_rejects_a_negative_prefix_size(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        with pytest.raises(ValueError, match="prefix_before"):
+            ledger.record_compaction(
+                turn=1,
+                prefix_before=-1,
+                prefix_after=40,
+                breakeven_turns=1.0,
+                projected_turns=5,
+                accepted=True,
+                reason="x",
+            )
+
+
+def test_record_compaction_rejects_an_empty_reason(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        with pytest.raises(ValueError, match="reason"):
+            ledger.record_compaction(
+                turn=1,
+                prefix_before=100,
+                prefix_after=40,
+                breakeven_turns=1.0,
+                projected_turns=5,
+                accepted=True,
+                reason="",
+            )
+
+
+def test_a_v1_compactions_table_migrates_in_place(tmp_path: Path) -> None:
+    """A database written before ``projected_turns``/``accepted``/``reason``
+    existed gains them via ``ALTER TABLE``, and its existing row survives."""
+    db_path = tmp_path / "ledger.db"
+    db = sqlite3.connect(db_path)
+    try:
+        db.executescript(
+            """
+            CREATE TABLE observations (
+                session_id TEXT NOT NULL, handle TEXT NOT NULL, kind TEXT NOT NULL,
+                subject TEXT NOT NULL, content_sha TEXT NOT NULL, raw BLOB NOT NULL,
+                encoded TEXT NOT NULL, raw_chars INTEGER NOT NULL,
+                encoded_chars INTEGER NOT NULL, turn INTEGER NOT NULL,
+                resident INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+                PRIMARY KEY (session_id, handle)
+            );
+            CREATE TABLE compactions (
+                session_id TEXT NOT NULL, turn INTEGER NOT NULL,
+                prefix_before INTEGER NOT NULL, prefix_after INTEGER NOT NULL,
+                breakeven_turns REAL NOT NULL, applied INTEGER NOT NULL,
+                PRIMARY KEY (session_id, turn)
+            );
+            """
+        )
+        db.execute("INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?)", ("s1", 1, 100, 40, 3.5, 1))
+        db.execute("PRAGMA user_version = 1")
+        db.commit()
+    finally:
+        db.close()
+
+    with Ledger(db_path, "s1"):
+        pass
+
+    with inspect(db_path) as db:
+        row = db.execute(
+            "SELECT session_id, turn, prefix_before, prefix_after, breakeven_turns, "
+            "projected_turns, accepted, applied, reason FROM compactions"
+        ).fetchone()
+        assert row == ("s1", 1, 100, 40, 3.5, None, 0, 1, "")
+        assert db.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
