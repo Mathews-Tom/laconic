@@ -1,0 +1,35 @@
+{
+  "channels": {
+    "fenced_code_in_prose": 977,
+    "prose": 1671,
+    "tool_args": 5959,
+    "tool_results": 108926,
+    "user_prompts": 1518
+  },
+  "cost_usd": {
+    "cache_read": 5.7176588,
+    "cache_write": 2.693155,
+    "output": 1.0954949999999999,
+    "total": 9.7403088,
+    "uncached_input": 0.23399999999999999
+  },
+  "records": 265,
+  "schema_version": 1,
+  "transcripts": 3,
+  "usage": {
+    "claude-opus-4-8": {
+      "cache_read": 2026600,
+      "cache_write": 126652,
+      "input_tokens": 18000,
+      "output_tokens": 12789,
+      "turns": 25
+    },
+    "claude-sonnet-5": {
+      "cache_read": 15681196,
+      "cache_write": 507088,
+      "input_tokens": 48000,
+      "output_tokens": 51718,
+      "turns": 100
+    }
+  }
+}
