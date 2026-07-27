@@ -29,6 +29,7 @@ from laconic.costs import ModelUsage, session_cost
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type Record = dict[str, JsonValue]
+type Expectation = dict[str, JsonValue]
 
 TRANSCRIPT_GLOB = "*.jsonl"
 
@@ -50,6 +51,12 @@ _TOKEN_FIELDS = {
     "cache_write": "cache_creation_input_tokens",
     "output_tokens": "output_tokens",
 }
+
+#: Schema version of ``tests/corpus/expected.json``.
+EXPECTATION_SCHEMA_VERSION = 1
+
+#: Costs in an expectation file compare within this many USD.
+COST_TOLERANCE_USD = 1e-9
 
 
 class EmptyCorpusError(RuntimeError):
@@ -201,6 +208,82 @@ def scan_corpus(roots: Sequence[Path]) -> CorpusScan:
             f"{len(paths)} transcript(s) contained no channel content to apportion"
         )
     return result
+
+
+def expectation(result: CorpusScan) -> Expectation:
+    """Return the committed-fixture expectation describing ``result``.
+
+    This is the on-disk contract of ``tests/corpus/expected.json``: integer
+    counters that must match exactly, plus the derived cost in USD that must
+    match to within :data:`COST_TOLERANCE_USD`.
+    """
+    channels = result.channels
+    cost = session_cost(result.usage)
+    return {
+        "schema_version": EXPECTATION_SCHEMA_VERSION,
+        "transcripts": result.transcripts,
+        "records": result.records,
+        "channels": {
+            "prose": channels.prose,
+            "fenced_code_in_prose": channels.fenced_code_in_prose,
+            "tool_args": channels.tool_args,
+            "tool_results": channels.tool_results,
+            "user_prompts": channels.user_prompts,
+        },
+        "usage": {
+            model: {
+                "turns": model_usage.turns,
+                "input_tokens": model_usage.input_tokens,
+                "cache_read": model_usage.cache_read,
+                "cache_write": model_usage.cache_write,
+                "output_tokens": model_usage.output_tokens,
+            }
+            for model, model_usage in sorted(result.usage.items())
+        },
+        "cost_usd": {
+            "uncached_input": cost.uncached_input,
+            "cache_read": cost.cache_read,
+            "cache_write": cost.cache_write,
+            "output": cost.output,
+            "total": cost.total,
+        },
+    }
+
+
+def compare_expectation(expected: Expectation, actual: Expectation) -> list[str]:
+    """Return one human-readable line per difference; empty means they match.
+
+    Integer counters compare exactly. Costs compare within
+    :data:`COST_TOLERANCE_USD` so that a change of platform, not of behaviour,
+    does not fail a fixture.
+    """
+    return _diff(expected, actual, path="")
+
+
+def _diff(expected: JsonValue, actual: JsonValue, *, path: str) -> list[str]:
+    label = path or "<root>"
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return [f"{label}: expected an object, measured {type(actual).__name__}"]
+        differences: list[str] = []
+        for key in sorted(set(expected) | set(actual)):
+            child = f"{path}.{key}" if path else key
+            if key not in expected:
+                differences.append(f"{child}: unexpected key")
+            elif key not in actual:
+                differences.append(f"{child}: missing from measurement")
+            else:
+                differences.extend(_diff(expected[key], actual[key], path=child))
+        return differences
+    if isinstance(expected, float) or isinstance(actual, float):
+        if not isinstance(expected, int | float) or not isinstance(actual, int | float):
+            return [f"{label}: expected {expected!r}, measured {actual!r}"]
+        if abs(float(expected) - float(actual)) > COST_TOLERANCE_USD:
+            return [f"{label}: expected {expected!r}, measured {actual!r}"]
+        return []
+    if expected != actual:
+        return [f"{label}: expected {expected!r}, measured {actual!r}"]
+    return []
 
 
 def _ingest_assistant(
