@@ -396,3 +396,73 @@ def test_a_compaction_decision_uses_the_estimated_remaining_turns(populated_db: 
         )
     assert decision.projected_turns == 9
     assert decision.accepted is True
+
+
+# --- Dry-run reporting -------------------------------------------------------
+
+
+def test_dryrun_reports_the_same_verdict_as_evaluate_compaction(populated_db: Path) -> None:
+    with Ledger(populated_db, "s1") as ledger:
+        manager = ResidencyManager(ledger, mode=ResidencyMode.COMPACT)
+        preview = manager.dry_run(
+            turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9
+        )
+        real = manager.evaluate_compaction(
+            turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9
+        )
+    assert preview == real
+    assert preview.accepted is True
+    assert preview.breakeven_turns == pytest.approx(breakeven_turns(40_000, 60_000))
+    assert "clears" in preview.reason
+
+
+def test_dryrun_reports_a_would_be_decline_identically_to_the_real_decision(
+    populated_db: Path,
+) -> None:
+    with Ledger(populated_db, "s1") as ledger:
+        manager = ResidencyManager(ledger, mode=ResidencyMode.COMPACT)
+        preview = manager.dry_run(
+            turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=8
+        )
+        real = manager.evaluate_compaction(
+            turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=8
+        )
+    assert preview == real
+    assert preview.accepted is False
+
+
+def test_dryrun_writes_no_audit_row(populated_db: Path) -> None:
+    """Even an accepted preview leaves the compactions table untouched."""
+    with Ledger(populated_db, "s1") as ledger:
+        manager = ResidencyManager(ledger, mode=ResidencyMode.COMPACT)
+        manager.dry_run(turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9)
+    assert _compaction_rows(populated_db) == []
+
+
+def test_dryrun_never_mutates_an_existing_prefix_entry(populated_db: Path) -> None:
+    before = _observations_snapshot(populated_db)
+    with Ledger(populated_db, "s1") as ledger:
+        manager = ResidencyManager(ledger, mode=ResidencyMode.COMPACT)
+        manager.dry_run(turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9)
+    assert _observations_snapshot(populated_db) == before
+
+
+def test_dryrun_in_append_only_mode_still_shows_the_arithmetic(populated_db: Path) -> None:
+    """A preview stays informative even when the mode alone forces a decline."""
+    with Ledger(populated_db, "s1") as ledger:
+        preview = ResidencyManager(ledger).dry_run(
+            turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9
+        )
+    assert preview.accepted is False
+    assert preview.breakeven_turns == pytest.approx(breakeven_turns(40_000, 60_000))
+
+
+def test_dryrun_followed_by_the_real_decision_still_logs_exactly_once(populated_db: Path) -> None:
+    """A preview must not consume the one audit slot a turn gets."""
+    with Ledger(populated_db, "s1") as ledger:
+        manager = ResidencyManager(ledger, mode=ResidencyMode.COMPACT)
+        manager.dry_run(turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9)
+        manager.evaluate_compaction(
+            turn=1, prefix_before=100_000, prefix_after=40_000, projected_turns=9
+        )
+    assert len(_compaction_rows(populated_db)) == 1

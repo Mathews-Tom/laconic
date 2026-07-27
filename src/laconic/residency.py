@@ -161,6 +161,24 @@ class ResidencyManager:
         )
         return decision
 
+    def dry_run(
+        self,
+        turn: int,
+        prefix_before: int,
+        prefix_after: int,
+        projected_turns: int | None,
+    ) -> CompactionDecision:
+        """Preview the verdict ``evaluate_compaction`` would reach, without
+        writing anything.
+
+        Same arithmetic, same mode, same reasoning — the only difference is
+        that no row lands in the ``compactions`` table, so an operator (or
+        the human review this mode's gate requires before compaction is
+        ever enabled) can see exactly what would happen, including a
+        would-be *accepted* verdict, before committing to anything.
+        """
+        return self._decide(turn, prefix_before, prefix_after, projected_turns)
+
     def _decide(
         self,
         turn: int,
