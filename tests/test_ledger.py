@@ -14,9 +14,11 @@ import pytest
 import laconic.ledger
 from laconic.ledger import (
     SCHEMA_VERSION,
+    InvalidSpanError,
     Ledger,
     ObservationKind,
     SchemaVersionError,
+    UnknownHandleError,
     compress_raw,
     content_sha,
     decompress_raw,
@@ -448,3 +450,125 @@ def test_the_raw_column_holds_compressed_bytes(tmp_path: Path) -> None:
     assert isinstance(blob, bytes)
     assert decompress_raw(blob) == raw
     assert len(blob) < len(raw)
+
+
+@pytest.fixture
+def populated(tmp_path: Path) -> Iterator[Ledger]:
+    with Ledger(tmp_path / "ledger.db", "s1") as ledger:
+        yield ledger
+
+
+def test_expand_returns_the_whole_payload_for_a_bare_handle(populated: Ledger) -> None:
+    raw = "line one\nline two\nline three\n"
+    populated.register(ObservationKind.FILE, "a.py", raw, "F1 outline", 1)
+    assert populated.expand("F1") == raw
+
+
+def test_expand_returns_exactly_the_requested_lines(populated: Ledger) -> None:
+    raw = "one\ntwo\nthree\nfour\nfive"
+    populated.register(ObservationKind.FILE, "a.py", raw, "F1 outline", 1)
+    assert populated.expand("F1:2-4") == "two\nthree\nfour"
+
+
+def test_expand_of_a_single_line_span_returns_that_line(populated: Ledger) -> None:
+    populated.register(ObservationKind.FILE, "a.py", "one\ntwo\nthree", "enc", 1)
+    assert populated.expand("F1:2-2") == "two"
+
+
+def test_expand_of_the_full_span_reconstructs_the_payload(populated: Ledger) -> None:
+    """Lines are newline-separated, so the full range is lossless."""
+    raw = "alpha\nbeta\n\ngamma\n"
+    record = populated.register(ObservationKind.FILE, "a.py", raw, "enc", 1)
+    line_count = raw.count("\n") + 1
+    assert populated.expand(f"{record.handle}:1-{line_count}") == raw
+
+
+def test_expand_preserves_carriage_returns_inside_a_span(populated: Ledger) -> None:
+    populated.register(ObservationKind.FILE, "a.py", "one\r\ntwo\r\nthree", "enc", 1)
+    assert populated.expand("F1:1-2") == "one\r\ntwo\r"
+
+
+def test_expand_of_an_unknown_handle_raises(populated: Ledger) -> None:
+    with pytest.raises(UnknownHandleError, match="F9"):
+        populated.expand("F9")
+
+
+def test_expand_of_an_unknown_handle_with_a_span_raises(populated: Ledger) -> None:
+    with pytest.raises(UnknownHandleError, match="F9"):
+        populated.expand("F9:1-2")
+
+
+def test_expand_of_a_handle_from_another_session_raises(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.db"
+    with Ledger(db_path, "s1") as first, Ledger(db_path, "s2") as second:
+        first.register(ObservationKind.FILE, "a.py", "content", "enc", 1)
+        with pytest.raises(UnknownHandleError):
+            second.expand("F1")
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "F1:",
+        "F1:2",
+        "F1:2-",
+        "F1:-2",
+        "F1:a-b",
+        "F1:2-4-6",
+        "F1:2 - 4",
+        "F1:\u0661-\u0662",  # Arabic-Indic digits: int() takes them, the ledger must not
+        "F1:" + "1" * 4400 + "-2",  # past CPython's integer conversion limit
+    ],
+)
+def test_expand_of_a_malformed_reference_raises(populated: Ledger, ref: str) -> None:
+    populated.register(ObservationKind.FILE, "a.py", "one\ntwo\nthree", "enc", 1)
+    with pytest.raises(InvalidSpanError, match="F1"):
+        populated.expand(ref)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "F1:0-2",
+        "F1:1-4",  # one line past the end: the off-by-one that truncates silently
+        "F1:4-4",
+        "F1:2-9",
+        "F1:4-2",
+        "F1:9-9",
+    ],
+)
+def test_expand_of_an_out_of_range_span_raises_instead_of_truncating(
+    populated: Ledger, ref: str
+) -> None:
+    """Silently returning fewer lines than asked for is the defect to prevent."""
+    populated.register(ObservationKind.FILE, "a.py", "one\ntwo\nthree", "enc", 1)
+    with pytest.raises(InvalidSpanError, match="1-3"):
+        populated.expand(ref)
+
+
+def test_an_unknown_handle_message_reads_cleanly(populated: Ledger) -> None:
+    """KeyError renders its argument with repr; this message reaches humans."""
+    populated.register(ObservationKind.FILE, "a.py", "content", "enc", 1)
+    with pytest.raises(UnknownHandleError) as raised:
+        populated.expand("F9")
+    assert str(raised.value) == "unknown handle: F9"
+
+
+def test_an_unknown_handle_raised_without_a_message_still_renders(populated: Ledger) -> None:
+    """The override must not turn a bare raise into "<exception str() failed>"."""
+    assert str(UnknownHandleError()) == str(KeyError())
+    assert str(UnknownHandleError("unknown handle", "F9")) == str(KeyError("unknown handle", "F9"))
+
+
+def test_expand_of_an_empty_payload_returns_it(populated: Ledger) -> None:
+    populated.register(ObservationKind.FILE, "a.py", "", "enc", 1)
+    assert populated.expand("F1") == ""
+
+
+def test_expand_reaches_content_registered_before_a_reopen(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.db"
+    raw = "kept\nacross\nprocesses\n"
+    with Ledger(db_path, "s1") as ledger:
+        ledger.register(ObservationKind.COMMAND, "pytest -q", raw, "B1", 1)
+    with Ledger(db_path, "s1") as reopened:
+        assert reopened.expand("B1:2-3") == "across\nprocesses"
