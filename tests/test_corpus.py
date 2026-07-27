@@ -7,11 +7,17 @@ from pathlib import Path
 
 import pytest
 
+from laconic.costs import session_cost
 from laconic.replay.corpus import (
+    COST_TOLERANCE_USD,
+    EXPECTATION_SCHEMA_VERSION,
     EmptyCorpusError,
+    Expectation,
     JsonValue,
     MalformedRecordError,
     Record,
+    compare_expectation,
+    expectation,
     find_transcripts,
     redact_record,
     redact_text,
@@ -493,3 +499,102 @@ def test_a_failing_move_leaves_no_staged_file(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         redact_transcript(source, destination)
     assert list(tmp_path.glob("*.redacting")) == []
+
+
+CORPUS_DIR = Path(__file__).parent / "corpus"
+EXPECTED_FILE = CORPUS_DIR / "expected.json"
+
+
+def _load_expected() -> Expectation:
+    loaded = json.loads(EXPECTED_FILE.read_text())
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def test_fixture_corpus_matches_committed_expected_values() -> None:
+    measured = expectation(scan_corpus([CORPUS_DIR]))
+    assert compare_expectation(_load_expected(), measured) == []
+
+
+def test_fixture_expected_values_are_the_current_schema() -> None:
+    assert _load_expected()["schema_version"] == EXPECTATION_SCHEMA_VERSION
+
+
+def test_fixture_cost_split_sums_to_one_hundred_percent() -> None:
+    shares = session_cost(scan_corpus([CORPUS_DIR]).usage).shares()
+    assert round(shares.total, 2) == 100.00
+
+
+def test_fixture_channel_total_matches_the_committed_channel_counters() -> None:
+    """Total is pinned to the committed counters, so a shift between channels fails."""
+    channels = scan_corpus([CORPUS_DIR]).channels
+    committed = _load_expected()["channels"]
+    assert isinstance(committed, dict)
+    expected_total = sum(
+        value
+        for key, value in committed.items()
+        if key != "fenced_code_in_prose" and isinstance(value, int)
+    )
+    assert channels.total == expected_total
+    assert channels.fenced_code_in_prose > 0
+    assert channels.total < expected_total + channels.fenced_code_in_prose
+
+
+def test_fixture_corpus_parses_cleanly() -> None:
+    result = scan_corpus([CORPUS_DIR])
+    assert result.malformed_lines == 0
+    assert result.transcripts == 3
+
+
+def test_fixture_reproduces_the_documented_session_shape() -> None:
+    """The fixture is only useful if it has the shape of a real session."""
+    result = scan_corpus([CORPUS_DIR])
+    channels = result.channels
+    shares = session_cost(result.usage).shares()
+    assert shares.cache_read > shares.cache_write > shares.output > shares.uncached_input
+    assert channels.tool_results > 10 * channels.prose
+    zero_prose = sum(1 for turn in channels.prose_per_turn if turn == 0)
+    assert zero_prose / len(channels.prose_per_turn) > 0.75
+    assert channels.result_chars_by_tool.most_common(1)[0][0] == "Read"
+
+
+def test_fixture_comparison_reports_a_drift_rather_than_passing() -> None:
+    expected = _load_expected()
+    channels = expected["channels"]
+    assert isinstance(channels, dict)
+    prose = channels["prose"]
+    assert isinstance(prose, int)
+    channels["prose"] = prose + 1
+    differences = compare_expectation(expected, expectation(scan_corpus([CORPUS_DIR])))
+    assert differences == [f"channels.prose: expected {prose + 1}, measured {prose}"]
+
+
+def test_fixture_corpus_holds_no_real_session_content() -> None:
+    """Committed fixtures are synthetic; nothing may leak a real machine."""
+    for transcript in sorted(CORPUS_DIR.glob("*.jsonl")):
+        text = transcript.read_text()
+        assert "/Users/" not in text
+        assert "/home/" not in text
+        assert str(Path.home()) not in text
+
+
+def test_fixture_cost_drift_beyond_tolerance_is_reported() -> None:
+    """COST_TOLERANCE_USD must be tight enough to catch a real accounting error."""
+    measured = expectation(scan_corpus([CORPUS_DIR]))
+    costs = measured["cost_usd"]
+    assert isinstance(costs, dict)
+    total = costs["total"]
+    assert isinstance(total, float)
+
+    within = json.loads(json.dumps(_load_expected()))
+    within["cost_usd"]["total"] = total + 0.1 * COST_TOLERANCE_USD
+    assert compare_expectation(within, measured) == []
+
+    beyond = json.loads(json.dumps(_load_expected()))
+    beyond["cost_usd"]["total"] = total + 10 * COST_TOLERANCE_USD
+    assert len(compare_expectation(beyond, measured)) == 1
+
+    # An absolute figure, so widening the constant cannot keep this passing.
+    real_error = json.loads(json.dumps(_load_expected()))
+    real_error["cost_usd"]["total"] = total + 0.01
+    assert len(compare_expectation(real_error, measured)) == 1
