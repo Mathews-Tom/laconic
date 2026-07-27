@@ -1,4 +1,4 @@
-"""Session transcript ingest and channel attribution.
+"""Session transcript ingest, channel attribution, and redaction.
 
 A corpus is a directory tree of newline-delimited JSON session transcripts
 (``*.jsonl``) as emitted by Claude Code and compatible agent harnesses. Ingest
@@ -8,12 +8,18 @@ decomposes every record into the four channels that make up a context window:
     tool_use args -- actions the agent emits
     prose         -- human-facing explanatory text, fenced code removed
     user prompts  -- what the human typed
+
+Redaction exists because the measurements that motivate Laconic were taken over
+private transcripts containing proprietary source. A redacted transcript keeps
+every channel size and every structural field, and loses the content.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -27,6 +33,15 @@ type Record = dict[str, JsonValue]
 TRANSCRIPT_GLOB = "*.jsonl"
 
 FENCED_CODE = re.compile(r"```.*?```", re.S)
+_REDACTABLE = re.compile(r"[^\W_]")
+_REDACTION_CHAR = "x"
+
+#: Structure the measurement reads, allowlisted per position rather than by
+#: name at arbitrary depth: a key called ``name`` inside a tool payload is the
+#: tool's own and carries content.
+_RECORD_STRUCTURAL_KEYS = frozenset({"type"})
+_MESSAGE_STRUCTURAL_KEYS = frozenset({"model"})
+_BLOCK_STRUCTURAL_KEYS = frozenset({"type", "name", "id", "tool_use_id"})
 
 #: ``ModelUsage.add_turn`` keyword -> transcript ``usage`` key.
 _TOKEN_FIELDS = {
@@ -254,6 +269,124 @@ def _ingest_user(
         channels.tool_results += len(text)
         name = tool_name_by_id.get(_as_str(block.get("tool_use_id")), "?")
         channels.result_chars_by_tool[name] += len(text)
+
+
+def redact_text(text: str) -> str:
+    """Replace every alphanumeric character with a filler character.
+
+    Punctuation, whitespace, and underscores survive, so the redacted string has
+    the same length as the original and the same JSON-escaped length. That is
+    what lets a redacted corpus reproduce the original channel sizes exactly.
+    """
+    return _REDACTABLE.sub(_REDACTION_CHAR, text)
+
+
+def redact_value(value: JsonValue) -> JsonValue:
+    """Redact every string in ``value``, whatever key it sits under.
+
+    No allowlist applies here. Callers use this for opaque payloads — tool
+    arguments and tool results — whose key names belong to the tool, not to the
+    transcript schema, and where a key called ``name`` or ``id`` is as likely to
+    hold a customer record as a structural label.
+    """
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_value(item) for key, item in value.items()}
+    return value
+
+
+def redact_record(record: Record) -> Record:
+    """Return ``record`` with content redacted and structure preserved.
+
+    Redaction is positional, not name-based: only the fields the measurement
+    reads at the positions it reads them — the record and block ``type``, the
+    ``role``, the ``model``, a tool ``name``, and the ids that attribute a tool
+    result to its call — survive. Everything else is redacted at every depth, so
+    a redacted transcript scans to exactly the same channel sizes and cost as
+    the original while carrying none of its values.
+
+    Object *keys* are preserved. A length-preserving key redaction would have to
+    be injective — two distinct keys of the same length collapsing to the same
+    filler would merge their entries and change the measurement — and no such
+    scheme is worth the risk here. Redact a transcript whose payload keys are
+    themselves private by hand.
+    """
+    redacted: Record = {}
+    for key, value in record.items():
+        if key in _RECORD_STRUCTURAL_KEYS and isinstance(value, str):
+            redacted[key] = value
+        elif key == "message" and isinstance(value, dict):
+            redacted[key] = _redact_message(value)
+        else:
+            redacted[key] = redact_value(value)
+    return redacted
+
+
+def _redact_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    redacted: dict[str, JsonValue] = {}
+    for key, value in message.items():
+        if key in _MESSAGE_STRUCTURAL_KEYS and isinstance(value, str):
+            redacted[key] = value
+        elif key == "content" and isinstance(value, list):
+            redacted[key] = [
+                _redact_block(item) if isinstance(item, dict) else redact_value(item)
+                for item in value
+            ]
+        else:
+            redacted[key] = redact_value(value)
+    return redacted
+
+
+def _redact_block(block: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    redacted: dict[str, JsonValue] = {}
+    for key, value in block.items():
+        if key in _BLOCK_STRUCTURAL_KEYS and isinstance(value, str):
+            redacted[key] = value
+        else:
+            redacted[key] = redact_value(value)
+    return redacted
+
+
+def redact_transcript(source: Path, destination: Path) -> int:
+    """Write a redacted copy of ``source`` to ``destination``.
+
+    The redacted records are staged in a sibling temporary file and moved into
+    place only after the whole source is read, so a refusal leaves no partial
+    artifact next to private data.
+
+    Returns:
+        The number of records written.
+
+    Raises:
+        ValueError: if ``destination`` is ``source``, which would truncate the
+            transcript before it could be read, or if ``source`` holds a line
+            that is not a JSON object — copying it through would leak it
+            unredacted.
+    """
+    if source.resolve() == destination.resolve():
+        raise ValueError(f"refusing to redact {source} onto itself")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, staged_name = tempfile.mkstemp(dir=destination.parent, suffix=".redacting")
+    staged = Path(staged_name)
+    written = 0
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            for line_number, record in iter_records(source):
+                if record is None:
+                    raise ValueError(
+                        f"{source}:{line_number} is not a JSON object; refusing to redact"
+                    )
+                out.write(_dumps(redact_record(record)))
+                out.write("\n")
+                written += 1
+        staged.replace(destination)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return written
 
 
 def _dumps(value: JsonValue) -> str:

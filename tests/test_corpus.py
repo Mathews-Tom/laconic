@@ -1,4 +1,4 @@
-"""Transcript ingest and channel attribution behaviour."""
+"""Transcript ingest, channel attribution, and redaction behaviour."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ from laconic.replay.corpus import (
     MalformedRecordError,
     Record,
     find_transcripts,
+    redact_record,
+    redact_text,
+    redact_transcript,
     scan,
     scan_corpus,
 )
@@ -273,3 +276,220 @@ def test_a_corpus_with_no_channel_content_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(EmptyCorpusError, match="no channel content"):
         scan_corpus([tmp_path])
+
+
+def test_redaction_removes_words_but_keeps_length() -> None:
+    original = "def load_customer(id: str) -> None:  # ACME internal"
+    redacted = redact_text(original)
+    assert len(redacted) == len(original)
+    assert "load_customer" not in redacted
+    assert "ACME" not in redacted
+    assert redacted.count("(") == original.count("(")
+
+
+def test_redaction_preserves_structural_fields() -> None:
+    """Block structure survives; tool arguments never do, whatever they are named."""
+    record: Record = {
+        "type": "assistant",
+        "message": {
+            "model": "claude-sonnet-5",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Grep",
+                    "input": {
+                        "pattern": "AcmeCorp",
+                        "type": "py",
+                        "name": "customer_ledger",
+                    },
+                }
+            ],
+            "usage": {"output_tokens": 12},
+        },
+    }
+    redacted = redact_record(record)
+    message = redacted["message"]
+    assert isinstance(message, dict)
+    assert message["model"] == "claude-sonnet-5"
+    assert message["usage"] == {"output_tokens": 12}
+    blocks = message["content"]
+    assert isinstance(blocks, list)
+    block = blocks[0]
+    assert isinstance(block, dict)
+    assert block["type"] == "tool_use"
+    assert block["name"] == "Grep"
+    assert block["id"] == "t1"
+    assert block["input"] == {"pattern": "xxxxxxxx", "type": "xx", "name": "xxxxxxxx_xxxxxx"}
+
+
+def test_redacted_corpus_reproduces_original_channel_sizes(tmp_path: Path) -> None:
+    records: list[Record] = [
+        _assistant(
+            content=[
+                {"type": "text", "text": "Renaming Widget.\n```py\nx = 1\n```\ndone."},
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Edit",
+                    "input": {"path": "src/widget.py", "body": 'a "quoted" line\n\ttab'},
+                },
+            ]
+        ),
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": "applied to src/widget.py\n",
+                    }
+                ]
+            },
+        },
+        {"type": "user", "message": {"content": "now update the caller"}},
+    ]
+    source = _write_transcript(tmp_path / "raw.jsonl", records)
+    target = tmp_path / "redacted.jsonl"
+
+    assert redact_transcript(source, target) == len(records)
+
+    before = scan([source]).channels
+    after = scan([target]).channels
+    assert (after.prose, after.fenced_code_in_prose) == (
+        before.prose,
+        before.fenced_code_in_prose,
+    )
+    assert (after.tool_args, after.tool_results, after.user_prompts) == (
+        before.tool_args,
+        before.tool_results,
+        before.user_prompts,
+    )
+    assert after.result_chars_by_tool == before.result_chars_by_tool
+    assert "widget" not in target.read_text()
+
+
+def test_redacting_a_malformed_transcript_fails_loudly(tmp_path: Path) -> None:
+    source = tmp_path / "raw.jsonl"
+    source.write_text('{"type": "user"}\nnot json\n')
+    with pytest.raises(ValueError, match="refusing to redact"):
+        redact_transcript(source, tmp_path / "out.jsonl")
+
+
+def test_redaction_preserves_channel_sizes_for_non_ascii_content(tmp_path: Path) -> None:
+    """Redaction exists for real transcripts, which are not ASCII."""
+    records: list[Record] = [
+        _assistant(
+            content=[
+                {"type": "text", "text": "Le café résiste. 漢字も。"},
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Edit",
+                    "input": {"path": "src/wîdget.py", "body": "漢字 identifier"},
+                },
+            ]
+        ),
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": "café 漢"}],
+                    }
+                ]
+            },
+        },
+    ]
+    source = _write_transcript(tmp_path / "raw.jsonl", records)
+    target = tmp_path / "redacted.jsonl"
+    redact_transcript(source, target)
+
+    before = scan([source]).channels
+    after = scan([target]).channels
+    assert (after.tool_args, after.tool_results) == (before.tool_args, before.tool_results)
+    assert after.prose == before.prose
+    assert "café" not in target.read_text()
+    assert "漢字" not in target.read_text()
+
+
+def test_redacting_a_transcript_onto_itself_is_refused(tmp_path: Path) -> None:
+    source = _write_transcript(
+        tmp_path / "raw.jsonl", [{"type": "user", "message": {"content": "private"}}]
+    )
+    with pytest.raises(ValueError, match="onto itself"):
+        redact_transcript(source, source)
+    assert "private" in source.read_text()
+
+
+def test_a_refused_redaction_leaves_no_output_file(tmp_path: Path) -> None:
+    source = tmp_path / "raw.jsonl"
+    source.write_text('{"type": "user", "message": {"content": "first"}}\nnot json\n')
+    target = tmp_path / "out.jsonl"
+    with pytest.raises(ValueError, match="refusing to redact"):
+        redact_transcript(source, target)
+    assert not target.exists()
+    assert list(tmp_path.glob("*.redacting")) == []
+
+
+def test_redaction_does_not_trust_key_names_inside_a_tool_result(tmp_path: Path) -> None:
+    """A tool result is opaque payload: no key name inside it earns a pass."""
+    record: Record = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {
+                            "type": "json",
+                            "name": "AcmeCorp Holdings",
+                            "id": "cus_9Hx2VaultKey",
+                            "model": "internal-pricing-v3",
+                            "role": "chief-revenue-officer",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    serialised = json.dumps(redact_record(record))
+    for secret in ("AcmeCorp", "VaultKey", "internal-pricing", "revenue"):
+        assert secret not in serialised
+    assert '"type": "tool_result"' in serialised
+    assert '"tool_use_id": "t1"' in serialised
+
+
+def test_redaction_covers_the_usage_block(tmp_path: Path) -> None:
+    """Only the counters are structural; a string in `usage` is still content."""
+    record: Record = {
+        "type": "assistant",
+        "message": {
+            "model": "claude-sonnet-5",
+            "content": [],
+            "usage": {"output_tokens": 12, "service_tier": "AcmeCorp-dedicated"},
+        },
+    }
+    message = redact_record(record)["message"]
+    assert isinstance(message, dict)
+    usage = message["usage"]
+    assert isinstance(usage, dict)
+    assert usage["output_tokens"] == 12
+    assert usage["service_tier"] == "xxxxxxxx-xxxxxxxxx"
+
+
+def test_a_failing_move_leaves_no_staged_file(tmp_path: Path) -> None:
+    """The staging contract holds even when the move itself fails."""
+    source = _write_transcript(
+        tmp_path / "raw.jsonl", [{"type": "user", "message": {"content": "private"}}]
+    )
+    destination = tmp_path / "out.jsonl"
+    destination.mkdir()
+    with pytest.raises(OSError):
+        redact_transcript(source, destination)
+    assert list(tmp_path.glob("*.redacting")) == []
