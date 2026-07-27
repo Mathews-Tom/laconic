@@ -1,8 +1,11 @@
-"""CLI surface: the measure command and its exit codes."""
+"""CLI surface: the measure command, its exit codes, and the script shim."""
 
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,8 @@ from laconic.cli import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS_DIR = REPO_ROOT / "tests" / "corpus"
 EXPECTED_FILE = CORPUS_DIR / "expected.json"
+SHIM = REPO_ROOT / "scripts" / "measure_session_composition.py"
+CONSOLE_SCRIPT = shutil.which("laconic")
 
 
 def test_version_is_the_packaged_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -93,6 +98,26 @@ def test_measure_on_a_corpus_without_usage_exits_non_zero(
     )
     assert main(["measure", str(tmp_path)]) == 3
     assert "no assistant usage records" in capsys.readouterr().err
+
+
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+
+
+def test_shim_output_is_identical_to_the_measure_command() -> None:
+    """`docs/overview.md` §2 cites the script; both paths must agree."""
+    via_script = _run([sys.executable, str(SHIM), str(CORPUS_DIR)])
+    assert CONSOLE_SCRIPT is not None, "the laconic console script must be installed"
+    via_cli = _run([CONSOLE_SCRIPT, "measure", str(CORPUS_DIR)])
+    assert via_script.returncode == EXIT_OK
+    assert via_cli.returncode == EXIT_OK
+    assert via_script.stdout == via_cli.stdout
+
+
+def test_shim_propagates_a_failing_exit_code(tmp_path: Path) -> None:
+    result = _run([sys.executable, str(SHIM), str(tmp_path)])
+    assert result.returncode == EXIT_NO_CORPUS
+    assert "no *.jsonl transcripts found" in result.stderr
 
 
 def test_measure_reports_the_headline_prose_figures(
