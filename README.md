@@ -1,8 +1,15 @@
 # Laconic – Compress what a coding agent carries, not what it says.
 
-> **Status: design stage.** This repository currently contains the system design and the measurement work behind it. There is no installable package yet.
+> **Status: early package release.** `laconic` 0.0.1 establishes the importable package, CLI, and verification surface; codec behavior remains design-stage work.
 
 Most of what fills a coding agent's context window is never read by a human — file contents, command output, patches, search hits — and it is re-ingested on every turn of a session. Laconic is a codec for that traffic: it re-encodes observations and actions at the tool boundary, keeps every elision recoverable, and renders prose for a human only on demand.
+
+## Install
+
+```bash
+uv tool install laconic
+laconic --help
+```
 
 ## Documentation
 
