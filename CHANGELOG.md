@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-27
+
 ### Added
 
 - `laconic measure [PATH ...]` decomposes a corpus of session transcripts into the four context-window channels — tool results, tool call arguments, human-facing prose, and human prompts — and weights the result by real per-model pricing. `--expect FILE` checks the measurement against a committed expected-values file and exits non-zero on any difference.
@@ -29,5 +31,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Initial packaging, lint, strict typing, test, and CI surface, with an importable `laconic` package and a `laconic` console script exposing `--version` and `--help`.
 
-[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.0.1...v0.2.0
 [0.0.1]: https://github.com/Mathews-Tom/Laconic/releases/tag/v0.0.1
