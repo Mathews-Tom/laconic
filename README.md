@@ -26,4 +26,4 @@ Run it against your own sessions before taking any number in `docs/` on faith.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).
