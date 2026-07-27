@@ -8,13 +8,15 @@ that produced it, falling back to
 :class:`~laconic.codec.encoders.fallback.FallbackEncoder` for any tool
 name it does not recognize — so an unfamiliar tool always encodes, never
 raises. The per-shape tool-name sets below grow as later PRs in this
-milestone add ``CommandEncoder`` and ``SearchEncoder``.
+milestone add ``SearchEncoder``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
+from laconic.codec.encoders._elision import DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL, DEFAULT_MAX_ERRORS
+from laconic.codec.encoders.command import CommandEncoder
 from laconic.codec.encoders.fallback import FallbackEncoder
 from laconic.codec.encoders.file import FileEncoder
 from laconic.codec.outline import Outliner
@@ -24,6 +26,10 @@ from laconic.ledger import Ledger, Record
 #: Tool names whose result is a file read, routed to
 #: :class:`~laconic.codec.encoders.file.FileEncoder`.
 FILE_TOOLS = frozenset({"Read"})
+
+#: Tool names whose result is command output, routed to
+#: :class:`~laconic.codec.encoders.command.CommandEncoder`.
+COMMAND_TOOLS = frozenset({"Bash"})
 
 
 class ObservationCodec:
@@ -35,9 +41,17 @@ class ObservationCodec:
         *,
         outliner: Outliner | None = None,
         span_budget: int = DEFAULT_SPAN_BUDGET,
+        keep_head: int = DEFAULT_KEEP_HEAD,
+        keep_tail: int = DEFAULT_KEEP_TAIL,
+        max_errors: int = DEFAULT_MAX_ERRORS,
     ) -> None:
         self._file = FileEncoder(ledger, outliner, span_budget=span_budget)
-        self._fallback = FallbackEncoder(ledger)
+        self._command = CommandEncoder(
+            ledger, keep_head=keep_head, keep_tail=keep_tail, max_errors=max_errors
+        )
+        self._fallback = FallbackEncoder(
+            ledger, keep_head=keep_head, keep_tail=keep_tail, max_errors=max_errors
+        )
 
     def encode(
         self,
@@ -56,4 +70,6 @@ class ObservationCodec:
         """
         if tool_name in FILE_TOOLS:
             return self._file.encode(subject, raw, request, turn=turn)
+        if tool_name in COMMAND_TOOLS:
+            return self._command.encode(subject, raw, request, turn=turn)
         return self._fallback.encode(subject, raw, request, turn=turn)

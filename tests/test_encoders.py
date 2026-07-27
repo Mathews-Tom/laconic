@@ -1,5 +1,5 @@
-"""The file, fallback, and dispatch observation encoders, plus span
-resolution.
+"""The file, fallback, command, and dispatch observation encoders, plus
+span resolution.
 
 Test names carry the ``-k`` selector the milestone's PLANNED STACK uses to
 scope each PR's own verification: ``span`` for
@@ -7,7 +7,8 @@ scope each PR's own verification: ``span`` for
 :mod:`laconic.codec.encoders.file`, ``fallback`` for
 :mod:`laconic.codec.encoders._elision` and
 :mod:`laconic.codec.encoders.fallback` (M5 PR-1, which also introduces
-:mod:`laconic.codec.observe`'s dispatch).
+:mod:`laconic.codec.observe`'s dispatch), ``command`` for
+:mod:`laconic.codec.encoders.command` (M5 PR-2).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from laconic.codec.encoders._elision import (
     elide_middle,
     looks_like_error,
 )
+from laconic.codec.encoders.command import CommandEncoder
 from laconic.codec.encoders.fallback import FallbackEncoder
 from laconic.codec.encoders.file import FileEncoder
 from laconic.codec.observe import ObservationCodec
@@ -680,6 +682,115 @@ def test_fallback_encoder_never_drops_a_non_zero_exit_code_regardless_of_elision
         assert f"exit {exit_code}" in record.encoded
 
 
+# --- CommandEncoder ----------------------------------------------------------
+
+
+def test_command_encoder_registers_the_observation_under_the_command_kind() -> None:
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("uv run pytest -q", "1 passed", {}, turn=0)
+        assert record.kind == ObservationKind.COMMAND
+        assert record.handle.startswith("B")
+
+
+def test_command_encoder_encoding_is_recoverable_via_the_ledger() -> None:
+    with memory_ledger() as ledger:
+        raw = "\n".join(f"test_{i} PASSED" for i in range(400))
+        record = CommandEncoder(ledger).encode("pytest -v", raw, {}, turn=0)
+        assert ledger.expand(record.handle) == raw
+
+
+def test_command_encoder_never_elides_short_output() -> None:
+    with memory_ledger() as ledger:
+        raw = "ok"
+        record = CommandEncoder(ledger).encode("echo ok", raw, {}, turn=0)
+        assert record.encoded == raw
+
+
+def test_command_encoder_elides_a_long_middle_with_a_marker() -> None:
+    with memory_ledger() as ledger:
+        raw = "\n".join(f"line {i}" for i in range(500))
+        record = CommandEncoder(ledger).encode("some-noisy-command", raw, {}, turn=0)
+        assert "lines elided" in record.encoded
+        assert record.encoded_chars < record.raw_chars
+
+
+def test_command_encoder_collapses_consecutive_duplicate_lines() -> None:
+    with memory_ledger() as ledger:
+        raw = "\n".join(["ok"] * 5)
+        record = CommandEncoder(ledger).encode("some-command", raw, {}, turn=0)
+        assert "  [x5]" in record.encoded
+
+
+def test_command_encoder_omits_the_exit_header_when_exit_code_is_zero() -> None:
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("ok", "done", {"exit_code": 0}, turn=0)
+        assert record.encoded == "done"
+
+
+def test_command_encoder_omits_the_exit_header_when_no_exit_code_is_given() -> None:
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("ok", "done", {}, turn=0)
+        assert record.encoded == "done"
+
+
+def test_command_encoder_shows_a_non_zero_exit_header_unconditionally() -> None:
+    with memory_ledger() as ledger:
+        raw = "\n".join(f"line {i}" for i in range(500))
+        record = CommandEncoder(ledger).encode("failing-command", raw, {"exit_code": 1}, turn=0)
+        assert record.encoded.startswith("exit 1\n")
+
+
+@pytest.mark.parametrize("exit_code", [True, "1", 1.0, None])
+def test_command_encoder_ignores_a_malformed_exit_code(exit_code: object) -> None:
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("ok", "done", {"exit_code": exit_code}, turn=0)
+        assert record.encoded == "done"
+
+
+def test_command_encoder_is_deterministic_across_encoder_instances() -> None:
+    with memory_ledger() as first_ledger, memory_ledger() as second_ledger:
+        raw = "\n".join(f"line {i}" for i in range(300))
+        request = {"exit_code": 1}
+        first = CommandEncoder(first_ledger).encode("cmd", raw, request, turn=0)
+        second = CommandEncoder(second_ledger).encode("cmd", raw, request, turn=0)
+        assert first.encoded == second.encoded
+
+
+@PROPERTY
+@example(raw="\ud800")
+@example(raw="hello \udc00 world")
+@given(raw=st.text(st.characters(), max_size=2000))
+def test_command_encoder_never_raises_for_arbitrary_content(raw: str) -> None:
+    with memory_ledger() as ledger:
+        CommandEncoder(ledger).encode("cmd", raw, {}, turn=0)
+
+
+@PROPERTY
+@given(
+    before=st.lists(_FILLER_LINE, min_size=0, max_size=150),
+    after=st.lists(_FILLER_LINE, min_size=0, max_size=150),
+    error=st.sampled_from(_ERROR_SAMPLES),
+)
+def test_command_encoder_never_drops_an_injected_error_line(
+    before: list[str], after: list[str], error: str
+) -> None:
+    raw = "\n".join([*before, error, *after])
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("cmd", raw, {}, turn=0)
+        assert error in record.encoded
+
+
+@PROPERTY
+@given(exit_code=st.integers(min_value=1, max_value=255))
+def test_command_encoder_never_drops_a_non_zero_exit_code_regardless_of_elision(
+    exit_code: int,
+) -> None:
+    raw = "\n".join(f"line {i}" for i in range(500))
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("cmd", raw, {"exit_code": exit_code}, turn=0)
+        assert f"exit {exit_code}" in record.encoded
+
+
 # --- ObservationCodec dispatch -----------------------------------------------
 
 
@@ -687,6 +798,12 @@ def test_observation_codec_dispatches_read_to_the_file_encoder() -> None:
     with memory_ledger() as ledger:
         record = ObservationCodec(ledger).encode("Read", "f.py", PYTHON_SOURCE, {}, turn=0)
         assert record.kind == ObservationKind.FILE
+
+
+def test_observation_codec_dispatches_bash_to_the_command_encoder() -> None:
+    with memory_ledger() as ledger:
+        record = ObservationCodec(ledger).encode("Bash", "uv run pytest -q", "1 passed", {}, turn=0)
+        assert record.kind == ObservationKind.COMMAND
 
 
 def test_observation_codec_dispatches_an_unrecognized_tool_to_the_fallback_encoder() -> None:
