@@ -1,0 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "laconic"
+version = "0.0.0"
+description = "A context-loop codec for coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
