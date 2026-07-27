@@ -15,6 +15,7 @@ would accept.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -76,6 +77,45 @@ CREATE TABLE IF NOT EXISTS compactions (
     PRIMARY KEY (session_id, turn)
 );
 """
+
+
+#: A span reference is ``<handle>:<first>-<last>``, both 1-based, inclusive.
+#: ASCII digits only, and bounded: ``\d`` would accept Arabic-Indic digits the
+#: ledger never mints, and an unbounded run of them hits CPython's integer
+#: conversion limit with a ValueError that is not an ``InvalidSpanError``.
+_SPAN = re.compile(r"([0-9]{1,9})-([0-9]{1,9})")
+
+
+class UnknownHandleError(KeyError):
+    """Raised when a reference names a handle this session never minted."""
+
+    def __str__(self) -> str:
+        # KeyError renders its argument with repr, which would wrap this
+        # message in quotes on its way to a CLI, a log, or an MCP client.
+        # Anything but the single-message form keeps KeyError's rendering.
+        if len(self.args) != 1:
+            return super().__str__()
+        return str(self.args[0])
+
+
+class InvalidSpanError(ValueError):
+    """Raised when a span is malformed or reaches past the stored payload."""
+
+
+def _select_lines(raw: str, span: str, ref: str) -> list[str]:
+    """Return the 1-based inclusive line range ``span`` names.
+
+    Lines are the newline-separated pieces of the payload, so joining every
+    line back together reproduces the payload exactly, trailing newline and
+    all.
+    """
+    if (match := _SPAN.fullmatch(span)) is None:
+        raise InvalidSpanError(f"malformed reference: {ref!r}, expected <handle>:<first>-<last>")
+    first, last = int(match[1]), int(match[2])
+    lines = raw.split("\n")
+    if first < 1 or last < first or last > len(lines):
+        raise InvalidSpanError(f"span {first}-{last} is outside 1-{len(lines)} for {ref!r}")
+    return lines[first - 1 : last]
 
 
 class ObservationKind(StrEnum):
@@ -265,6 +305,23 @@ class Ledger:
             (self._session, handle),
         ).fetchone()
         return None if row is None else _record_from(row)
+
+    def expand(self, ref: str) -> str:
+        """Resolve ``F3`` or ``F3:61-94`` back to the raw payload.
+
+        This is the escape hatch that makes every elision safe: it is exposed
+        to the model as a tool and to the human as a CLI verb. Every way of
+        asking for something that is not there fails loudly, because a
+        recovery path that quietly returns less than it was asked for is the
+        exact defect the ledger exists to prevent.
+        """
+        handle, colon, span = ref.partition(":")
+        record = self.get(handle)
+        if record is None:
+            raise UnknownHandleError(f"unknown handle: {handle}")
+        if not colon:
+            return record.raw
+        return "\n".join(_select_lines(record.raw, span, ref))
 
     def _find(self, subject: str, sha: str) -> Record | None:
         row = self._db.execute(
