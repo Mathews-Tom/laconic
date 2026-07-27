@@ -7,8 +7,9 @@ about and routes each observation to the encoder matching the tool name
 that produced it, falling back to
 :class:`~laconic.codec.encoders.fallback.FallbackEncoder` for any tool
 name it does not recognize — so an unfamiliar tool always encodes, never
-raises. The per-shape tool-name sets below grow as later PRs in this
-milestone add ``SearchEncoder``.
+raises. Every tool shape this build knows about is now dispatched: files,
+commands, and search results, with fallback as the safe default for
+anything else.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from laconic.codec.encoders._elision import DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL
 from laconic.codec.encoders.command import CommandEncoder
 from laconic.codec.encoders.fallback import FallbackEncoder
 from laconic.codec.encoders.file import FileEncoder
+from laconic.codec.encoders.search import SearchEncoder
 from laconic.codec.outline import Outliner
 from laconic.codec.span import DEFAULT_SPAN_BUDGET
 from laconic.ledger import Ledger, Record
@@ -30,6 +32,10 @@ FILE_TOOLS = frozenset({"Read"})
 #: Tool names whose result is command output, routed to
 #: :class:`~laconic.codec.encoders.command.CommandEncoder`.
 COMMAND_TOOLS = frozenset({"Bash"})
+
+#: Tool names whose result is a search-shaped list of matches, routed to
+#: :class:`~laconic.codec.encoders.search.SearchEncoder`.
+SEARCH_TOOLS = frozenset({"Grep", "Glob"})
 
 
 class ObservationCodec:
@@ -49,6 +55,7 @@ class ObservationCodec:
         self._command = CommandEncoder(
             ledger, keep_head=keep_head, keep_tail=keep_tail, max_errors=max_errors
         )
+        self._search = SearchEncoder(ledger)
         self._fallback = FallbackEncoder(
             ledger, keep_head=keep_head, keep_tail=keep_tail, max_errors=max_errors
         )
@@ -72,4 +79,6 @@ class ObservationCodec:
             return self._file.encode(subject, raw, request, turn=turn)
         if tool_name in COMMAND_TOOLS:
             return self._command.encode(subject, raw, request, turn=turn)
+        if tool_name in SEARCH_TOOLS:
+            return self._search.encode(subject, raw, request, turn=turn)
         return self._fallback.encode(subject, raw, request, turn=turn)

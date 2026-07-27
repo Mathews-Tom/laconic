@@ -10,7 +10,9 @@ scope each PR's own verification: ``span`` for
 :mod:`laconic.codec.observe`'s dispatch), ``command`` for
 :mod:`laconic.codec.encoders.command` (M5 PR-2), ``recognizer`` for the
 structured pytest/build-log recognizers layered into
-:mod:`laconic.codec.encoders.command` (M5 PR-3).
+:mod:`laconic.codec.encoders.command` (M5 PR-3), ``search`` for
+:mod:`laconic.codec.encoders.search` (M5 PR-4, the final encoder in the
+milestone).
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from laconic.codec.encoders._elision import (
 from laconic.codec.encoders.command import CommandEncoder
 from laconic.codec.encoders.fallback import FallbackEncoder
 from laconic.codec.encoders.file import FileEncoder
+from laconic.codec.encoders.search import SearchEncoder
 from laconic.codec.observe import ObservationCodec
 from laconic.codec.outline import Outline, Symbol
 from laconic.codec.span import (
@@ -914,6 +917,157 @@ def test_command_encoder_recognizer_still_shows_a_non_zero_exit_header() -> None
         assert record.encoded.startswith("exit 1\npytest:")
 
 
+# --- SearchEncoder --------------------------------------------------------
+
+
+def test_search_encoder_registers_the_observation_under_the_search_kind() -> None:
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("pattern", "src/a.py:1:match", {}, turn=0)
+        assert record.kind == ObservationKind.SEARCH
+        assert record.handle.startswith("S")
+
+
+def test_search_encoder_encoding_is_recoverable_via_the_ledger() -> None:
+    with memory_ledger() as ledger:
+        raw = "\n".join(f"src/a.py:{i}:match {i}" for i in range(30))
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert ledger.expand(record.handle) == raw
+
+
+def test_search_encoder_interns_a_repeated_path_once() -> None:
+    with memory_ledger() as ledger:
+        raw = "src/a.py:1:first match\nsrc/a.py:5:second match\nsrc/b.py:1:third match"
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert record.encoded.count("p0=src/a.py") == 1
+        assert record.encoded.count("p1=src/b.py") == 1
+        assert "p0:1" in record.encoded
+        assert "p0:5" in record.encoded
+        assert "p1:1" in record.encoded
+
+
+def test_search_encoder_reports_hit_and_file_counts() -> None:
+    with memory_ledger() as ledger:
+        raw = "src/a.py:1:x\nsrc/a.py:2:y\nsrc/b.py:1:z"
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert "3 hits, 2 files" in record.encoded
+
+
+def test_search_encoder_handles_a_path_message_shape_with_no_line_number() -> None:
+    with memory_ledger() as ledger:
+        raw = "encoder/adapter_0.py: ok\ncache/registry_1.py: ok"
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert "2 hits, 2 files" in record.encoded
+        assert "p0  ok" in record.encoded
+        assert "p1  ok" in record.encoded
+
+
+def test_search_encoder_preserves_an_unparseable_line_verbatim() -> None:
+    with memory_ledger() as ledger:
+        raw = "no matches found"
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert "no matches found" in record.encoded
+        assert "0 hits, 0 files" in record.encoded
+
+
+def test_search_encoder_handles_empty_content_without_raising() -> None:
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("pattern", "", {}, turn=0)
+        assert ledger.expand(record.handle) == ""
+
+
+def test_search_encoder_is_deterministic_across_encoder_instances() -> None:
+    with memory_ledger() as first_ledger, memory_ledger() as second_ledger:
+        raw = "src/a.py:1:x\nsrc/b.py:2:y"
+        first = SearchEncoder(first_ledger).encode("pattern", raw, {}, turn=0)
+        second = SearchEncoder(second_ledger).encode("pattern", raw, {}, turn=0)
+        assert first.encoded == second.encoded
+
+
+def test_search_encoder_interns_the_whole_windows_drive_path_not_just_the_letter() -> None:
+    raw = (
+        "C:\\src\\app.py:12:def handler():\n"
+        "C:\\src\\app.py:47:handler()\n"
+        "D:\\lib\\util.py:7:from tokens import handler"
+    )
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("handler", raw, {}, turn=0)
+        assert "3 hits, 2 files" in record.encoded
+        assert "p0=C:\\src\\app.py" in record.encoded
+        assert "p1=D:\\lib\\util.py" in record.encoded
+
+
+def test_search_encoder_does_not_intern_a_ripgrep_diagnostic_as_a_path() -> None:
+    """A word with no ``/``/``\\``/extension before a colon (``rg``) is not
+    a path — treating it as one would render a ripgrep failure as a fake
+    search hit and inflate the hit count."""
+    raw = (
+        "rg: ./missing: No such file or directory\n"
+        "src/app.py:10:real match\n"
+        "rg: No files were searched"
+    )
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert "1 hits, 1 files" in record.encoded
+        assert "rg: ./missing: No such file or directory" in record.encoded
+        assert "rg: No files were searched" in record.encoded
+
+
+def test_search_encoder_does_not_intern_a_prose_header_as_a_path() -> None:
+    raw = "Search results for pattern: handler\nsrc/app.py:10:match"
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        assert "1 hits, 1 files" in record.encoded
+        assert "Search results for pattern: handler" in record.encoded
+
+
+def test_search_encoder_counts_a_bare_glob_path_as_a_hit() -> None:
+    raw = "/proj/src/a.py\n/proj/src/b.py\n/proj/tests/c.py"
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("**/*.py", raw, {}, turn=0)
+        assert "3 hits, 3 files" in record.encoded
+        assert "p0=/proj/src/a.py" in record.encoded
+        assert "p2=/proj/tests/c.py" in record.encoded
+
+
+@PROPERTY
+@example(raw="\ud800")
+@example(raw="hello \udc00 world")
+@given(raw=st.text(st.characters(), max_size=2000))
+def test_search_encoder_never_raises_for_arbitrary_content(raw: str) -> None:
+    with memory_ledger() as ledger:
+        SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+
+
+_SEARCH_PATHS = st.sampled_from(["src/a.py", "src/b.py", "src/c.py"])
+_SEARCH_TEXTS = st.sampled_from(["needle found", "match here", "hit again", "another one"])
+
+
+@PROPERTY
+@given(
+    hits=st.lists(
+        st.tuples(_SEARCH_PATHS, st.integers(min_value=1, max_value=999), _SEARCH_TEXTS),
+        min_size=1,
+        max_size=20,
+    )
+)
+def test_search_encoder_never_drops_a_matched_line_text(hits: list[tuple[str, int, str]]) -> None:
+    raw = "\n".join(f"{path}:{line}:{text}" for path, line, text in hits)
+    with memory_ledger() as ledger:
+        record = SearchEncoder(ledger).encode("pattern", raw, {}, turn=0)
+        for _path, _line, text in hits:
+            assert text in record.encoded
+        assert ledger.expand(record.handle) == raw
+
+
+@PROPERTY
+@given(raw=st.text(st.characters(), max_size=500))
+def test_search_encoder_is_deterministic(raw: str) -> None:
+    with memory_ledger() as first_ledger, memory_ledger() as second_ledger:
+        first = SearchEncoder(first_ledger).encode("pattern", raw, {}, turn=0)
+        second = SearchEncoder(second_ledger).encode("pattern", raw, {}, turn=0)
+        assert first.encoded == second.encoded
+
+
 # --- ObservationCodec dispatch -----------------------------------------------
 
 
@@ -927,6 +1081,18 @@ def test_observation_codec_dispatches_bash_to_the_command_encoder() -> None:
     with memory_ledger() as ledger:
         record = ObservationCodec(ledger).encode("Bash", "uv run pytest -q", "1 passed", {}, turn=0)
         assert record.kind == ObservationKind.COMMAND
+
+
+def test_observation_codec_dispatches_grep_to_the_search_encoder() -> None:
+    with memory_ledger() as ledger:
+        record = ObservationCodec(ledger).encode("Grep", "pattern", "src/a.py:1:match", {}, turn=0)
+        assert record.kind == ObservationKind.SEARCH
+
+
+def test_observation_codec_dispatches_glob_to_the_search_encoder() -> None:
+    with memory_ledger() as ledger:
+        record = ObservationCodec(ledger).encode("Glob", "*.py", "src/a.py\nsrc/b.py", {}, turn=0)
+        assert record.kind == ObservationKind.SEARCH
 
 
 def test_observation_codec_dispatches_an_unrecognized_tool_to_the_fallback_encoder() -> None:

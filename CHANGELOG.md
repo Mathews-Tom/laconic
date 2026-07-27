@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- The command observation encoder (`laconic.codec.encoders.command.CommandEncoder`): error-salient head/tail elision for `Bash` results, backed by a shared elision engine (`laconic.codec.encoders._elision`) that keeps every stderr, non-zero-exit, traceback, exception, or failing-assertion line either shown directly in the encoded output or counted in a visible marker — never silently dropped — wherever in the output it falls, with the complete payload always one `expand` call away regardless. A non-zero exit status renders as an unconditional `exit N` header line neither the recognizer nor the elision pass ever touches. Consecutive duplicate lines collapse to one instance with a `[xN]` repeat count folded in, preserving the order of every surviving line. Structured recognizers summarize recognized pytest and build-tool (mypy/ruff/tsc/cargo/clang-shaped) output instead of truncating it — but only once the input is long enough that generic elision would have applied anyway, so recognizing a tool's shape never makes error visibility worse than not recognizing it.
+- The fallback observation encoder (`laconic.codec.encoders.fallback.FallbackEncoder`): the safe default for any tool this build does not recognize, sharing the same error-salient elision engine and non-zero-exit-code header as `CommandEncoder` so an unfamiliar tool's output is never silently truncated past its errors or its exit status.
+- The search observation encoder (`laconic.codec.encoders.search.SearchEncoder`): path-interned, tabular encoding of `Grep`/`Glob`-shaped output — each distinct path is named once in a legend and referenced by a short local index (`p0`, `p1`, ...) on every matching row, instead of repeating the full path per match. Never elides; every input line becomes exactly one output line.
+- The observation codec dispatch layer (`laconic.codec.observe.ObservationCodec`): routes an observation to the encoder matching the tool name that produced it — `Read` to `FileEncoder`, `Bash` to `CommandEncoder`, `Grep`/`Glob` to `SearchEncoder` — and falls back to `FallbackEncoder` for any other name, so an unrecognized tool always encodes rather than raising.
+
 ## [0.2.0] — 2026-07-27
 
 ### Added
