@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Session transcript ingest (`laconic.replay.corpus`): sorted transcript discovery, channel attribution, per-model token accounting, and redaction that removes content while preserving channel sizes exactly, so a private transcript can become a committable fixture.
 - A synthetic fixture corpus under `tests/corpus` with committed expected values and a documented transcript schema.
 - A PEP 561 `py.typed` marker, so the package's types reach consumers.
+- The handle ledger (`laconic.ledger`): a content-addressed, session-scoped SQLite store that keeps every observation whole while the codec surfaces only part of it. `register` mints a short model-typeable handle (`F1`, `B7`, `S2`) and reuses it when byte-identical content is re-observed under the same subject; `get` resolves a handle; `expand` recovers the whole payload or a `handle:first-last` line range. Unknown handles and out-of-range spans raise instead of returning empty. Raw payloads are stored zstd-compressed.
+- `zstandard` is now a runtime dependency: the ledger compresses stored payloads, and the Python 3.12 floor carries no standard-library zstd binding.
 
 ### Changed
 
