@@ -8,7 +8,9 @@ scope each PR's own verification: ``span`` for
 :mod:`laconic.codec.encoders._elision` and
 :mod:`laconic.codec.encoders.fallback` (M5 PR-1, which also introduces
 :mod:`laconic.codec.observe`'s dispatch), ``command`` for
-:mod:`laconic.codec.encoders.command` (M5 PR-2).
+:mod:`laconic.codec.encoders.command` (M5 PR-2), ``recognizer`` for the
+structured pytest/build-log recognizers layered into
+:mod:`laconic.codec.encoders.command` (M5 PR-3).
 """
 
 from __future__ import annotations
@@ -789,6 +791,127 @@ def test_command_encoder_never_drops_a_non_zero_exit_code_regardless_of_elision(
     with memory_ledger() as ledger:
         record = CommandEncoder(ledger).encode("cmd", raw, {"exit_code": exit_code}, turn=0)
         assert f"exit {exit_code}" in record.encoded
+
+
+# --- CommandEncoder structured recognizers ------------------------------------
+
+
+PYTEST_FAILURE_RAW = "\n".join(
+    [
+        "collecting ... collected 4 items",
+        "test_a.py::test_1 PASSED",
+        "test_a.py::test_2 PASSED",
+        "test_a.py::test_3 FAILED",
+        "test_a.py::test_4 PASSED",
+        "",
+        "=================================== FAILURES ===================================",
+        "_________________________________ test_3 ________________________________",
+        "",
+        "    def test_3():",
+        ">       assert 1 == 2",
+        "E       assert 1 == 2",
+        "",
+        "test_a.py:10: AssertionError",
+        "FAILED test_a.py::test_3 - AssertionError: assert 1 == 2",
+        "======================== 1 failed, 3 passed in 0.05s ========================",
+    ]
+)
+
+BUILD_LOG_RAW = "\n".join(
+    [
+        "src/foo.py:10: error: Incompatible return value type",
+        "src/foo.py:22: error: Argument 1 has incompatible type",
+        "src/bar.py:5: warning: unused variable 'x'",
+        "Found 2 errors in 1 file (checked 5 source files)",
+    ]
+)
+
+
+def test_command_encoder_recognizer_never_summarizes_short_output_verbatim() -> None:
+    """B1 regression: below the elision threshold, generic elision would
+    return ``raw`` completely unchanged, so a recognizer must not
+    summarize it either — recognizing the tool must never make error
+    visibility *worse* than not recognizing it."""
+    with memory_ledger() as ledger:
+        record = CommandEncoder(ledger).encode("uv run pytest -q", PYTEST_FAILURE_RAW, {}, turn=0)
+        assert record.encoded == PYTEST_FAILURE_RAW
+        assert ">       assert 1 == 2" in record.encoded
+        assert "_________________________________ test_3" in record.encoded
+
+
+def test_command_encoder_recognizer_summarizes_pytest_output() -> None:
+    with memory_ledger() as ledger:
+        encoder = CommandEncoder(ledger, keep_head=1, keep_tail=1)
+        record = encoder.encode("uv run pytest -q", PYTEST_FAILURE_RAW, {}, turn=0)
+        assert record.encoded.startswith("pytest: 1 failed, 3 passed in 0.05s")
+        assert "FAILED test_a.py::test_3 - AssertionError: assert 1 == 2" in record.encoded
+        assert "E       assert 1 == 2" in record.encoded
+
+
+def test_command_encoder_recognizer_summarizes_build_log_output() -> None:
+    with memory_ledger() as ledger:
+        encoder = CommandEncoder(ledger, keep_head=1, keep_tail=1)
+        record = encoder.encode("uv run mypy --strict src", BUILD_LOG_RAW, {}, turn=0)
+        assert record.encoded.startswith("build: Found 2 errors in 1 file")
+        assert "src/foo.py:10: error: Incompatible return value type" in record.encoded
+        assert "src/foo.py:22: error: Argument 1 has incompatible type" in record.encoded
+        assert "src/bar.py:5: warning: unused variable 'x'" in record.encoded
+
+
+def test_command_encoder_recognizer_is_not_used_for_ordinary_output() -> None:
+    with memory_ledger() as ledger:
+        raw = "\n".join(f"file_{i}.py: ok" for i in range(200))
+        record = CommandEncoder(ledger).encode("some-command", raw, {}, turn=0)
+        assert not record.encoded.startswith("pytest:")
+        assert not record.encoded.startswith("build:")
+
+
+def test_command_encoder_recognizer_encoding_is_recoverable_via_the_ledger() -> None:
+    with memory_ledger() as ledger:
+        encoder = CommandEncoder(ledger, keep_head=1, keep_tail=1)
+        record = encoder.encode("uv run pytest -q", PYTEST_FAILURE_RAW, {}, turn=0)
+        assert ledger.expand(record.handle) == PYTEST_FAILURE_RAW
+
+
+def test_command_encoder_recognizer_caps_diagnostics_and_reports_the_remainder() -> None:
+    with memory_ledger() as ledger:
+        failures = [f"FAILED test_a.py::test_{i} - AssertionError: boom" for i in range(30)]
+        raw = "\n".join([*failures, "30 failed in 1.00s"])
+        encoder = CommandEncoder(ledger, keep_head=1, keep_tail=1, max_errors=10)
+        record = encoder.encode("pytest -q", raw, {}, turn=0)
+        for failure in failures[:10]:
+            assert failure in record.encoded
+        assert "further diagnostic lines omitted" in record.encoded
+
+
+@PROPERTY
+@given(
+    before=st.lists(_FILLER_LINE, min_size=0, max_size=30),
+    after=st.lists(_FILLER_LINE, min_size=0, max_size=30),
+    error=st.sampled_from(_ERROR_SAMPLES),
+)
+def test_command_encoder_recognizer_never_drops_an_injected_error_line(
+    before: list[str], after: list[str], error: str
+) -> None:
+    """The pytest recognizer's ``diagnostics`` extraction is
+    ``looks_like_error`` itself, not a narrower pattern set, so an error
+    line outside the ``FAILED``/``E ``/``AssertionError`` shapes still
+    survives once the recognizer is triggered. ``keep_head=0, keep_tail=0``
+    guarantees the length gate never short-circuits this property
+    regardless of how few filler lines Hypothesis draws."""
+    raw = "\n".join([*before, error, *after, "1 failed, 0 passed in 0.01s"])
+    with memory_ledger() as ledger:
+        encoder = CommandEncoder(ledger, keep_head=0, keep_tail=0)
+        record = encoder.encode("pytest -q", raw, {}, turn=0)
+        assert record.encoded.startswith("pytest:")
+        assert error in record.encoded
+
+
+def test_command_encoder_recognizer_still_shows_a_non_zero_exit_header() -> None:
+    with memory_ledger() as ledger:
+        encoder = CommandEncoder(ledger, keep_head=1, keep_tail=1)
+        record = encoder.encode("uv run pytest -q", PYTEST_FAILURE_RAW, {"exit_code": 1}, turn=0)
+        assert record.encoded.startswith("exit 1\npytest:")
 
 
 # --- ObservationCodec dispatch -----------------------------------------------
