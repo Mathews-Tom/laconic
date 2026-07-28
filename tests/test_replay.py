@@ -41,9 +41,11 @@ from laconic.replay.engine import (
 )
 from laconic.replay.equivalence import (
     EquivalenceVerdict,
+    StructuralComparison,
     compare,
     compare_session,
 )
+from laconic.replay.judge import Judge, JudgeConfig, JudgeConfigError, JudgeVerdict
 
 
 def _usage(*, output_tokens: int = 100) -> dict[str, JsonValue]:
@@ -794,3 +796,125 @@ def test_session_equivalence_over_a_recorded_response_session(tmp_path: Path) ->
     baseline_actions = tuple(turn.actions[-1] for turn in iter_turns(baseline) if turn.actions)
     equivalence = compare_session(baseline_actions, session.non_induced_actions)
     assert equivalence.rate == 1.0
+
+
+# --- opt-in semantic judge ---------------------------------------------
+
+
+class _FakeJudgeClient:
+    def __init__(self, verdicts: list[tuple[JudgeVerdict, str]]) -> None:
+        self._verdicts = verdicts
+        self.calls = 0
+
+    def judge(
+        self, *, recorded: RecordedAction, proposed: RecordedAction, model: str
+    ) -> tuple[JudgeVerdict, str]:
+        self.calls += 1
+        return self._verdicts.pop(0)
+
+
+def _actions() -> tuple[RecordedAction, RecordedAction]:
+    recorded = RecordedAction(
+        tool_use_id="b1", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(
+        tool_use_id="p1", tool_name="Edit", tool_input={"path": "a.py", "old": "q", "new": "y"}
+    )
+    return recorded, proposed
+
+
+def test_judge_config_defaults_to_disabled() -> None:
+    config = JudgeConfig()
+    assert config.enabled is False
+
+
+def test_judge_config_rejects_enabled_without_a_model() -> None:
+    with pytest.raises(JudgeConfigError, match="model identifier"):
+        JudgeConfig(enabled=True, sample_rate=0.5, budget=5, client=_FakeJudgeClient([]))
+
+
+def test_judge_config_rejects_a_sample_rate_outside_zero_one() -> None:
+    with pytest.raises(JudgeConfigError, match="sample_rate"):
+        JudgeConfig(enabled=True, model="m", sample_rate=1.5, budget=5, client=_FakeJudgeClient([]))
+
+
+def test_judge_config_rejects_a_non_positive_budget() -> None:
+    with pytest.raises(JudgeConfigError, match="budget must be positive"):
+        JudgeConfig(enabled=True, model="m", sample_rate=0.5, budget=0, client=_FakeJudgeClient([]))
+
+
+def test_judge_config_rejects_enabled_without_a_client() -> None:
+    with pytest.raises(JudgeConfigError, match="no client is configured"):
+        JudgeConfig(enabled=True, model="m", sample_rate=0.5, budget=5)
+
+
+def test_judge_never_reviews_an_already_equivalent_comparison() -> None:
+    client = _FakeJudgeClient([(JudgeVerdict.DIVERGENT, "should never be called")])
+    config = JudgeConfig(enabled=True, model="m", sample_rate=1.0, budget=5, client=client)
+    judge = Judge(config=config, seed=0)
+    equivalent = StructuralComparison(EquivalenceVerdict.EQUIVALENT, "already equivalent")
+    recorded, proposed = _actions()
+    result = judge.review(equivalent, recorded=recorded, proposed=proposed)
+    assert result is equivalent
+    assert client.calls == 0
+
+
+def test_judge_leaves_a_divergence_unchanged_when_disabled() -> None:
+    judge = Judge(config=JudgeConfig(), seed=0)
+    divergent = StructuralComparison(EquivalenceVerdict.DIVERGENT, "anchor differs")
+    recorded, proposed = _actions()
+    result = judge.review(divergent, recorded=recorded, proposed=proposed)
+    assert result is divergent
+    assert judge.calls_spent == 0
+    assert judge.audits == ()
+
+
+def test_judge_overturns_a_divergence_the_client_calls_equivalent() -> None:
+    client = _FakeJudgeClient([(JudgeVerdict.EQUIVALENT, "same intent, different phrasing")])
+    config = JudgeConfig(enabled=True, model="m", sample_rate=1.0, budget=5, client=client)
+    judge = Judge(config=config, seed=0)
+    divergent = StructuralComparison(EquivalenceVerdict.DIVERGENT, "anchor differs")
+    recorded, proposed = _actions()
+    result = judge.review(divergent, recorded=recorded, proposed=proposed)
+    assert result.is_equivalent
+    assert "overturned by judge" in result.reason
+    assert "same intent, different phrasing" in result.reason
+    assert judge.calls_spent == 1
+    assert judge.audits[0].verdict is JudgeVerdict.EQUIVALENT
+
+
+def test_judge_keeps_a_divergence_the_client_confirms() -> None:
+    client = _FakeJudgeClient([(JudgeVerdict.DIVERGENT, "genuinely different edit")])
+    config = JudgeConfig(enabled=True, model="m", sample_rate=1.0, budget=5, client=client)
+    judge = Judge(config=config, seed=0)
+    divergent = StructuralComparison(EquivalenceVerdict.DIVERGENT, "anchor differs")
+    recorded, proposed = _actions()
+    result = judge.review(divergent, recorded=recorded, proposed=proposed)
+    assert not result.is_equivalent
+    assert result is divergent
+    assert judge.audits[0].verdict is JudgeVerdict.DIVERGENT
+
+
+def test_judge_never_exceeds_its_budget() -> None:
+    client = _FakeJudgeClient([(JudgeVerdict.DIVERGENT, "r") for _ in range(5)])
+    config = JudgeConfig(enabled=True, model="m", sample_rate=1.0, budget=2, client=client)
+    judge = Judge(config=config, seed=0)
+    divergent = StructuralComparison(EquivalenceVerdict.DIVERGENT, "anchor differs")
+    recorded, proposed = _actions()
+    for _ in range(5):
+        judge.review(divergent, recorded=recorded, proposed=proposed)
+    assert judge.calls_spent == 2
+    assert client.calls == 2
+
+
+def test_judge_skips_a_sample_miss() -> None:
+    """A seed that never clears `sample_rate` must never call the client."""
+    client = _FakeJudgeClient([])
+    config = JudgeConfig(enabled=True, model="m", sample_rate=1e-9, budget=100, client=client)
+    judge = Judge(config=config, seed=1)
+    divergent = StructuralComparison(EquivalenceVerdict.DIVERGENT, "anchor differs")
+    recorded, proposed = _actions()
+    for _ in range(20):
+        judge.review(divergent, recorded=recorded, proposed=proposed)
+    assert client.calls == 0
+    assert judge.calls_spent == 0
