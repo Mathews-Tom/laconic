@@ -4,11 +4,12 @@ live replay of the codec's counterfactual behaviour."""
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
 
+from laconic.costs import CostBreakdown, ModelUsage
 from laconic.replay.corpus import JsonValue, MalformedRecordError, Record
 from laconic.replay.engine import (
     BASELINE_TOLERANCE_USD,
@@ -17,9 +18,13 @@ from laconic.replay.engine import (
     CostCapExceededError,
     LiveModeConfigError,
     LiveReplayConfig,
+    MismatchedSessionError,
     MissingRecordedResponseError,
+    NetCostReport,
     Provenance,
     RecordedAction,
+    RecordedResponseSession,
+    ReplayTurn,
     ReplayTurnCapture,
     SessionCost,
     TurnUsage,
@@ -27,9 +32,11 @@ from laconic.replay.engine import (
     assert_baseline,
     iter_turns,
     load_recorded_response,
+    net_cost,
     recorded_response_path,
     replay_live,
     replay_off,
+    replay_on,
     session_cost_of,
 )
 
@@ -489,3 +496,143 @@ def test_replay_live_validates_every_index_before_calling_the_client_or_writing(
         )
     assert client.calls == []
     assert artifact.read_text() == "previous run's committable data\n"
+
+
+# --- net cost accounting --------------------------------------------------
+
+
+def _turn_usage(*, cache_write: int = 200, output_tokens: int = 100) -> TurnUsage:
+    return TurnUsage(
+        model="claude-sonnet-5",
+        input_tokens=10,
+        cache_read=1_000,
+        cache_write=cache_write,
+        output_tokens=output_tokens,
+    )
+
+
+def _replay_turn(index: int, *, usage: TurnUsage | None, induced: bool = False) -> ReplayTurn:
+    action = RecordedAction(tool_use_id=f"t{index}", tool_name="Edit", tool_input={"path": "a.py"})
+    return ReplayTurn(
+        index=index, actions=(action,), usage=usage, induced=induced, provenance=_provenance_obj()
+    )
+
+
+def _provenance_obj() -> Provenance:
+    return Provenance(
+        source="recorded", model="claude-sonnet-5", captured_at="2026-07-28T00:00:00Z"
+    )
+
+
+def test_net_cost_is_the_difference_between_baseline_and_codec_on_totals(tmp_path: Path) -> None:
+    baseline = _write(
+        tmp_path / "s.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    cheaper_turn = _replay_turn(0, usage=_turn_usage(cache_write=50))
+    session = RecordedResponseSession(
+        baseline=baseline, fixture=tmp_path / "fixture.jsonl", turns=(cheaper_turn,)
+    )
+    report = net_cost(baseline, session)
+    assert report.induced_turns == 0
+    assert report.induced_cost_usd == 0.0
+    # Independently derived expectation, not report's own stored fields.
+    expected_baseline = session_cost_of(baseline).cost.total
+    assert cheaper_turn.usage is not None
+    expected_codec_usage = ModelUsage().add_turn(
+        input_tokens=cheaper_turn.usage.input_tokens,
+        cache_read=cheaper_turn.usage.cache_read,
+        cache_write=cheaper_turn.usage.cache_write,
+        output_tokens=cheaper_turn.usage.output_tokens,
+    )
+    expected_codec_on = expected_codec_usage.cost(cheaper_turn.usage.model).total
+    assert report.net_savings_usd == pytest.approx(expected_baseline - expected_codec_on)
+    assert report.net_savings_usd > 0.0
+
+
+def test_net_cost_rejects_a_mismatched_baseline_and_session(tmp_path: Path) -> None:
+    baseline_a = _write(
+        tmp_path / "a.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    baseline_b = _write(
+        tmp_path / "b.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "b.py"})]
+    )
+    session_for_b = RecordedResponseSession(
+        baseline=baseline_b,
+        fixture=tmp_path / "fixture.jsonl",
+        turns=(_replay_turn(0, usage=_turn_usage()),),
+    )
+    with pytest.raises(MismatchedSessionError, match="does not match"):
+        net_cost(baseline_a, session_for_b)
+
+
+def test_net_cost_nets_out_induced_turn_cost(tmp_path: Path) -> None:
+    """An extra induced turn must reduce reported savings, not just be
+    tallied alongside them -- proving the netting actually subtracts."""
+    baseline = _write(
+        tmp_path / "s.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    cheaper_turn = _replay_turn(0, usage=_turn_usage(cache_write=50))
+    without_induced = RecordedResponseSession(
+        baseline=baseline, fixture=tmp_path / "f1.jsonl", turns=(cheaper_turn,)
+    )
+    induced_turn = _replay_turn(1, usage=_turn_usage(cache_write=200), induced=True)
+    with_induced = RecordedResponseSession(
+        baseline=baseline, fixture=tmp_path / "f2.jsonl", turns=(cheaper_turn, induced_turn)
+    )
+    savings_without = net_cost(baseline, without_induced).net_savings_usd
+    report_with = net_cost(baseline, with_induced)
+    assert report_with.induced_turns == 1
+    assert report_with.induced_cost_usd > 0.0
+    assert report_with.net_savings_usd < savings_without
+    assert report_with.net_savings_usd == pytest.approx(
+        savings_without - report_with.induced_cost_usd
+    )
+
+
+def test_net_cost_report_exposes_no_gross_only_field() -> None:
+    """Structural guard for `docs/system-design.md`'s "gross-only reporting
+    is unrepresentable" constraint: the only savings-shaped attribute this
+    type carries is net."""
+    field_names = {f.name for f in fields(NetCostReport)}
+    assert field_names == {"baseline", "codec_on", "induced_turns", "induced_cost_usd"}
+    property_names = {
+        name for name in dir(NetCostReport) if isinstance(getattr(NetCostReport, name), property)
+    }
+    savings_properties = {name for name in property_names if "savings" in name}
+    assert savings_properties == {"net_savings_usd", "net_savings_pct"}
+
+
+def test_net_savings_pct_is_zero_for_a_zero_cost_baseline() -> None:
+    zero = SessionCost(turns=0, cost=CostBreakdown())
+    report = NetCostReport(baseline=zero, codec_on=zero, induced_turns=0, induced_cost_usd=0.0)
+    assert report.net_savings_pct == 0.0
+
+
+def test_replay_on_aggregates_every_baseline_with_a_committed_fixture(tmp_path: Path) -> None:
+    baseline_a = _write(
+        tmp_path / "a.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    baseline_b = _write(
+        tmp_path / "b.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "b.py"})]
+    )
+    for baseline in (baseline_a, baseline_b):
+        _write(
+            recorded_response_path(baseline),
+            [_assistant(tool_name="Edit", tool_input={"path": "a.py"}, provenance=_provenance())],
+        )
+    reports = replay_on([tmp_path])
+    assert {path for path, _ in reports} == {baseline_a, baseline_b}
+    assert all(isinstance(report, NetCostReport) for _, report in reports)
+
+
+def test_replay_on_raises_loudly_when_any_baseline_lacks_a_fixture(tmp_path: Path) -> None:
+    with_fixture = _write(
+        tmp_path / "a.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    _write(
+        recorded_response_path(with_fixture),
+        [_assistant(tool_name="Edit", tool_input={"path": "a.py"}, provenance=_provenance())],
+    )
+    _write(tmp_path / "b.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "b.py"})])
+    with pytest.raises(MissingRecordedResponseError):
+        replay_on([tmp_path])
