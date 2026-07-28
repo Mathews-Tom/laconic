@@ -35,7 +35,7 @@ from laconic.codec.encoders.command import CommandEncoder
 from laconic.codec.encoders.fallback import FallbackEncoder
 from laconic.codec.encoders.file import FileEncoder
 from laconic.codec.encoders.search import SearchEncoder
-from laconic.codec.observe import ObservationCodec
+from laconic.codec.observe import ObservationCodec, subject_for
 from laconic.codec.outline import Outline, Symbol
 from laconic.codec.span import (
     DEFAULT_SPAN_BUDGET,
@@ -1110,3 +1110,27 @@ def test_observation_codec_never_raises_for_an_unrecognized_tool_name(
 ) -> None:
     with memory_ledger() as ledger:
         ObservationCodec(ledger).encode(tool_name, "subject", raw, {}, turn=0)
+
+
+# --- subject_for --------------------------------------------------------
+
+
+def test_subject_for_prefers_file_path_over_path() -> None:
+    """Real Claude Code `Read` results carry `file_path`, not `path` --
+    this repo's own synthetic corpus fixtures are the only callers that
+    use `path`, so `file_path` must win when both are present."""
+    assert subject_for({"file_path": "src/widget.py", "path": "fixture.py"}) == "src/widget.py"
+
+
+def test_subject_for_falls_back_to_path_for_synthetic_fixtures() -> None:
+    assert subject_for({"path": "fixture.py"}) == "fixture.py"
+
+
+def test_subject_for_falls_back_to_command_and_search_keys() -> None:
+    assert subject_for({"command": "uv run pytest -q"}) == "uv run pytest -q"
+    assert subject_for({"pattern": "TODO"}) == "TODO"
+    assert subject_for({"query": "*.py"}) == "*.py"
+
+
+def test_subject_for_falls_back_to_json_when_no_known_key_is_present() -> None:
+    assert subject_for({"foo": "bar"}) == '{"foo": "bar"}'

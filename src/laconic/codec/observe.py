@@ -14,6 +14,7 @@ anything else.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 from laconic.codec.encoders._elision import DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL, DEFAULT_MAX_ERRORS
@@ -36,6 +37,30 @@ COMMAND_TOOLS = frozenset({"Bash"})
 #: Tool names whose result is a search-shaped list of matches, routed to
 #: :class:`~laconic.codec.encoders.search.SearchEncoder`.
 SEARCH_TOOLS = frozenset({"Grep", "Glob"})
+
+
+#: Tool-input keys checked, in order, for an observation's human-readable
+#: subject (a file path, a command line, a search pattern). ``file_path``
+#: precedes ``path``: a real Claude Code ``Read`` result carries the
+#: former; only this repo's own synthetic corpus fixtures use the latter.
+_SUBJECT_KEYS = ("file_path", "path", "command", "pattern", "query")
+
+
+def subject_for(tool_input: Mapping[str, object]) -> str:
+    """Return a tool call's human-readable subject: whichever of
+    :data:`_SUBJECT_KEYS` its input carries, or the input's own JSON as a
+    last resort so a subject is never empty.
+
+    The single source for this lookup -- ``laconic.cli``, K4, and the
+    fixture generator all encode real tool observations and must derive
+    the same subject for the same input, so none of them keeps its own
+    copy.
+    """
+    for key in _SUBJECT_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str):
+            return value
+    return json.dumps(tool_input, sort_keys=True)
 
 
 class ObservationCodec:
