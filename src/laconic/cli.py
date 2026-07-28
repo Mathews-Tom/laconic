@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Literal
 
 from laconic import __version__
 from laconic.codec.encoders.file import FileEncoder
+from laconic.codec.observe import ObservationCodec
 from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_models
 from laconic.ledger import Ledger
 from laconic.replay.corpus import (
@@ -23,14 +26,29 @@ from laconic.replay.corpus import (
     expectation,
     find_transcripts,
     iter_records,
+    scan,
     scan_corpus,
 )
 from laconic.replay.engine import (
     BaselineMismatchError,
     BaselineSession,
+    CostCapExceededError,
+    LiveModeConfigError,
+    LiveReplayConfig,
+    MissingRecordedResponseError,
+    NetCostReport,
+    RecordedResponseSession,
+    ReplayClient,
     assert_baseline,
+    find_baseline_transcripts,
+    iter_turns,
+    load_recorded_response,
+    net_cost,
+    recorded_response_path,
+    replay_live,
     replay_off,
 )
+from laconic.replay.equivalence import SessionEquivalence, compare_session
 
 DEFAULT_CORPUS = Path.home() / ".claude" / "projects"
 
@@ -46,6 +64,10 @@ EXIT_MALFORMED_RECORD = 5
 EXIT_REPORT_REQUIRES_CODEC = 6
 EXIT_BASELINE_MISMATCH = 7
 EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF = 8
+EXIT_MISSING_RECORDED_RESPONSE = 9
+EXIT_LIVE_CONFIG_ERROR = 10
+EXIT_COST_CAP_EXCEEDED = 11
+EXIT_CLIENT_IMPORT_ERROR = 12
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,14 +128,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay.add_argument(
         "--codec",
-        choices=["off"],
+        choices=["on", "off"],
         default="off",
-        help="engage the observation codec before replaying (currently: off only)",
+        help="engage the observation codec before replaying",
+    )
+    replay.add_argument(
+        "--mode",
+        choices=["recorded", "live"],
+        default="recorded",
+        help="'recorded' (default, CI-safe) reads a committed fixture; "
+        "'live' calls a real model, opt-in only",
+    )
+    replay.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="report format",
     )
     replay.add_argument(
         "--assert-baseline",
         action="store_true",
         help="fail if codec=off replay does not reproduce each session's recorded cost",
+    )
+    replay.add_argument(
+        "--model",
+        help="model identifier for live replay (requires --mode live)",
+    )
+    replay.add_argument(
+        "--cost-cap",
+        type=float,
+        metavar="USD",
+        help="per-run USD cost cap for live replay (requires --mode live)",
+    )
+    replay.add_argument(
+        "--artifact-dir",
+        type=Path,
+        metavar="DIR",
+        help="directory for provenance-tagged live-replay artifacts (requires --mode live)",
+    )
+    replay.add_argument(
+        "--client",
+        metavar="MODULE:ATTR",
+        help="dotted import path to a zero-arg callable returning a ReplayClient "
+        "(requires --mode live; no concrete client ships with this package)",
     )
     replay.set_defaults(handler=_replay)
     return parser
@@ -178,7 +235,31 @@ def _measure(args: argparse.Namespace) -> int:
 
 
 def _replay(args: argparse.Namespace) -> int:
+    if args.assert_baseline and args.codec != "off":
+        print("laconic replay: --assert-baseline requires --codec off", file=sys.stderr)
+        return EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF
+
+    if args.mode == "live" and args.codec != "on":
+        print("laconic replay: --mode live requires --codec on", file=sys.stderr)
+        return EXIT_LIVE_CONFIG_ERROR
+
+    live_only_flags_given = any(
+        value is not None for value in (args.model, args.cost_cap, args.artifact_dir, args.client)
+    )
+    if live_only_flags_given and args.mode != "live":
+        print(
+            "laconic replay: --model/--cost-cap/--artifact-dir/--client require --mode live",
+            file=sys.stderr,
+        )
+        return EXIT_LIVE_CONFIG_ERROR
+
     paths: list[Path] = list(args.paths)
+    if args.codec == "off":
+        return _replay_off_cli(paths, args)
+    return _replay_on_cli(paths, args)
+
+
+def _replay_off_cli(paths: list[Path], args: argparse.Namespace) -> int:
     try:
         sessions = replay_off(paths)
     except EmptyCorpusError as error:
@@ -196,6 +277,8 @@ def _replay(args: argparse.Namespace) -> int:
         print(f"laconic replay: no *.jsonl transcripts found under {listed}", file=sys.stderr)
         return EXIT_NO_CORPUS
 
+    _warn_unpriced_models([session.path for session in sessions])
+
     if args.assert_baseline:
         try:
             assert_baseline(sessions)
@@ -203,8 +286,279 @@ def _replay(args: argparse.Namespace) -> int:
             print(f"laconic replay: {error}", file=sys.stderr)
             return EXIT_BASELINE_MISMATCH
 
-    _report_baseline(sessions)
+    if args.format == "json":
+        _print_json_baseline(sessions)
+    else:
+        _report_baseline(sessions)
     return EXIT_OK
+
+
+#: One net-cost report plus the structural equivalence rate for one
+#: baseline transcript -- what every `--codec on` reporting path builds.
+type _NetEntry = tuple[Path, NetCostReport, SessionEquivalence]
+
+
+def _replay_on_cli(paths: list[Path], args: argparse.Namespace) -> int:
+    try:
+        baselines = find_baseline_transcripts(paths)
+    except EmptyCorpusError as error:
+        print(f"laconic replay: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    except OSError as error:
+        print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+
+    if not baselines:
+        listed = ", ".join(str(path) for path in paths)
+        print(f"laconic replay: no *.jsonl transcripts found under {listed}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+
+    if args.mode == "live":
+        return _replay_on_live_cli(baselines, args)
+    return _replay_on_recorded_cli(baselines, args)
+
+
+def _replay_on_recorded_cli(baselines: list[Path], args: argparse.Namespace) -> int:
+    entries: list[_NetEntry] = []
+    scanned_paths: list[Path] = []
+    for baseline in baselines:
+        try:
+            session = load_recorded_response(baseline)
+            entry_or_code = _score_session(baseline, session)
+        except MissingRecordedResponseError as error:
+            print(f"laconic replay: {error}", file=sys.stderr)
+            return EXIT_MISSING_RECORDED_RESPONSE
+        except MalformedRecordError as error:
+            print(f"laconic replay: {error}", file=sys.stderr)
+            return EXIT_MALFORMED_RECORD
+        except OSError as error:
+            print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+            return EXIT_NO_CORPUS
+        if isinstance(entry_or_code, int):
+            return entry_or_code
+        entries.append(entry_or_code)
+        scanned_paths.extend((baseline, session.fixture))
+
+    _warn_unpriced_models(scanned_paths)
+    if args.format == "json":
+        _print_json_net(entries)
+    else:
+        _report_net(entries)
+    return EXIT_OK
+
+
+def _replay_on_live_cli(baselines: list[Path], args: argparse.Namespace) -> int:
+    missing_live_config = (
+        args.model is None
+        or args.cost_cap is None
+        or args.artifact_dir is None
+        or args.client is None
+    )
+    if missing_live_config:
+        print(
+            "laconic replay: --mode live requires --model, --cost-cap, "
+            "--artifact-dir, and --client",
+            file=sys.stderr,
+        )
+        return EXIT_LIVE_CONFIG_ERROR
+
+    try:
+        client = _load_client(args.client)
+    except (ImportError, AttributeError, TypeError, ValueError) as error:
+        print(f"laconic replay: cannot load --client {args.client!r}: {error}", file=sys.stderr)
+        return EXIT_CLIENT_IMPORT_ERROR
+
+    try:
+        config = LiveReplayConfig(model=args.model, cost_cap_usd=args.cost_cap, client=client)
+    except LiveModeConfigError as error:
+        print(f"laconic replay: {error}", file=sys.stderr)
+        return EXIT_LIVE_CONFIG_ERROR
+
+    args.artifact_dir.mkdir(parents=True, exist_ok=True)
+    entries: list[_NetEntry] = []
+    scanned_paths: list[Path] = []
+    for baseline in baselines:
+        artifact_path = args.artifact_dir / recorded_response_path(baseline).name
+        try:
+            observations = _build_observations(baseline, codec="on")
+            session = replay_live(
+                baseline, config, artifact_path=artifact_path, observations=observations
+            )
+            entry_or_code = _score_session(baseline, session, include_indices=set(observations))
+        except CostCapExceededError as error:
+            print(f"laconic replay: {error}", file=sys.stderr)
+            return EXIT_COST_CAP_EXCEEDED
+        except MalformedRecordError as error:
+            print(f"laconic replay: {error}", file=sys.stderr)
+            return EXIT_MALFORMED_RECORD
+        except OSError as error:
+            print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+            return EXIT_NO_CORPUS
+        if isinstance(entry_or_code, int):
+            return entry_or_code
+        entries.append(entry_or_code)
+        scanned_paths.extend((baseline, artifact_path))
+
+    _warn_unpriced_models(scanned_paths)
+    if args.format == "json":
+        _print_json_net(entries)
+    else:
+        _report_net(entries)
+    return EXIT_OK
+
+
+def _score_session(
+    baseline: Path,
+    session: RecordedResponseSession,
+    *,
+    include_indices: set[int] | None = None,
+) -> _NetEntry | int:
+    """Compute a :class:`_NetEntry` for ``baseline`` and its recorded
+    response ``session``, or return an exit code on a comparison defect.
+
+    A comparison-length mismatch is a malformed fixture, not a crash-worthy
+    bug: it is reported through the normal ``laconic replay: ...`` stderr
+    convention and mapped to :data:`EXIT_MISMATCH`, the same code
+    ``laconic measure`` uses for a comparison that found a real drift.
+
+    ``include_indices``, when given, restricts the baseline action
+    sequence to exactly the turn indices ``session`` actually covers --
+    the live path passes the same index set :func:`_build_observations`
+    used, since a baseline turn with no preceding observation (the
+    session's first action) was never counterfactually replayed and has
+    nothing to be compared against. A recorded-response fixture loaded
+    from a committed file carries no such gap: its author is expected to
+    provide one non-induced turn per baseline action turn, so the
+    recorded path leaves ``include_indices`` at its default of "every
+    turn with an action."
+    """
+    report = net_cost(baseline, session)
+    baseline_actions = tuple(
+        turn.actions[-1]
+        for turn in iter_turns(baseline)
+        if turn.actions and (include_indices is None or turn.index in include_indices)
+    )
+    try:
+        equivalence = compare_session(baseline_actions, session.non_induced_actions)
+    except ValueError as error:
+        print(f"laconic replay: {baseline}: {error}", file=sys.stderr)
+        return EXIT_MISMATCH
+    return (baseline, report, equivalence)
+
+
+def _load_client(spec: str) -> ReplayClient:
+    """Resolve ``"module.path:attr"`` to a zero-arg callable and call it.
+
+    No concrete :class:`~laconic.replay.engine.ReplayClient` ships with
+    this package (CONSTRAINTS keeps dependencies minimal and live replay
+    opt-in); this is how a caller wires their own without laconic needing
+    a network SDK dependency of its own.
+    """
+    module_name, sep, attr_name = spec.partition(":")
+    if not sep:
+        raise ValueError(f"expected MODULE:ATTR, got {spec!r}")
+    module = importlib.import_module(module_name)
+    factory = getattr(module, attr_name)
+    if not callable(factory):
+        raise ValueError(f"{spec!r} resolved to a non-callable {factory!r}")
+    client: ReplayClient = factory()
+    if not callable(getattr(client, "respond", None)):
+        raise ValueError(f"{spec!r} did not return a ReplayClient (no callable .respond)")
+    return client
+
+
+def _subject_for(tool_name: str, tool_input: Mapping[str, JsonValue]) -> str:
+    del tool_name  # every known tool's subject key is content-addressed, not name-addressed
+    for key in ("path", "command", "pattern", "query"):
+        value = tool_input.get(key)
+        if isinstance(value, str):
+            return value
+    return json.dumps(tool_input, sort_keys=True)
+
+
+def _tool_results_by_id(path: Path) -> dict[str, str]:
+    """Map every ``tool_use_id`` in ``path`` to its tool result text."""
+    results: dict[str, str] = {}
+    for _, record in iter_records(path):
+        if record is None or record.get("type") != "user":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_use_id = block.get("tool_use_id")
+            body = block.get("content")
+            if isinstance(tool_use_id, str) and isinstance(body, str):
+                results[tool_use_id] = body
+    return results
+
+
+def _build_observations(baseline: Path, *, codec: Literal["on", "off"]) -> dict[int, str]:
+    """Return the observation text that precedes each action turn in
+    ``baseline``, codec-encoded when ``codec == "on"``.
+
+    Turn 0 has no preceding observation and is never included; neither is
+    any turn whose preceding action's result this transcript never
+    recorded (an unmatched ``tool_use_id``, which a well-formed transcript
+    never has, but a live replay run must not crash on regardless).
+    """
+    results = _tool_results_by_id(baseline)
+    turns = list(iter_turns(baseline))
+    observations: dict[int, str] = {}
+    ledger = Ledger(":memory:", "replay-live-observations")
+    codec_engine = ObservationCodec(ledger) if codec == "on" else None
+    try:
+        for index in range(1, len(turns)):
+            if not turns[index].actions:
+                continue
+            preceding = turns[index - 1].actions
+            if not preceding:
+                continue
+            action = preceding[-1]
+            raw = results.get(action.tool_use_id)
+            if raw is None:
+                continue
+            if codec_engine is None:
+                observations[turns[index].index] = raw
+                continue
+            subject = _subject_for(action.tool_name, action.tool_input)
+            record = codec_engine.encode(
+                action.tool_name, subject, raw, action.tool_input, turn=index
+            )
+            observations[turns[index].index] = record.encoded
+    finally:
+        ledger.close()
+    return observations
+
+
+def _warn_unpriced_models(paths: Sequence[Path]) -> None:
+    """Print the same "no published price" warning ``laconic measure``
+    does, for every model actually billed across ``paths``.
+
+    ``codec="on"`` net cost is a subtraction between a baseline and a
+    fixture, potentially priced under two different tables whenever
+    either file's model is unrecognised by :data:`laconic.costs.PRICING`
+    -- including the literal ``"unknown"`` :func:`~laconic.replay.engine.iter_turns`
+    substitutes for a missing or non-string ``model`` field. A savings
+    figure computed silently across two different price tables is a
+    reportable condition, not an implementation detail, matching
+    ``docs/system-design.md``'s "Honest measurement" constraint the rest
+    of this module holds to.
+    """
+    models: set[str] = set()
+    for path in paths:
+        models.update(scan([path]).usage.keys())
+    guessed = unpriced_models({model: ModelUsage() for model in models})
+    if guessed:
+        print(
+            f"warning: no published price for {', '.join(guessed)}; billed at the fallback rate",
+            file=sys.stderr,
+        )
 
 
 def _report_baseline(sessions: Sequence[BaselineSession]) -> None:
@@ -219,6 +573,71 @@ def _report_baseline(sessions: Sequence[BaselineSession]) -> None:
         total_usd += session.cost.cost.total
     print(f"\n  total turns: {total_turns:,}")
     print(f"  total cost:  ${total_usd:.4f}")
+
+
+def _print_json_baseline(sessions: Sequence[BaselineSession]) -> None:
+    payload: dict[str, JsonValue] = {
+        "codec": "off",
+        "sessions": [
+            {
+                "path": str(session.path),
+                "turns": session.cost.turns,
+                "cost_usd": session.cost.cost.total,
+            }
+            for session in sessions
+        ],
+        "total_turns": sum(session.cost.turns for session in sessions),
+        "total_cost_usd": sum(session.cost.cost.total for session in sessions),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _report_net(entries: Sequence[_NetEntry]) -> None:
+    print(
+        f"Replayed {len(entries)} session transcript(s), codec=on "
+        "(net cost and action equivalence):\n"
+    )
+    total_baseline = 0.0
+    total_codec_on = 0.0
+    for baseline, report, equivalence in entries:
+        print(f"  {baseline}")
+        print(f"    baseline cost:   ${report.baseline.cost.total:.4f}")
+        print(f"    codec-on cost:   ${report.codec_on.cost.total:.4f}")
+        print(f"    net savings:     ${report.net_savings_usd:.4f} ({report.net_savings_pct:.2f}%)")
+        print(f"    induced turns:   {report.induced_turns} (${report.induced_cost_usd:.4f})")
+        print(
+            f"    equivalence:     {100 * equivalence.rate:.2f}% "
+            f"({len(equivalence.divergences)}/{len(equivalence.comparisons)} divergent)"
+        )
+        total_baseline += report.baseline.cost.total
+        total_codec_on += report.codec_on.cost.total
+    total_net = total_baseline - total_codec_on
+    pct = 100 * total_net / total_baseline if total_baseline > 0 else 0.0
+    print(f"\n  total baseline cost: ${total_baseline:.4f}")
+    print(f"  total codec-on cost: ${total_codec_on:.4f}")
+    print(f"  total net savings:   ${total_net:.4f} ({pct:.2f}%)")
+
+
+def _print_json_net(entries: Sequence[_NetEntry]) -> None:
+    payload: dict[str, JsonValue] = {
+        "codec": "on",
+        "sessions": [
+            {
+                "path": str(baseline),
+                "baseline_cost_usd": report.baseline.cost.total,
+                "codec_on_cost_usd": report.codec_on.cost.total,
+                "net_savings_usd": report.net_savings_usd,
+                "net_savings_pct": report.net_savings_pct,
+                "induced_turns": report.induced_turns,
+                "induced_cost_usd": report.induced_cost_usd,
+                "equivalence_rate": equivalence.rate,
+                "divergent_turns": len(equivalence.divergences),
+                "compared_turns": len(equivalence.comparisons),
+            }
+            for baseline, report, equivalence in entries
+        ],
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _check_expectation(expected_file: Path, measured: Expectation) -> int:
