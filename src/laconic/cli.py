@@ -18,9 +18,11 @@ from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
+from laconic.render.templates import render
 from laconic.render.view import (
     UnmatchedToolResultError,
     UnsupportedToolResultError,
+    assemble,
     load_fixture_ledger,
 )
 from laconic.replay.corpus import (
@@ -224,6 +226,30 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"directory containing session transcripts (default: {DEFAULT_CORPUS})",
     )
     expand.set_defaults(handler=_expand)
+
+    view = subcommands.add_parser(
+        "view",
+        help="render a structural trace from a transcript corpus",
+    )
+    view.add_argument(
+        "--turns",
+        type=_turn_range,
+        required=True,
+        metavar="FIRST-LAST",
+        help="inclusive, one-based turn range",
+    )
+    view.add_argument(
+        "--corpus",
+        type=Path,
+        default=DEFAULT_CORPUS,
+        help=f"directory containing session transcripts (default: {DEFAULT_CORPUS})",
+    )
+    view.add_argument(
+        "--deterministic-only",
+        action="store_true",
+        help="render structural facts only; never invoke a narration provider",
+    )
+    view.set_defaults(handler=_view)
     return parser
 
 
@@ -736,6 +762,53 @@ def _expand(args: argparse.Namespace) -> int:
     finally:
         fixture.ledger.close()
     return EXIT_OK
+
+
+def _view(args: argparse.Namespace) -> int:
+    try:
+        fixture = load_fixture_ledger([args.corpus])
+    except (MalformedRecordError, UnmatchedToolResultError) as error:
+        print(f"laconic view: malformed transcript: {error}", file=sys.stderr)
+        return EXIT_MALFORMED_RECORD
+    except UnsupportedToolResultError as error:
+        print(f"laconic view: unsupported tool result: {error}", file=sys.stderr)
+        return EXIT_RENDER_TRACE
+    except EmptyCorpusError as error:
+        print(f"laconic view: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    except OSError as error:
+        print(f"laconic view: cannot read the corpus: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    try:
+        first_turn, last_turn = args.turns
+        if args.deterministic_only:
+            print("laconic view: deterministic-only mode", file=sys.stderr)
+        print(f"laconic view: source transcript: {fixture.transcript}", file=sys.stderr)
+        output = render(assemble(fixture.ledger, first_turn, last_turn))
+        if not output:
+            print(
+                f"laconic view: no observations in requested turn range {first_turn}-{last_turn}",
+                file=sys.stderr,
+            )
+            return EXIT_RENDER_TRACE
+        print(output)
+    finally:
+        fixture.ledger.close()
+    return EXIT_OK
+
+
+def _turn_range(value: str) -> tuple[int, int]:
+    first, separator, last = value.partition("-")
+    if not separator:
+        raise argparse.ArgumentTypeError("turns must use FIRST-LAST")
+    try:
+        first_turn = int(first)
+        last_turn = int(last)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("turn bounds must be integers") from error
+    if first_turn < 1 or last_turn < first_turn:
+        raise argparse.ArgumentTypeError("turn range must be positive and increasing")
+    return first_turn, last_turn
 
 
 def _report_gates(suite: GateSuiteResult) -> None:
