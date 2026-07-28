@@ -93,6 +93,13 @@ class UnknownTurnIndexError(ReplayError):
     first and fail after."""
 
 
+class MismatchedSessionError(ReplayError):
+    """Raised by :func:`net_cost` when ``session.baseline`` does not equal
+    the ``baseline`` it was called with -- a mispaired call would
+    otherwise compute a plausible-looking but meaningless savings figure
+    across two unrelated sessions."""
+
+
 @dataclass(frozen=True, slots=True)
 class RecordedAction:
     """One ``tool_use`` action exactly as a transcript recorded it."""
@@ -416,6 +423,100 @@ def load_recorded_response(baseline: Path) -> RecordedResponseSession:
                 "every turn in a committed recorded-response fixture must be provenance-tagged"
             )
     return RecordedResponseSession(baseline=baseline, fixture=fixture, turns=turns)
+
+
+@dataclass(frozen=True, slots=True)
+class NetCostReport:
+    """The only savings figure this package can produce: gross reduction
+    netted against every induced turn's own real cost.
+
+    There is no method anywhere in this module that returns a savings
+    number without this subtraction -- ``docs/system-design.md``'s
+    "Honest measurement" constraint makes that a structural property, not
+    a reporting convention a caller could opt out of: :attr:`codec_on`
+    already includes every induced turn's cost (it is the recorded-response
+    fixture's own total, ``RecordedResponseSession.cost``), so
+    :attr:`net_savings_usd` cannot be computed as a gross figure even by
+    accident.
+    """
+
+    baseline: SessionCost
+    codec_on: SessionCost
+    induced_turns: int
+    induced_cost_usd: float
+
+    @property
+    def net_savings_usd(self) -> float:
+        return self.baseline.cost.total - self.codec_on.cost.total
+
+    @property
+    def net_savings_pct(self) -> float:
+        """Savings as a percentage of baseline cost; ``0.0`` for a
+        zero-cost baseline rather than a division error -- a session that
+        cost nothing had nothing to save."""
+        if self.baseline.cost.total <= 0:
+            return 0.0
+        return 100 * self.net_savings_usd / self.baseline.cost.total
+
+
+def net_cost(baseline: Path, session: RecordedResponseSession) -> NetCostReport:
+    """Compute :class:`NetCostReport` for one baseline transcript and its
+    paired recorded-response ``session`` (from :func:`load_recorded_response`
+    or :func:`replay_live`).
+
+    ``induced_cost_usd`` is reported separately for transparency -- so a
+    caller can see how much of the difference is induced-read overhead --
+    but it is never the only netting: :attr:`NetCostReport.net_savings_usd`
+    subtracts ``session``'s full recorded cost, not ``baseline`` minus
+    ``induced_cost_usd`` alone, so a bug in induced-turn detection could
+    never silently inflate a reported saving.
+
+    Raises :class:`MismatchedSessionError` when ``session.baseline`` is not
+    ``baseline`` -- a mispaired call would otherwise report a confident,
+    meaningless number computed across two unrelated sessions.
+    """
+    if session.baseline != baseline:
+        raise MismatchedSessionError(
+            f"net_cost: baseline {baseline} does not match session.baseline {session.baseline}"
+        )
+    baseline_cost = session_cost_of(baseline)
+    induced_usage: dict[str, ModelUsage] = {}
+    for turn in session.induced_turns:
+        if turn.usage is None:
+            continue
+        existing = induced_usage.get(turn.usage.model, ModelUsage())
+        induced_usage[turn.usage.model] = existing.add_turn(
+            input_tokens=turn.usage.input_tokens,
+            cache_read=turn.usage.cache_read,
+            cache_write=turn.usage.cache_write,
+            output_tokens=turn.usage.output_tokens,
+        )
+    return NetCostReport(
+        baseline=baseline_cost,
+        codec_on=session.cost,
+        induced_turns=len(session.induced_turns),
+        induced_cost_usd=session_cost(induced_usage).total,
+    )
+
+
+def replay_on(paths: Sequence[Path]) -> tuple[tuple[Path, NetCostReport], ...]:
+    """``codec="on"`` replay in ``mode="recorded"`` for every baseline
+    transcript found under ``paths``.
+
+    Every baseline transcript under ``paths`` must have a committed
+    recorded-response fixture (:func:`recorded_response_path`) or this
+    raises :class:`MissingRecordedResponseError` naming the first one
+    missing one -- a partial report that silently skipped a session with
+    no fixture would look like a clean corpus-wide result when it is not.
+    A live-mode net-cost report is composed by the caller from
+    :func:`replay_live` and :func:`net_cost` directly; this function is the
+    CI-safe, no-model-call aggregation path.
+    """
+    reports: list[tuple[Path, NetCostReport]] = []
+    for baseline in find_baseline_transcripts(paths):
+        session = load_recorded_response(baseline)
+        reports.append((baseline, net_cost(baseline, session)))
+    return tuple(reports)
 
 
 @dataclass(frozen=True, slots=True)
