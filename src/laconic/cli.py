@@ -17,7 +17,12 @@ from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_mode
 from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
-from laconic.ledger import Ledger
+from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
+from laconic.render.view import (
+    UnmatchedToolResultError,
+    UnsupportedToolResultError,
+    load_fixture_ledger,
+)
 from laconic.replay.corpus import (
     Channels,
     CorpusScan,
@@ -73,6 +78,7 @@ EXIT_COST_CAP_EXCEEDED = 11
 EXIT_CLIENT_IMPORT_ERROR = 12
 EXIT_UNKNOWN_GATE = 13
 EXIT_K5_FIXTURE = 14
+EXIT_RENDER_TRACE = 15
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -205,6 +211,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="report format",
     )
     gates.set_defaults(handler=_gates)
+
+    expand = subcommands.add_parser(
+        "expand",
+        help="resolve a ledger handle or line span from a transcript corpus",
+    )
+    expand.add_argument("reference", metavar="HANDLE[:FIRST-LAST]")
+    expand.add_argument(
+        "--corpus",
+        type=Path,
+        default=DEFAULT_CORPUS,
+        help=f"directory containing session transcripts (default: {DEFAULT_CORPUS})",
+    )
+    expand.set_defaults(handler=_expand)
     return parser
 
 
@@ -691,6 +710,32 @@ def _gates(args: argparse.Namespace) -> int:
     else:
         _report_gates(suite)
     return suite.exit_code
+
+
+def _expand(args: argparse.Namespace) -> int:
+    try:
+        fixture = load_fixture_ledger([args.corpus])
+    except (MalformedRecordError, UnmatchedToolResultError) as error:
+        print(f"laconic expand: malformed transcript: {error}", file=sys.stderr)
+        return EXIT_MALFORMED_RECORD
+    except UnsupportedToolResultError as error:
+        print(f"laconic expand: unsupported tool result: {error}", file=sys.stderr)
+        return EXIT_RENDER_TRACE
+    except EmptyCorpusError as error:
+        print(f"laconic expand: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    except OSError as error:
+        print(f"laconic expand: cannot read the corpus: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    try:
+        print(f"laconic expand: source transcript: {fixture.transcript}", file=sys.stderr)
+        sys.stdout.write(fixture.ledger.expand(args.reference))
+    except (InvalidSpanError, UnknownHandleError) as error:
+        print(f"laconic expand: {error}", file=sys.stderr)
+        return EXIT_RENDER_TRACE
+    finally:
+        fixture.ledger.close()
+    return EXIT_OK
 
 
 def _report_gates(suite: GateSuiteResult) -> None:
