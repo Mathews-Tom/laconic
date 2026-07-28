@@ -7,13 +7,16 @@ A synthetic session corpus in the format `laconic measure` and the replay harnes
 ```
 tests/corpus/
 ├── README.md
-├── expected.json            committed expected values
-├── session-a-refactor.jsonl 60 assistant turns, claude-sonnet-5
-├── session-b-debug.jsonl    40 assistant turns, claude-sonnet-5
-└── session-c-review.jsonl   25 assistant turns, claude-opus-4-8
+├── expected.json                        committed expected values
+├── session-a-refactor.jsonl              60 assistant turns, claude-sonnet-5
+├── session-a-refactor.codec-on.jsonl     its recorded-response fixture, for K1/K2
+├── session-b-debug.jsonl                 40 assistant turns, claude-sonnet-5
+├── session-b-debug.codec-on.jsonl        its recorded-response fixture, for K1/K2
+├── session-c-review.jsonl                25 assistant turns, claude-opus-4-8
+└── session-c-review.codec-on.jsonl       its recorded-response fixture, for K1/K2
 ```
 
-A corpus is any directory tree; every `*.jsonl` file beneath it is a transcript, discovered in sorted order so a scan is identical on any machine.
+A corpus is any directory tree; every `*.jsonl` file beneath it is a transcript, discovered in sorted order so a scan is identical on any machine, except a committed `<stem>.codec-on.jsonl` recorded-response fixture -- `laconic.replay.corpus.find_transcripts` excludes those by name (`REPLAY_ARTIFACT_SUFFIX`) so a fixture is never counted as a second baseline session.
 
 ## Transcript schema
 
@@ -75,3 +78,15 @@ The corpus reproduces the *shape* of the real measurement in `docs/overview.md` 
 Reads are whale-distributed here as they are in real sessions: a small number of turns pull in most of the observation volume.
 
 It is **not** representative in scale. The corpus is 125 assistant turns across three sessions, against 19,818 turns across 179 sessions for the published figures, and the textual payloads are short stand-ins — the token counters are set to the magnitudes real sessions exhibit (mean resident prefix in the low hundreds of thousands, mean output in the hundreds) rather than to the character length of the synthetic text. A gate number measured against this corpus therefore verifies that the pipeline computes the right thing; it is not a restatement of the published measurement. `DEVELOPMENT_PLAN.md` §2 records that as an open gap against K1.
+
+## K1/K2 recorded-response fixtures
+
+Each `<session>.codec-on.jsonl` is a committed, provenance-tagged recorded-response fixture (`laconic.replay.engine`) pairing the baseline session with what a correctly-behaving codec produces: identical actions turn for turn (so K2 measures 100% structural equivalence on this corpus) and a real, codec-computed reduction to the two-or-three "whale" `Read` results per session that the corpus's own generator sized close to 1:1 with token cost -- see `scripts/generate_replay_fixtures.py` for the exact, deterministic derivation. No induced follow-up reads are modelled: this corpus's synthetic action sequences contain no genuine ambiguity a compact observation would provoke a re-read over, so the fixture's honest answer is zero induced turns, not a fabricated one.
+
+Regenerate after a codec or corpus change:
+
+```bash
+uv run python scripts/generate_replay_fixtures.py
+```
+
+**Measured K1 on this corpus: ~8.5%, a kill condition (`docs/overview.md` §6.3: < 15%).** This corpus's own savings are concentrated in five whale reads out of 125 total turns; every other turn's token counters are, by design (see above), independent of the synthetic text's length, so the codec has nothing further to shrink. `.docs/DEVELOPMENT_PLAN_HISTORY.md` H-25 records this as a genuine, honestly-measured outcome of the fixture corpus's specific composition -- not comparable to the real, unmeasured-here production figures in `docs/`, and not evidence about Laconic's real-world performance, per the pre-existing `DEVELOPMENT_PLAN.md` §2 corpus-representativeness gap.

@@ -6,14 +6,16 @@ import argparse
 import importlib
 import json
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Literal
 
 from laconic import __version__
 from laconic.codec.encoders.file import FileEncoder
-from laconic.codec.observe import ObservationCodec
+from laconic.codec.observe import ObservationCodec, subject_for
 from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_models
+from laconic.gates.protocol import GateSuiteResult
+from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.ledger import Ledger
 from laconic.replay.corpus import (
     Channels,
@@ -68,6 +70,7 @@ EXIT_MISSING_RECORDED_RESPONSE = 9
 EXIT_LIVE_CONFIG_ERROR = 10
 EXIT_COST_CAP_EXCEEDED = 11
 EXIT_CLIENT_IMPORT_ERROR = 12
+EXIT_UNKNOWN_GATE = 13
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -173,6 +176,33 @@ def build_parser() -> argparse.ArgumentParser:
         "(requires --mode live; no concrete client ships with this package)",
     )
     replay.set_defaults(handler=_replay)
+
+    gates = subcommands.add_parser(
+        "gates",
+        help="run K1, K2, K4, K5 and print pass/fail",
+        description=(
+            "Evaluate the pre-registered gates (docs/overview.md §6.3) against a "
+            "committed transcript corpus and its recorded-response fixtures."
+        ),
+    )
+    gates.add_argument(
+        "--corpus",
+        type=Path,
+        default=DEFAULT_CORPUS,
+        help=f"directory containing session transcripts (default: {DEFAULT_CORPUS})",
+    )
+    gates.add_argument(
+        "--only",
+        metavar="K1,K2,...",
+        help="comma-separated gate names to run (default: every gate this build knows)",
+    )
+    gates.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="report format",
+    )
+    gates.set_defaults(handler=_gates)
     return parser
 
 
@@ -467,15 +497,6 @@ def _load_client(spec: str) -> ReplayClient:
     return client
 
 
-def _subject_for(tool_name: str, tool_input: Mapping[str, JsonValue]) -> str:
-    del tool_name  # every known tool's subject key is content-addressed, not name-addressed
-    for key in ("path", "command", "pattern", "query"):
-        value = tool_input.get(key)
-        if isinstance(value, str):
-            return value
-    return json.dumps(tool_input, sort_keys=True)
-
-
 def _tool_results_by_id(path: Path) -> dict[str, str]:
     """Map every ``tool_use_id`` in ``path`` to its tool result text."""
     results: dict[str, str] = {}
@@ -526,7 +547,7 @@ def _build_observations(baseline: Path, *, codec: Literal["on", "off"]) -> dict[
             if codec_engine is None:
                 observations[turns[index].index] = raw
                 continue
-            subject = _subject_for(action.tool_name, action.tool_input)
+            subject = subject_for(action.tool_input)
             record = codec_engine.encode(
                 action.tool_name, subject, raw, action.tool_input, turn=index
             )
@@ -638,6 +659,43 @@ def _print_json_net(entries: Sequence[_NetEntry]) -> None:
         ],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _gates(args: argparse.Namespace) -> int:
+    only = args.only.split(",") if args.only is not None else None
+    try:
+        suite = run_gates([args.corpus], only=only)
+    except UnknownGateError as error:
+        print(f"laconic gates: {error}", file=sys.stderr)
+        return EXIT_UNKNOWN_GATE
+    except EmptyCorpusError as error:
+        print(f"laconic gates: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    except MissingRecordedResponseError as error:
+        print(f"laconic gates: {error}", file=sys.stderr)
+        return EXIT_MISSING_RECORDED_RESPONSE
+    except MalformedRecordError as error:
+        print(f"laconic gates: {error}", file=sys.stderr)
+        return EXIT_MALFORMED_RECORD
+    except OSError as error:
+        print(f"laconic gates: cannot read the corpus: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+
+    if args.format == "json":
+        print(json.dumps(suite.to_json(), indent=2, sort_keys=True))
+    else:
+        _report_gates(suite)
+    return suite.exit_code
+
+
+def _report_gates(suite: GateSuiteResult) -> None:
+    print(f"{'gate':6}{'verdict':16}{'value':>12}  description")
+    for result in suite.results:
+        value = "manual" if result.value is None else f"{result.value:.2f}{result.unit}"
+        print(f"{result.gate:6}{result.verdict.value:16}{value:>12}  {result.description}")
+        print(f"       {result.detail}")
+    if suite.exit_code != 0:
+        print("\nKILL CONDITION: at least one gate breached its kill threshold.", file=sys.stderr)
 
 
 def _check_expectation(expected_file: Path, measured: Expectation) -> int:
