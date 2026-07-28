@@ -14,6 +14,7 @@ from laconic import __version__
 from laconic.codec.encoders.file import FileEncoder
 from laconic.codec.observe import ObservationCodec, subject_for
 from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_models
+from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.ledger import Ledger
@@ -71,6 +72,7 @@ EXIT_LIVE_CONFIG_ERROR = 10
 EXIT_COST_CAP_EXCEEDED = 11
 EXIT_CLIENT_IMPORT_ERROR = 12
 EXIT_UNKNOWN_GATE = 13
+EXIT_K5_FIXTURE = 14
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -677,6 +679,9 @@ def _gates(args: argparse.Namespace) -> int:
     except MalformedRecordError as error:
         print(f"laconic gates: {error}", file=sys.stderr)
         return EXIT_MALFORMED_RECORD
+    except K5FixtureError as error:
+        print(f"laconic gates: {error}", file=sys.stderr)
+        return EXIT_K5_FIXTURE
     except OSError as error:
         print(f"laconic gates: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS

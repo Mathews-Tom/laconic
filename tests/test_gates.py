@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from laconic.gates import k1, k2
+from laconic.gates import k1, k2, k4, k5
 from laconic.gates.protocol import GateResult, GateSuiteResult, GateVerdict, evaluate
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.gates.thresholds import THRESHOLDS, GateThreshold
@@ -283,9 +283,9 @@ def test_runner_only_filters_which_gates_run() -> None:
     assert [r.gate for r in suite.results] == ["K1"]
 
 
-def test_runner_default_run_includes_k1_k2_and_k3() -> None:
+def test_runner_default_run_includes_every_registered_gate_plus_k3() -> None:
     suite = run_gates([CORPUS_DIR])
-    assert {r.gate for r in suite.results} >= {"K1", "K2", "K3"}
+    assert {r.gate for r in suite.results} == {"K1", "K2", "K3", "K4", "K5"}
 
 
 def test_runner_k3_is_always_manual() -> None:
@@ -310,3 +310,217 @@ def test_runner_raises_on_a_corpus_with_no_baseline_transcripts(tmp_path: Path) 
     nothing is worse than no gate at all."""
     with pytest.raises(EmptyCorpusError, match="no baseline transcripts"):
         run_gates([tmp_path])
+
+
+# --- K4 ------------------------------------------------------------------
+
+
+def test_k4_measures_the_committed_corpus_under_the_kill_threshold() -> None:
+    result = k4.measure([CORPUS_DIR])
+    assert result.gate == "K4"
+    assert result.value is not None and 0.0 < result.value < 500.0
+    assert result.verdict is GateVerdict.PASS
+
+
+def test_k4_on_a_corpus_with_no_baseline_transcripts_reports_zero(tmp_path: Path) -> None:
+    result = k4.measure([tmp_path])
+    assert result.value == 0.0
+    assert result.verdict is GateVerdict.PASS
+
+
+def test_k4_reports_zero_overhead_when_encoding_only_shrinks_content(tmp_path: Path) -> None:
+    big_read = "\n".join(f"def f_{i}(x): return x + {i}" for i in range(200))
+    _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(tool_name="Read", tool_input={"path": "a.py"}, tool_use_id="t1"),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1", "content": big_read}],
+                },
+            },
+        ],
+    )
+    result = k4.measure([tmp_path])
+    assert result.value == 0.0
+
+
+def test_k4_detects_overhead_on_a_short_search_result_with_few_unique_paths(tmp_path: Path) -> None:
+    """The exact `docs/overview.md` "Caveman net-negative trap" shape:
+    interning two short, once-each paths costs more than the raw text."""
+    tiny_grep = "a/b.py: ok\nc/d.py: ok"
+    _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(tool_name="Grep", tool_input={"pattern": "x"}, tool_use_id="t1"),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1", "content": tiny_grep}],
+                },
+            },
+        ],
+    )
+    result = k4.measure([tmp_path])
+    assert result.value is not None and result.value > 0.0
+
+
+def test_k4_measures_overhead_for_tools_outside_file_command_search(tmp_path: Path) -> None:
+    """K4 must measure every observation the real codec encodes, not a
+    hand-picked subset: `Edit` results go through `FallbackEncoder` in
+    production (`laconic.codec.observe.ObservationCodec.encode`), so K4
+    must dispatch it too, not silently skip it as it did while filtered
+    to `Read`/`Bash`/`Grep`/`Glob` alone."""
+    _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                tool_use_id="t1",
+            ),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": "The file a.py has been updated.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    result = k4.measure([tmp_path])
+    assert result.detail is not None
+    assert "1 of which invoked a tool this codec encoded" in result.detail
+
+
+# --- K5 --------------------------------------------------------------
+
+
+def test_k5_extract_items_derives_from_the_committed_corpus() -> None:
+    items = k5.extract_items([CORPUS_DIR])
+    assert len(items) == 50
+    assert all(item.expected_answer.isdigit() for item in items)
+    assert len(items) == len({item.item_id for item in items})
+
+
+def test_k5_extract_items_respects_the_limit() -> None:
+    items = k5.extract_items([CORPUS_DIR], limit=5)
+    assert len(items) == 5
+
+
+def test_k5_accuracy_computes_the_exact_match_rate() -> None:
+    items = (
+        k5.K5Item(item_id="a_0", question="q", expected_answer="0"),
+        k5.K5Item(item_id="b_1", question="q", expected_answer="1"),
+    )
+    provenance = k5.Provenance(source="recorded", model="m", captured_at="t")
+    responses = (
+        k5.K5Response(item_id="a_0", condition="off", answer="0", provenance=provenance),
+        k5.K5Response(item_id="b_1", condition="off", answer="WRONG", provenance=provenance),
+    )
+    assert k5.accuracy(items, responses, condition="off") == 50.0
+
+
+def test_k5_accuracy_raises_when_a_condition_response_is_missing() -> None:
+    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="0"),)
+    with pytest.raises(k5.K5FixtureError, match="a_0"):
+        k5.accuracy(items, (), condition="off")
+
+
+def test_k5_measures_the_committed_corpus_at_zero_delta() -> None:
+    result = k5.measure([CORPUS_DIR])
+    assert result.value == 0.0
+    assert result.verdict is GateVerdict.PASS
+
+
+def test_k5_load_responses_requires_a_committed_fixture(tmp_path: Path) -> None:
+    with pytest.raises(k5.K5FixtureError, match="no committed K5 response fixture"):
+        k5.load_responses(tmp_path / "missing.ndjson")
+
+
+def test_k5_load_responses_requires_provenance(tmp_path: Path) -> None:
+    path = tmp_path / "r.ndjson"
+    path.write_text(json.dumps({"item_id": "a_0", "condition": "off", "answer": "0"}) + "\n")
+    with pytest.raises(k5.K5FixtureError, match="no `provenance` block"):
+        k5.load_responses(path)
+
+
+def test_k5_load_responses_raises_a_loud_error_for_unparseable_json(tmp_path: Path) -> None:
+    path = tmp_path / "r.ndjson"
+    path.write_text('{"item_id": "a_0", "condition": "off"\n')
+    with pytest.raises(k5.K5FixtureError, match=r"r\.ndjson:1: not valid JSON"):
+        k5.load_responses(path)
+
+
+def test_k5_load_responses_raises_a_loud_error_for_a_non_object_line(tmp_path: Path) -> None:
+    path = tmp_path / "r.ndjson"
+    path.write_text("[1, 2, 3]\n")
+    with pytest.raises(k5.K5FixtureError, match=r"r\.ndjson:1: malformed"):
+        k5.load_responses(path)
+
+
+def test_k5_load_responses_rejects_a_duplicate_item_condition_pair(tmp_path: Path) -> None:
+    path = tmp_path / "r.ndjson"
+    record = {"item_id": "a_0", "condition": "off", "answer": "0", "provenance": _provenance()}
+    path.write_text(json.dumps(record) + "\n" + json.dumps(record) + "\n")
+    with pytest.raises(k5.K5FixtureError, match="duplicate response"):
+        k5.load_responses(path)
+
+
+def test_k5_responses_path_for_rejects_more_than_one_corpus_root(tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(k5.K5FixtureError, match="exactly one corpus root"):
+        k5.responses_path_for([tmp_path, other])
+
+
+def test_k5_write_responses_round_trips_through_load_responses(tmp_path: Path) -> None:
+    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="0"),)
+    responses = k5.generate_synthetic_responses(items, model="m")
+    path = tmp_path / "r.ndjson"
+    k5.write_responses(path, responses)
+    loaded = k5.load_responses(path)
+    assert loaded == responses
+
+
+def test_k5_generate_synthetic_responses_answers_correctly_both_conditions() -> None:
+    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="7"),)
+    responses = k5.generate_synthetic_responses(items, model="m")
+    assert k5.accuracy(items, responses, condition="off") == 100.0
+    assert k5.accuracy(items, responses, condition="on") == 100.0
+    assert all(r.provenance.source == "recorded" for r in responses)
+
+
+class _FakeK5Client:
+    def __init__(self, answers: dict[str, str]) -> None:
+        self._answers = answers
+        self.calls: list[str] = []
+
+    def answer(self, *, item: k5.K5Item, context: str, model: str) -> str:
+        self.calls.append(context)
+        return self._answers[context]
+
+
+def test_k5_capture_live_responses_tags_provenance_as_live() -> None:
+    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="7"),)
+    client = _FakeK5Client({"raw-text": "7", "encoded-text": "7"})
+    responses = k5.capture_live_responses(
+        items,
+        contexts={"a_0": ("raw-text", "encoded-text")},
+        client=client,
+        model="m",
+        run_id="run-1",
+    )
+    assert len(responses) == 2
+    assert all(r.provenance.source == "live" for r in responses)
+    assert all(r.provenance.run_id == "run-1" for r in responses)
+    assert client.calls == ["raw-text", "encoded-text"]

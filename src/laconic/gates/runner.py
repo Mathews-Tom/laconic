@@ -11,17 +11,17 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from laconic.gates import k1, k2
+from laconic.gates import k1, k2, k4, k5
 from laconic.gates.protocol import GateResult, GateSuiteResult
 from laconic.replay.corpus import EmptyCorpusError
 from laconic.replay.engine import find_baseline_transcripts
 
 #: Every automated gate this build knows how to measure, in report order.
-#: A later PR in this stack extends this table with K4 and K5 rather than
-#: changing how the runner dispatches to it.
 GATE_MEASURERS: dict[str, Callable[[Sequence[Path]], GateResult]] = {
     "K1": k1.measure,
     "K2": k2.measure,
+    "K4": k4.measure,
+    "K5": k5.measure,
 }
 
 #: K3's description, since it carries no entry in
@@ -55,6 +55,11 @@ def run_gates(paths: Sequence[Path], *, only: Sequence[str] | None = None) -> Ga
     reporting PASS on zero evidence (a typo'd or empty corpus path) is
     worse than no gate at all; a per-gate PASS-shaped early return would
     otherwise be indistinguishable from a genuinely measured pass.
+
+    K1, K2, and K4 accept any number of ``paths``; K5's benchmark items
+    and response fixture are corpus-wide rather than per-baseline, so it
+    accepts exactly one (:func:`laconic.gates.k5.responses_path_for`
+    raises :class:`~laconic.gates.k5.K5FixtureError` for anything else).
     """
     if not find_baseline_transcripts(paths):
         listed = ", ".join(str(path) for path in paths)
