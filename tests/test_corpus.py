@@ -11,6 +11,7 @@ from laconic.costs import session_cost
 from laconic.replay.corpus import (
     COST_TOLERANCE_USD,
     EXPECTATION_SCHEMA_VERSION,
+    REPLAY_ARTIFACT_SUFFIX,
     EmptyCorpusError,
     Expectation,
     JsonValue,
@@ -185,6 +186,27 @@ def test_transcripts_are_discovered_in_a_stable_order(tmp_path: Path) -> None:
     found = find_transcripts([tmp_path])
     assert found == sorted(found)
     assert [p.name for p in found] == ["a.jsonl", "m.jsonl", "z.jsonl"]
+
+
+def test_a_recorded_response_replay_artifact_is_excluded_from_a_directory_scan(
+    tmp_path: Path,
+) -> None:
+    """A committed `laconic.replay.engine` fixture beside its baseline
+    (`<stem>.codec-on.jsonl`) is synthetic material about a session, never
+    a measurable session of its own -- `laconic measure` must not
+    double-count it."""
+    (tmp_path / "session-a.jsonl").write_text("")
+    (tmp_path / f"session-a{REPLAY_ARTIFACT_SUFFIX}").write_text("")
+    found = find_transcripts([tmp_path])
+    assert [p.name for p in found] == ["session-a.jsonl"]
+
+
+def test_a_replay_artifact_named_explicitly_is_still_readable(tmp_path: Path) -> None:
+    """The directory-scan exclusion is not a blanket ban: a caller naming
+    a replay artifact file directly is not scanning a corpus by accident."""
+    artifact = tmp_path / f"session-a{REPLAY_ARTIFACT_SUFFIX}"
+    artifact.write_text("")
+    assert find_transcripts([artifact]) == [artifact]
 
 
 def test_empty_corpus_raises_with_the_searched_path(tmp_path: Path) -> None:

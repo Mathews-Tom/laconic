@@ -25,6 +25,12 @@ from laconic.replay.corpus import (
     iter_records,
     scan_corpus,
 )
+from laconic.replay.engine import (
+    BaselineMismatchError,
+    BaselineSession,
+    assert_baseline,
+    replay_off,
+)
 
 DEFAULT_CORPUS = Path.home() / ".claude" / "projects"
 
@@ -38,6 +44,8 @@ EXIT_NO_CORPUS = 3
 EXIT_NO_EXPECTATION = 4
 EXIT_MALFORMED_RECORD = 5
 EXIT_REPORT_REQUIRES_CODEC = 6
+EXIT_BASELINE_MISMATCH = 7
+EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +87,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="print an additional codec report; 'reduction' requires --codec on",
     )
     measure.set_defaults(handler=_measure)
+
+    replay = subcommands.add_parser(
+        "replay",
+        help="counterfactual cost and action equivalence, codec on vs off",
+        description=(
+            "Replay recorded session transcripts against the observation codec's "
+            "counterfactual behaviour: baseline reproduction with the codec "
+            "disabled, net cost and action equivalence with it enabled."
+        ),
+    )
+    replay.add_argument(
+        "paths",
+        nargs="*",
+        type=Path,
+        default=[DEFAULT_CORPUS],
+        help=f"directories containing session transcripts (default: {DEFAULT_CORPUS})",
+    )
+    replay.add_argument(
+        "--codec",
+        choices=["off"],
+        default="off",
+        help="engage the observation codec before replaying (currently: off only)",
+    )
+    replay.add_argument(
+        "--assert-baseline",
+        action="store_true",
+        help="fail if codec=off replay does not reproduce each session's recorded cost",
+    )
+    replay.set_defaults(handler=_replay)
     return parser
 
 
@@ -138,6 +175,50 @@ def _measure(args: argparse.Namespace) -> int:
         _report_reduction(paths)
 
     return exit_code
+
+
+def _replay(args: argparse.Namespace) -> int:
+    paths: list[Path] = list(args.paths)
+    try:
+        sessions = replay_off(paths)
+    except EmptyCorpusError as error:
+        print(f"laconic replay: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+    except MalformedRecordError as error:
+        print(f"laconic replay: {error}", file=sys.stderr)
+        return EXIT_MALFORMED_RECORD
+    except OSError as error:
+        print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+
+    if not sessions:
+        listed = ", ".join(str(path) for path in paths)
+        print(f"laconic replay: no *.jsonl transcripts found under {listed}", file=sys.stderr)
+        return EXIT_NO_CORPUS
+
+    if args.assert_baseline:
+        try:
+            assert_baseline(sessions)
+        except BaselineMismatchError as error:
+            print(f"laconic replay: {error}", file=sys.stderr)
+            return EXIT_BASELINE_MISMATCH
+
+    _report_baseline(sessions)
+    return EXIT_OK
+
+
+def _report_baseline(sessions: Sequence[BaselineSession]) -> None:
+    print(f"Replayed {len(sessions)} session transcript(s), codec=off (baseline reproduction):\n")
+    total_turns = 0
+    total_usd = 0.0
+    for session in sessions:
+        print(
+            f"  {session.path}  turns={session.cost.turns:<6} cost=${session.cost.cost.total:.4f}"
+        )
+        total_turns += session.cost.turns
+        total_usd += session.cost.cost.total
+    print(f"\n  total turns: {total_turns:,}")
+    print(f"  total cost:  ${total_usd:.4f}")
 
 
 def _check_expectation(expected_file: Path, measured: Expectation) -> int:
