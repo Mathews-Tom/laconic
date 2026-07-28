@@ -175,6 +175,17 @@ class Record:
         return len(self.encoded)
 
 
+@dataclass(frozen=True, slots=True)
+class TraceRecord:
+    """One renderer-visible observation projection without raw payload text."""
+
+    handle: str
+    kind: ObservationKind
+    subject: str
+    raw_chars: int
+    turn: int
+
+
 def compress_raw(raw: str) -> bytes:
     """Compress a raw payload for storage."""
     return zstandard.ZstdCompressor(level=COMPRESSION_LEVEL).compress(
@@ -368,6 +379,28 @@ class Ledger:
         if not colon:
             return record.raw
         return "\n".join(_select_lines(record.raw, span, ref))
+
+    def trace_records(self, first_turn: int, last_turn: int) -> tuple[TraceRecord, ...]:
+        """Return renderer fields without reading or inflating raw payloads."""
+        if first_turn < 0:
+            raise ValueError(f"first turn must not be negative: {first_turn}")
+        if last_turn < first_turn:
+            raise ValueError(f"last turn must be at least first turn: {last_turn} < {first_turn}")
+        rows = self._db.execute(
+            "SELECT handle, kind, subject, raw_chars, turn FROM observations "
+            "WHERE session_id = ? AND turn BETWEEN ? AND ? ORDER BY turn, rowid",
+            (self._session, first_turn, last_turn),
+        ).fetchall()
+        return tuple(
+            TraceRecord(
+                handle=str(row["handle"]),
+                kind=ObservationKind(str(row["kind"])),
+                subject=str(row["subject"]),
+                raw_chars=int(row["raw_chars"]),
+                turn=int(row["turn"]),
+            )
+            for row in rows
+        )
 
     def record_compaction(
         self,
