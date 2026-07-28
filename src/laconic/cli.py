@@ -18,7 +18,14 @@ from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
-from laconic.render.templates import render
+from laconic.render.narrate import (
+    NarrationConfig,
+    NarrationConfigurationError,
+    NarrationResponseError,
+    NarrationUnavailableError,
+    provider_for,
+)
+from laconic.render.templates import render, render_narration
 from laconic.render.view import (
     UnmatchedToolResultError,
     UnsupportedToolResultError,
@@ -81,6 +88,8 @@ EXIT_CLIENT_IMPORT_ERROR = 12
 EXIT_UNKNOWN_GATE = 13
 EXIT_K5_FIXTURE = 14
 EXIT_RENDER_TRACE = 15
+EXIT_NARRATION_CONFIG = 16
+EXIT_NARRATION_RESPONSE = 17
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -248,6 +257,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--deterministic-only",
         action="store_true",
         help="render structural facts only; never invoke a narration provider",
+    )
+    view.add_argument(
+        "--provider",
+        choices=("none", "ollama"),
+        default="none",
+        help="optional local narration provider (default: none)",
+    )
+    view.add_argument(
+        "--provider-endpoint",
+        help="local provider endpoint; required when --provider ollama",
+    )
+    view.add_argument(
+        "--provider-model",
+        help="local provider model; required when --provider ollama",
+    )
+    view.add_argument(
+        "--provider-timeout",
+        type=float,
+        default=5.0,
+        help="seconds to wait for a narration provider (default: 5)",
     )
     view.set_defaults(handler=_view)
     return parser
@@ -783,8 +812,23 @@ def _view(args: argparse.Namespace) -> int:
         first_turn, last_turn = args.turns
         if args.deterministic_only:
             print("laconic view: deterministic-only mode", file=sys.stderr)
+        provider = None
+        if not args.deterministic_only:
+            try:
+                provider = provider_for(
+                    NarrationConfig(
+                        provider=args.provider,
+                        endpoint=args.provider_endpoint,
+                        model=args.provider_model,
+                        timeout_seconds=args.provider_timeout,
+                    )
+                )
+            except NarrationConfigurationError as error:
+                print(f"laconic view: invalid narration provider: {error}", file=sys.stderr)
+                return EXIT_NARRATION_CONFIG
         print(f"laconic view: source transcript: {fixture.transcript}", file=sys.stderr)
-        output = render(assemble(fixture.ledger, first_turn, last_turn))
+        entries = assemble(fixture.ledger, first_turn, last_turn)
+        output = render(entries)
         if not output:
             print(
                 f"laconic view: no observations in requested turn range {first_turn}-{last_turn}",
@@ -792,6 +836,21 @@ def _view(args: argparse.Namespace) -> int:
             )
             return EXIT_RENDER_TRACE
         print(output)
+        if provider is not None:
+            try:
+                narration = provider.narrate(entries)
+            except NarrationUnavailableError as error:
+                print(
+                    f"laconic view: {error}; showing deterministic output",
+                    file=sys.stderr,
+                )
+            except NarrationResponseError as error:
+                print(f"laconic view: invalid narration response: {error}", file=sys.stderr)
+                return EXIT_NARRATION_RESPONSE
+            else:
+                if narration is not None:
+                    print()
+                    print(render_narration(narration))
     finally:
         fixture.ledger.close()
     return EXIT_OK
