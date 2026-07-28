@@ -39,6 +39,11 @@ from laconic.replay.engine import (
     replay_on,
     session_cost_of,
 )
+from laconic.replay.equivalence import (
+    EquivalenceVerdict,
+    compare,
+    compare_session,
+)
 
 
 def _usage(*, output_tokens: int = 100) -> dict[str, JsonValue]:
@@ -636,3 +641,156 @@ def test_replay_on_raises_loudly_when_any_baseline_lacks_a_fixture(tmp_path: Pat
     _write(tmp_path / "b.jsonl", [_assistant(tool_name="Edit", tool_input={"path": "b.py"})])
     with pytest.raises(MissingRecordedResponseError):
         replay_on([tmp_path])
+
+
+# --- structural equivalence ------------------------------------------------
+
+
+def test_equivalence_agrees_on_tool_target_and_anchor() -> None:
+    recorded = RecordedAction(
+        tool_use_id="t1", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(
+        tool_use_id="t2", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "z"}
+    )
+    result = compare(recorded, proposed)
+    assert result.verdict is EquivalenceVerdict.EQUIVALENT
+    assert result.is_equivalent
+
+
+def test_equivalence_diverges_on_a_different_tool() -> None:
+    recorded = RecordedAction(
+        tool_use_id="t1", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(tool_use_id="t2", tool_name="Read", tool_input={"path": "a.py"})
+    result = compare(recorded, proposed)
+    assert result.verdict is EquivalenceVerdict.DIVERGENT
+    assert "tool differs" in result.reason
+
+
+def test_equivalence_diverges_on_a_different_target_file() -> None:
+    recorded = RecordedAction(
+        tool_use_id="t1", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(
+        tool_use_id="t2", tool_name="Edit", tool_input={"path": "b.py", "old": "x", "new": "y"}
+    )
+    result = compare(recorded, proposed)
+    assert result.verdict is EquivalenceVerdict.DIVERGENT
+    assert "target differs" in result.reason
+
+
+def test_equivalence_diverges_when_both_actions_lack_the_mapped_target_key() -> None:
+    """Two unrelated `Edit`s that both omit `path` must never compare as
+    EQUIVALENT by virtue of both missing the same key -- a recognized
+    tool's absent target is a real gap, not a match."""
+    recorded = RecordedAction(
+        tool_use_id="t1", tool_name="Edit", tool_input={"old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(
+        tool_use_id="t2", tool_name="Edit", tool_input={"old": "totally different", "new": "z"}
+    )
+    result = compare(recorded, proposed)
+    assert result.verdict is EquivalenceVerdict.DIVERGENT
+    assert "carries no" in result.reason
+
+
+def test_equivalence_diverges_on_a_different_anchor() -> None:
+    recorded = RecordedAction(
+        tool_use_id="t1", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(
+        tool_use_id="t2", tool_name="Edit", tool_input={"path": "a.py", "old": "q", "new": "y"}
+    )
+    result = compare(recorded, proposed)
+    assert result.verdict is EquivalenceVerdict.DIVERGENT
+    assert "anchor differs" in result.reason
+
+
+def test_equivalence_ignores_the_replacement_text() -> None:
+    """Two edits touching the same target and anchor are equivalent even
+    with a different `new` -- the model doing the same thing at the same
+    place is what equivalence means, not restating the recorded action."""
+    recorded = RecordedAction(
+        tool_use_id="t1", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+    )
+    proposed = RecordedAction(
+        tool_use_id="t2",
+        tool_name="Edit",
+        tool_input={"path": "a.py", "old": "x", "new": "totally different"},
+    )
+    assert compare(recorded, proposed).is_equivalent
+
+
+def test_equivalence_compares_the_whole_input_for_an_unmapped_tool() -> None:
+    recorded = RecordedAction(tool_use_id="t1", tool_name="Task", tool_input={"prompt": "do x"})
+    same = RecordedAction(tool_use_id="t2", tool_name="Task", tool_input={"prompt": "do x"})
+    different = RecordedAction(tool_use_id="t3", tool_name="Task", tool_input={"prompt": "do y"})
+    assert compare(recorded, same).is_equivalent
+    assert not compare(recorded, different).is_equivalent
+
+
+def test_compare_session_pairs_positionally() -> None:
+    baseline = (
+        RecordedAction(tool_use_id="b1", tool_name="Read", tool_input={"path": "a.py"}),
+        RecordedAction(
+            tool_use_id="b2", tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"}
+        ),
+    )
+    proposed = (
+        RecordedAction(tool_use_id="p1", tool_name="Read", tool_input={"path": "a.py"}),
+        RecordedAction(
+            tool_use_id="p2", tool_name="Edit", tool_input={"path": "a.py", "old": "q", "new": "y"}
+        ),
+    )
+    equivalence = compare_session(baseline, proposed)
+    assert equivalence.rate == pytest.approx(0.5)
+    assert len(equivalence.divergences) == 1
+
+
+def test_compare_session_rate_is_one_for_an_empty_session() -> None:
+    assert compare_session((), ()).rate == 1.0
+
+
+def test_compare_session_rejects_a_length_mismatch() -> None:
+    baseline = (RecordedAction(tool_use_id="b1", tool_name="Read", tool_input={"path": "a.py"}),)
+    with pytest.raises(ValueError, match="pair only non-induced turns"):
+        compare_session(baseline, ())
+
+
+def test_session_equivalence_over_a_recorded_response_session(tmp_path: Path) -> None:
+    """End to end: a baseline paired with a loaded recorded-response
+    fixture, structural equivalence computed over their non-induced,
+    baseline-aligned actions -- no model call anywhere in this path."""
+    baseline = _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                tool_use_id="b1",
+            )
+        ],
+    )
+    _write(
+        recorded_response_path(baseline),
+        [
+            _assistant(
+                tool_name="Read",
+                tool_input={"path": "a.py"},
+                tool_use_id="r1",
+                induced=True,
+                provenance=_provenance(),
+            ),
+            _assistant(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                tool_use_id="r2",
+                provenance=_provenance(),
+            ),
+        ],
+    )
+    session = load_recorded_response(baseline)
+    baseline_actions = tuple(turn.actions[-1] for turn in iter_turns(baseline) if turn.actions)
+    equivalence = compare_session(baseline_actions, session.non_induced_actions)
+    assert equivalence.rate == 1.0
