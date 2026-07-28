@@ -13,6 +13,7 @@ import pytest
 from laconic.cli import (
     EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF,
     EXIT_CLIENT_IMPORT_ERROR,
+    EXIT_K5_FIXTURE,
     EXIT_LIVE_CONFIG_ERROR,
     EXIT_MALFORMED_RECORD,
     EXIT_MISMATCH,
@@ -21,6 +22,7 @@ from laconic.cli import (
     EXIT_NO_EXPECTATION,
     EXIT_OK,
     EXIT_REPORT_REQUIRES_CODEC,
+    EXIT_UNKNOWN_GATE,
     main,
 )
 from laconic.replay.engine import recorded_response_path
@@ -649,3 +651,119 @@ def test_replay_live_runs_end_to_end_with_an_injected_client(
     assert artifact.is_file()
     written = json.loads(artifact.read_text().splitlines()[0])
     assert written["provenance"]["source"] == "live"
+
+
+# --- laconic gates ---------------------------------------------------------
+
+
+def test_gates_exit_code_reflects_the_committed_corpus_real_kill(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["gates", "--corpus", str(CORPUS_DIR)])
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "K1" in out
+    assert "kill" in out
+
+
+def test_gates_format_json_is_parseable(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["gates", "--corpus", str(CORPUS_DIR), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    gate_names = {entry["gate"] for entry in payload["gates"]}
+    assert gate_names == {"K1", "K2", "K3", "K4", "K5"}
+
+
+def test_gates_only_filters_which_gates_run(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["gates", "--corpus", str(CORPUS_DIR), "--only", "K4,K5", "--format", "json"])
+    assert exit_code == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert {entry["gate"] for entry in payload["gates"]} == {"K4", "K5"}
+
+
+def test_gates_only_rejects_an_unknown_gate_name(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["gates", "--corpus", str(CORPUS_DIR), "--only", "K99"])
+    assert exit_code == EXIT_UNKNOWN_GATE
+    assert "K99" in capsys.readouterr().err
+
+
+def test_gates_on_a_corpus_with_no_transcripts_reports_a_missing_recorded_response(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "s.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-5",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t1",
+                            "name": "Edit",
+                            "input": {"path": "a.py", "old": "x", "new": "y"},
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 200,
+                        "output_tokens": 50,
+                    },
+                },
+            }
+        )
+        + "\n"
+    )
+    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "K1"])
+    assert exit_code == EXIT_MISSING_RECORDED_RESPONSE
+    assert "no committed recorded-response fixture" in capsys.readouterr().err
+
+
+def test_gates_on_an_empty_corpus_reports_no_corpus_rather_than_a_false_pass(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A typo'd or empty ``--corpus`` path must fail loudly, not report
+    K2/K4/K5 as a green PASS on zero evidence."""
+    exit_code = main(["gates", "--corpus", str(tmp_path)])
+    assert exit_code == EXIT_NO_CORPUS
+    assert "no baseline transcripts" in capsys.readouterr().err
+
+
+def test_gates_reports_a_malformed_k5_fixture_with_its_own_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session = tmp_path / "s.jsonl"
+    session.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": "def widget_7(value: int) -> int:\n    return value + 7",
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
+    (tmp_path / "k5_responses.ndjson").write_text('{"item_id": "widget_7"\n')
+    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "K5"])
+    assert exit_code == EXIT_K5_FIXTURE
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_gates_has_no_live_mode_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """Structural, not conventional: CI cannot reach a live model call
+    because `laconic gates` has no such flag to reach one with."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["gates", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "--live" not in out
+    assert "--mode" not in out

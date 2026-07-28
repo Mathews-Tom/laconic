@@ -194,6 +194,7 @@ def _assistant(
     cache_write: int = 200,
     cache_read: int = 1_000,
     provenance: dict[str, JsonValue] | None = None,
+    induced: bool = False,
 ) -> dict[str, JsonValue]:
     record: dict[str, JsonValue] = {
         "type": "assistant",
@@ -208,6 +209,8 @@ def _assistant(
     }
     if provenance is not None:
         record["provenance"] = provenance
+    if induced:
+        record["induced"] = True
     return record
 
 
@@ -524,3 +527,128 @@ def test_k5_capture_live_responses_tags_provenance_as_live() -> None:
     assert all(r.provenance.source == "live" for r in responses)
     assert all(r.provenance.run_id == "run-1" for r in responses)
     assert client.calls == ["raw-text", "encoded-text"]
+
+
+# --- negative controls: every automated gate proven to kill ---------------
+#
+# CONSTRAINTS: "every gate needs a negative control proving it can fail."
+# K2 already has one above (test_k2_reports_below_target_when_an_action_diverges)
+# and K1's empty-corpus test already proves a kill verdict; these four are
+# the deliberately-broken-codec scenarios matching each gate's own risk
+# framing in docs/overview.md §6.3/§8.1, run through the real `measure()`
+# entry point each gate's own CLI path uses -- not an internal helper.
+
+
+def test_negative_control_k1_an_expensive_induced_read_can_erase_savings_into_a_kill(
+    tmp_path: Path,
+) -> None:
+    """docs/overview.md §8.1's primary risk, reproduced: a real per-turn
+    saving, entirely erased by one expensive induced follow-up read."""
+    baseline = _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                cache_write=10_000,
+            )
+        ],
+    )
+    _write(
+        recorded_response_path(baseline),
+        [
+            _assistant(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                cache_write=1_000,
+                provenance=_provenance(),
+            ),
+            _assistant(
+                tool_name="Read",
+                tool_input={"path": "b.py"},
+                tool_use_id="t2",
+                cache_write=50_000,
+                provenance=_provenance(),
+                induced=True,
+            ),
+        ],
+    )
+    result = k1.measure([tmp_path])
+    assert result.verdict is GateVerdict.KILL
+    assert result.value is not None and result.value < 0.0
+
+
+def test_negative_control_k4_a_pathological_search_result_can_reach_the_kill_threshold(
+    tmp_path: Path,
+) -> None:
+    """400 short, unique, once-each paths: `SearchEncoder`'s legend costs
+    far more than the raw hit list -- the Caveman net-negative trap taken
+    to a scale that clears K4's 500-token kill threshold, not just a
+    nonzero overhead."""
+    tiny_hits = "\n".join(f"p{i}/f{i}.py: ok" for i in range(400))
+    _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(tool_name="Grep", tool_input={"pattern": "x"}, tool_use_id="t1"),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1", "content": tiny_hits}],
+                },
+            },
+        ],
+    )
+    result = k4.measure([tmp_path])
+    assert result.verdict is GateVerdict.KILL
+    assert result.value is not None and result.value > 500.0
+
+
+def test_negative_control_k5_a_wrong_codec_on_answer_can_reach_the_kill_threshold(
+    tmp_path: Path,
+) -> None:
+    """format tax confirmed: the codec-on condition gets an item wrong
+    the codec-off condition gets right, driving the accuracy delta past
+    K5's 2pp kill threshold."""
+    _write(
+        tmp_path / "s.jsonl",
+        [
+            _assistant(tool_name="Read", tool_input={"path": "a.py"}, tool_use_id="t1"),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": "def emit_0(value: int) -> int:\n    return value + 0\n",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    items = k5.extract_items([tmp_path])
+    assert len(items) == 1
+    responses_path = k5.responses_path_for([tmp_path])
+    _write(
+        responses_path,
+        [
+            {
+                "item_id": items[0].item_id,
+                "condition": "off",
+                "answer": "0",
+                "provenance": _provenance(),
+            },
+            {
+                "item_id": items[0].item_id,
+                "condition": "on",
+                "answer": "WRONG",
+                "provenance": _provenance(),
+            },
+        ],
+    )
+    result = k5.measure([tmp_path])
+    assert result.verdict is GateVerdict.KILL
+    assert result.value == 100.0
