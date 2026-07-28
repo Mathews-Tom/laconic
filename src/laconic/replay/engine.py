@@ -585,7 +585,7 @@ class LiveReplayConfig:
             )
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
@@ -674,7 +674,7 @@ def replay_live(
                     .total
                 )
                 provenance = Provenance(
-                    source="live", model=config.model, captured_at=_now_iso(), run_id=run_id
+                    source="live", model=config.model, captured_at=now_iso(), run_id=run_id
                 )
                 record = _turn_record(capture, provenance, index=baseline_index, induced=induced)
                 artifact.write(json.dumps(record) + "\n")
