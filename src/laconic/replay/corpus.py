@@ -21,7 +21,7 @@ import os
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -108,11 +108,23 @@ class CorpusScan:
     malformed_lines: int
 
 
+#: Suffix identifying a committed, provenance-tagged recorded-response
+#: replay artifact (:mod:`laconic.replay.engine`) rather than a real
+#: session transcript. Excluded from every directory scan below: a replay
+#: artifact is synthetic material *about* a baseline session -- reporting
+#: it as a measurable session of its own would double-count exactly the
+#: content it is meant to evaluate.
+REPLAY_ARTIFACT_SUFFIX = ".codec-on.jsonl"
+
+
 def find_transcripts(roots: Sequence[Path]) -> list[Path]:
     """Return every transcript under ``roots`` in a stable order.
 
     Ordering is sorted rather than filesystem order so that a scan of the same
-    corpus is byte-identical across machines.
+    corpus is byte-identical across machines. A directory scan excludes any
+    ``*.jsonl`` file ending in :data:`REPLAY_ARTIFACT_SUFFIX`; a root named
+    explicitly (``root.is_file()``) is never filtered, since a caller who
+    names a replay artifact directly is not scanning a corpus by accident.
 
     Raises:
         EmptyCorpusError: if a root does not exist. Measuring the rest of a
@@ -126,7 +138,11 @@ def find_transcripts(roots: Sequence[Path]) -> list[Path]:
             continue
         if not root.is_dir():
             raise EmptyCorpusError(f"corpus path does not exist: {root}")
-        found.update(root.rglob(TRANSCRIPT_GLOB))
+        found.update(
+            path
+            for path in root.rglob(TRANSCRIPT_GLOB)
+            if not path.name.endswith(REPLAY_ARTIFACT_SUFFIX)
+        )
     return sorted(found)
 
 
@@ -286,6 +302,31 @@ def _diff(expected: JsonValue, actual: JsonValue, *, path: str) -> list[str]:
     return []
 
 
+def turn_usage(raw_usage: Mapping[str, JsonValue] | None, *, origin: str) -> dict[str, int] | None:
+    """Parse one assistant record's ``usage`` block into token counters.
+
+    Returns ``None`` for an absent or empty block -- a turn with no usage
+    contributes no cost, which callers must not mistake for zero counters
+    across a full four-field object. Every present field must be an
+    integer; anything else raises :class:`MalformedRecordError` naming
+    ``origin``.
+
+    Factored out of ``_ingest_assistant`` so :mod:`laconic.replay.engine`
+    can parse the same ``usage`` block the same way without a second,
+    silently-drifting implementation of the four-field mapping
+    ``tests/corpus/README.md`` documents as this schema's public contract.
+    """
+    if not raw_usage:
+        return None
+    counts: dict[str, int] = {}
+    for field_name, key in _TOKEN_FIELDS.items():
+        count = _token_count(raw_usage.get(key))
+        if count is None:
+            raise MalformedRecordError(f"{origin}: {key} is not an integer: {raw_usage.get(key)!r}")
+        counts[field_name] = count
+    return counts
+
+
 def _ingest_assistant(
     message: dict[str, JsonValue],
     channels: Channels,
@@ -300,21 +341,12 @@ def _ingest_assistant(
             not an integer.
     """
     raw_usage = message.get("usage")
-    if raw_usage is None:
-        return
-    if not isinstance(raw_usage, dict):
+    if raw_usage is not None and not isinstance(raw_usage, dict):
         raise MalformedRecordError(f"{origin}: usage is not an object: {raw_usage!r}")
-    tokens = raw_usage
-    if not tokens:
-        return
-    counts: dict[str, int] = {}
-    for field_name, key in _TOKEN_FIELDS.items():
-        count = _token_count(tokens.get(key))
-        if count is None:
-            raise MalformedRecordError(f"{origin}: {key} is not an integer: {tokens.get(key)!r}")
-        counts[field_name] = count
-    model = _as_str(message.get("model")) or "unknown"
-    usage[model] = usage.get(model, ModelUsage()).add_turn(**counts)
+    counts = turn_usage(raw_usage, origin=origin)
+    if counts is not None:
+        model = _as_str(message.get("model")) or "unknown"
+        usage[model] = usage.get(model, ModelUsage()).add_turn(**counts)
 
     turn_prose = 0
     for block in _as_list(message.get("content")):
