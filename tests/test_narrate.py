@@ -10,17 +10,21 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
+import laconic.cli as cli_module
 import laconic.render.narrate as narrate_module
 from laconic.cli import EXIT_NARRATION_RESPONSE, main
+from laconic.codec.observe import ObservationCodec
 from laconic.ledger import Ledger, ObservationKind
 from laconic.render.narrate import (
+    Narration,
     NarrationConfig,
     NarrationConfigurationError,
     NarrationUnavailableError,
     NoneProvider,
     provider_for,
 )
-from laconic.render.view import assemble
+from laconic.render.templates import render_narration
+from laconic.render.view import FixtureLedger, assemble
 
 
 def test_none_provider_returns_no_narration(tmp_path: Path) -> None:
@@ -367,3 +371,91 @@ def test_unavailable_provider_is_distinct_from_invalid_configuration(
 
     with pytest.raises(NarrationUnavailableError, match="is unavailable"):
         provider.narrate(entries)
+
+
+def test_generated_narration_is_visually_distinct_and_control_safe() -> None:
+    rendered = render_narration(
+        Narration(
+            text="The work moves to verification.\x1b[1A\nNo outcome is asserted.",
+            source_handles=("F1", "B2"),
+        )
+    )
+
+    assert rendered.splitlines() == [
+        "--- generated narration (not resolved facts; sources: [F1] [B2]) ---",
+        "> The work moves to verification.\\u001b[1A",
+        "> No outcome is asserted.",
+        "--- end generated narration ---",
+    ]
+    assert "\x1b" not in rendered
+
+
+def test_view_narration_never_writes_ledger_or_agent_context(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class HttpResponse:
+        def __enter__(self) -> HttpResponse:
+            return self
+
+        def __exit__(
+            self,
+            exception_type: type[BaseException] | None,
+            exception: BaseException | None,
+            traceback: object,
+        ) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"response": "A generated connective sentence."}'
+
+    def respond(request: object, timeout: float) -> HttpResponse:
+        return HttpResponse()
+
+    original_loader = cli_module.load_fixture_ledger
+
+    def load_with_post_import_guards(paths: list[Path]) -> FixtureLedger:
+        fixture = original_loader(paths)
+
+        def reject_encode(
+            self: ObservationCodec,
+            tool_name: str,
+            subject: str,
+            raw: str,
+            tool_input: object,
+            *,
+            turn: int,
+        ) -> None:
+            raise AssertionError("narration attempted to enter the agent context")
+
+        def reject_register(self: Ledger, *args: object, **kwargs: object) -> None:
+            raise AssertionError("narration attempted to mutate the ledger")
+
+        monkeypatch.setattr(ObservationCodec, "encode", reject_encode)
+        monkeypatch.setattr(Ledger, "register", reject_register)
+        return fixture
+
+    monkeypatch.setattr(narrate_module, "urlopen", respond)
+    monkeypatch.setattr(cli_module, "load_fixture_ledger", load_with_post_import_guards)
+    corpus = Path(__file__).parent / "corpus"
+    assert (
+        main(
+            [
+                "view",
+                "--turns",
+                "1-5",
+                "--corpus",
+                str(corpus),
+                "--provider",
+                "ollama",
+                "--provider-endpoint",
+                "http://127.0.0.1",
+                "--provider-model",
+                "local",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "--- generated narration (not resolved facts; " in output
+    assert "> A generated connective sentence." in output
