@@ -11,14 +11,19 @@ from pathlib import Path
 import pytest
 
 from laconic.cli import (
+    EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF,
+    EXIT_CLIENT_IMPORT_ERROR,
+    EXIT_LIVE_CONFIG_ERROR,
     EXIT_MALFORMED_RECORD,
     EXIT_MISMATCH,
+    EXIT_MISSING_RECORDED_RESPONSE,
     EXIT_NO_CORPUS,
     EXIT_NO_EXPECTATION,
     EXIT_OK,
     EXIT_REPORT_REQUIRES_CODEC,
     main,
 )
+from laconic.replay.engine import recorded_response_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS_DIR = REPO_ROOT / "tests" / "corpus"
@@ -99,6 +104,26 @@ def test_measure_on_a_corpus_without_usage_exits_non_zero(
     )
     assert main(["measure", str(tmp_path)]) == 3
     assert "no assistant usage records" in capsys.readouterr().err
+
+
+def test_measure_does_not_double_count_a_committed_recorded_response_fixture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `laconic replay` fixture committed beside its baseline must not
+    be counted as an extra measured session."""
+    baseline = _write_records(
+        tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    _write_records(
+        recorded_response_path(baseline),
+        [
+            _assistant_record(
+                tool_name="Edit", tool_input={"path": "a.py"}, provenance=_provenance_record()
+            )
+        ],
+    )
+    assert main(["measure", str(tmp_path)]) == EXIT_OK
+    assert "Scanning 1 session transcripts" in capsys.readouterr().out
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -380,3 +405,247 @@ def test_report_reduction_on_a_corpus_with_no_reads_reports_zero(
     exit_code = main(["measure", str(tmp_path), "--codec", "on", "--report", "reduction"])
     assert exit_code == EXIT_OK
     assert "no Read observations found" in capsys.readouterr().out
+
+
+# --- laconic replay ------------------------------------------------------
+
+
+def _assistant_record(
+    *,
+    tool_name: str | None = None,
+    tool_input: dict[str, object] | None = None,
+    tool_use_id: str = "toolu_1",
+    provenance: dict[str, object] | None = None,
+    induced: bool = False,
+) -> dict[str, object]:
+    content: list[object] = []
+    if tool_name is not None:
+        content.append(
+            {"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": tool_input or {}}
+        )
+    record: dict[str, object] = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "model": "claude-sonnet-5",
+            "content": content,
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 1_000,
+                "cache_creation_input_tokens": 200,
+                "output_tokens": 100,
+            },
+        },
+    }
+    if induced:
+        record["induced"] = True
+    if provenance is not None:
+        record["provenance"] = provenance
+    return record
+
+
+def _tool_result_record(tool_use_id: str, content: str) -> dict[str, object]:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": content}],
+        },
+    }
+
+
+def _write_records(path: Path, records: list[dict[str, object]]) -> Path:
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    return path
+
+
+def _provenance_record() -> dict[str, object]:
+    return {"source": "recorded", "model": "claude-sonnet-5", "captured_at": "2026-07-28T00:00:00Z"}
+
+
+def test_replay_codec_off_text_reports_every_session_and_a_total(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["replay", str(CORPUS_DIR)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "session-a-refactor.jsonl" in out
+    assert "total cost" in out
+
+
+def test_replay_codec_off_json_reports_a_parseable_total(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["replay", str(CORPUS_DIR), "--format", "json"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["codec"] == "off"
+    assert payload["total_turns"] == 125
+    assert len(payload["sessions"]) == 3
+
+
+def test_replay_assert_baseline_passes_on_the_fixture_corpus() -> None:
+    assert main(["replay", str(CORPUS_DIR), "--assert-baseline"]) == EXIT_OK
+
+
+def test_replay_assert_baseline_requires_codec_off(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["replay", str(CORPUS_DIR), "--codec", "on", "--assert-baseline"])
+    assert exit_code == EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF
+    assert "--assert-baseline requires --codec off" in capsys.readouterr().err
+
+
+def test_replay_codec_on_without_a_fixture_reports_it_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_records(
+        tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    exit_code = main(["replay", str(tmp_path), "--codec", "on"])
+    assert exit_code == EXIT_MISSING_RECORDED_RESPONSE
+    assert "no committed recorded-response fixture" in capsys.readouterr().err
+
+
+def test_replay_codec_on_recorded_reports_net_cost_and_equivalence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    baseline = _write_records(
+        tmp_path / "s.jsonl",
+        [_assistant_record(tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"})],
+    )
+    _write_records(
+        recorded_response_path(baseline),
+        [
+            _assistant_record(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                provenance=_provenance_record(),
+            )
+        ],
+    )
+    exit_code = main(["replay", str(tmp_path), "--codec", "on"])
+    assert exit_code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "net savings" in out
+    assert "equivalence" in out
+
+
+def test_replay_codec_on_json_reports_a_parseable_net_cost_payload(tmp_path: Path) -> None:
+    baseline = _write_records(
+        tmp_path / "s.jsonl",
+        [_assistant_record(tool_name="Edit", tool_input={"path": "a.py", "old": "x", "new": "y"})],
+    )
+    _write_records(
+        recorded_response_path(baseline),
+        [
+            _assistant_record(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                provenance=_provenance_record(),
+            )
+        ],
+    )
+
+    import io
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        exit_code = main(["replay", str(tmp_path), "--codec", "on", "--format", "json"])
+    assert exit_code == EXIT_OK
+    payload = json.loads(buffer.getvalue())
+    assert payload["codec"] == "on"
+    assert payload["sessions"][0]["equivalence_rate"] == 1.0
+
+
+def test_replay_live_requires_all_four_flags(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_records(
+        tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    exit_code = main(["replay", str(tmp_path), "--codec", "on", "--mode", "live"])
+    assert exit_code == EXIT_LIVE_CONFIG_ERROR
+    assert "requires --model, --cost-cap, --artifact-dir, and --client" in capsys.readouterr().err
+
+
+def test_replay_live_reports_an_unresolvable_client(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_records(
+        tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
+    )
+    exit_code = main(
+        [
+            "replay",
+            str(tmp_path),
+            "--codec",
+            "on",
+            "--mode",
+            "live",
+            "--model",
+            "claude-sonnet-5",
+            "--cost-cap",
+            "1.0",
+            "--artifact-dir",
+            str(tmp_path / "artifacts"),
+            "--client",
+            "laconic.nonexistent_module:factory",
+        ]
+    )
+    assert exit_code == EXIT_CLIENT_IMPORT_ERROR
+    assert "cannot load --client" in capsys.readouterr().err
+
+
+def test_replay_live_runs_end_to_end_with_an_injected_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(str(tmp_path))
+    client_module = tmp_path / "fake_replay_client.py"
+    client_module.write_text(
+        "from laconic.replay.engine import RecordedAction, ReplayTurnCapture, TurnUsage\n\n"
+        "class _Client:\n"
+        "    def respond(self, *, prefix, observation, model):\n"
+        "        return [ReplayTurnCapture(\n"
+        "            action=RecordedAction(tool_use_id='live1', tool_name='Edit', "
+        "tool_input={'path': 'a.py', 'old': 'x', 'new': 'y'}),\n"
+        "            usage=TurnUsage(model=model, input_tokens=1, cache_read=1, "
+        "cache_write=1, output_tokens=1),\n"
+        "        )]\n\n"
+        "def factory():\n"
+        "    return _Client()\n"
+    )
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _write_records(
+        corpus / "s.jsonl",
+        [
+            _assistant_record(tool_name="Read", tool_input={"path": "a.py"}, tool_use_id="t1"),
+            _tool_result_record("t1", "def f(): pass"),
+            _assistant_record(
+                tool_name="Edit",
+                tool_input={"path": "a.py", "old": "x", "new": "y"},
+                tool_use_id="t2",
+            ),
+        ],
+    )
+    exit_code = main(
+        [
+            "replay",
+            str(corpus),
+            "--codec",
+            "on",
+            "--mode",
+            "live",
+            "--model",
+            "claude-sonnet-5",
+            "--cost-cap",
+            "10.0",
+            "--artifact-dir",
+            str(tmp_path / "artifacts"),
+            "--client",
+            "fake_replay_client:factory",
+        ]
+    )
+    assert exit_code == EXIT_OK
+    artifact = tmp_path / "artifacts" / "s.codec-on.jsonl"
+    assert artifact.is_file()
+    written = json.loads(artifact.read_text().splitlines()[0])
+    assert written["provenance"]["source"] == "live"

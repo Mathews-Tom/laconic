@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- The replay engine (`laconic.replay.engine`): counterfactual replay of a recorded session transcript against the observation codec's on/off behaviour. `codec="off"` replay reproduces a session's own recorded cost via an independent, turn-by-turn accumulation cross-checked against `laconic measure`'s existing scan (`laconic replay PATH --codec off --assert-baseline`). `codec="on"` replay reads a committed, provenance-tagged recorded-response fixture (`<session>.codec-on.jsonl`, same directory and stem as its baseline) rather than ever calling a model in CI, and raises `MissingRecordedResponseError` for any baseline that has none rather than silently reporting a partial or gross figure. Live replay is a separate, explicit opt-in (`laconic.replay.engine.LiveReplayConfig`/`ReplayClient`) requiring a configured model identifier, a positive per-run USD cost cap enforced after every call, and an injected client — no concrete network client ships, keeping runtime dependencies unchanged — and captures every response as a provenance-tagged artifact incrementally, so a capped-out run still leaves committable partial data on disk.
+- Net cost accounting (`laconic.replay.engine.NetCostReport`/`net_cost`): savings are always computed as a recorded-response fixture's full recorded cost — induced follow-up turns included — subtracted from the baseline's recorded cost, so a gross, induced-read-blind savings figure is structurally unrepresentable through the public API. `induced_turns` and `induced_cost_usd` are reported alongside for transparency, never as the only netting.
+- Structural action equivalence (`laconic.replay.equivalence`): compares a proposed action against a recorded one on tool, target, and anchor alone — an `Edit`'s anchor is the region it actually changes (`old`), not what it replaces it with — deciding equivalence without a model call, per `docs/system-design.md` §2.6.
+- An opt-in semantic equivalence judge (`laconic.replay.judge.Judge`/`JudgeConfig`): off by default, and its constructor refuses to enable without an explicit model identifier, a sampling rate in `(0, 1]`, a positive call budget, and a client — resolving `DEVELOPMENT_PLAN.md` §2's judge-budget gap as a structural invariant. Every sampled call, whichever way it lands, is recorded for later hand-audit; only a judge verdict of "equivalent" ever overturns a structural divergence.
+- `laconic replay [PATH ...]`: `--codec on|off` (default `off`), `--mode recorded|live` (default `recorded`, CI-safe), `--format text|json`, `--assert-baseline`, and, for live replay, `--model`, `--cost-cap`, `--artifact-dir`, and `--client MODULE:ATTR` (a dotted import path to a zero-arg `ReplayClient` factory, since this package ships no concrete one).
+
 ## [0.3.0] — 2026-07-28
 
 ### Added
