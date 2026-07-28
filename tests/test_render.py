@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -176,7 +180,7 @@ def test_expand_resolves_bare_and_spanned_handles(
     assert "outside 1-3" in capsys.readouterr().err
 
 
-def test_expand_rejects_textless_tool_result_blocks(
+def test_commands_reject_textless_tool_result_blocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     corpus = tmp_path / "corpus"
@@ -219,6 +223,9 @@ def test_expand_rejects_textless_tool_result_blocks(
     )
 
     assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert "unsupported tool result" in capsys.readouterr().err
+
+    assert main(["view", "--turns", "1-5", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
     assert "unsupported tool result" in capsys.readouterr().err
 
 
@@ -295,3 +302,90 @@ def test_expand_rejects_an_unmatched_tool_result(
 
     assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_MALFORMED_RECORD
     assert "has no matching tool use" in capsys.readouterr().err
+
+
+def test_view_is_byte_identical_and_never_connects_in_deterministic_mode(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connections: list[tuple[object, ...]] = []
+
+    def forbid_connection(*args: object, **kwargs: object) -> None:
+        connections.append(args)
+        raise AssertionError(f"deterministic rendering attempted a network connection: {kwargs!r}")
+
+    monkeypatch.setattr(socket.socket, "connect", forbid_connection)
+    corpus = Path(__file__).parent / "corpus"
+    args = [
+        "view",
+        "--turns",
+        "1-5",
+        "--corpus",
+        str(corpus),
+        "--deterministic-only",
+    ]
+
+    assert main(args) == 0
+    first_result = capsys.readouterr()
+    first = first_result.out
+    assert main(args) == 0
+    second = capsys.readouterr().out
+
+    assert first == second
+    assert first
+    assert all(line.endswith("]") and "[" in line for line in first.splitlines())
+    assert "deterministic-only mode" in first_result.err
+    assert "source transcript:" in first_result.err
+    assert connections == []
+
+
+def test_view_is_byte_identical_across_processes() -> None:
+    corpus = Path(__file__).parent / "corpus"
+    command = (
+        "from laconic.cli import main; raise SystemExit(main("
+        f"['view', '--turns', '1-5', '--corpus', {str(corpus)!r}, '--deterministic-only']))"
+    )
+    outputs = []
+    for hash_seed in ("1", "2"):
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            capture_output=True,
+            check=False,
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        outputs.append(result.stdout)
+
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.parametrize("turns", ("1", "a-5", "0-5", "5-1"))
+def test_view_rejects_invalid_turn_ranges(turns: str) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["view", "--turns", turns])
+
+    assert error.value.code == 2
+
+
+def test_view_reports_empty_turn_ranges(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    corpus = Path(__file__).parent / "corpus"
+
+    assert main(["view", "--turns", "200-300", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert "no observations in requested turn range 200-300" in capsys.readouterr().err
+
+
+def test_view_reports_transcript_free_corpora(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+
+    assert main(["view", "--turns", "1-5", "--corpus", str(corpus)]) == EXIT_NO_CORPUS
+    assert "no *.jsonl transcripts found" in capsys.readouterr().err
+
+
+def test_view_reports_missing_corpora(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    missing = tmp_path / "missing"
+
+    assert main(["view", "--turns", "1-5", "--corpus", str(missing)]) == EXIT_NO_CORPUS
+    assert "corpus path does not exist" in capsys.readouterr().err
