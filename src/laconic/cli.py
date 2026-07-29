@@ -66,6 +66,10 @@ from laconic.replay.engine import (
     replay_off,
 )
 from laconic.replay.equivalence import SessionEquivalence, compare_session
+from laconic.study.analysis import MINIMUM_PARTICIPANTS
+from laconic.study.dryrun import DEFAULT_PARTICIPANT_COUNT, DryRunResult
+from laconic.study.dryrun import run as run_study_dry_run
+from laconic.study.dryrun import to_json as study_dry_run_to_json
 
 DEFAULT_CORPUS = Path.home() / ".claude" / "projects"
 
@@ -90,6 +94,8 @@ EXIT_K5_FIXTURE = 14
 EXIT_RENDER_TRACE = 15
 EXIT_NARRATION_CONFIG = 16
 EXIT_NARRATION_RESPONSE = 17
+EXIT_STUDY_OUTPUT_ERROR = 18
+EXIT_STUDY_INSUFFICIENT_PARTICIPANTS = 19
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -279,6 +285,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for a narration provider (default: 5)",
     )
     view.set_defaults(handler=_view)
+
+    study = subcommands.add_parser(
+        "study",
+        help="K3 human-study harness (docs/system-design.md §4.1)",
+    )
+    study_subcommands = study.add_subparsers(dest="study_command")
+    study_dry_run = study_subcommands.add_parser(
+        "dry-run",
+        help="run the full harness with simulated participants",
+        description=(
+            "Build seeded-defect materials, assign counterbalanced conditions, "
+            "simulate participant responses, and run the pre-registered analysis "
+            "-- producing an analysis-ready dataset without any real participant."
+        ),
+    )
+    study_dry_run.add_argument("--seed", type=int, default=0, help="RNG seed (default: 0)")
+    study_dry_run.add_argument(
+        "--participants",
+        type=int,
+        default=DEFAULT_PARTICIPANT_COUNT,
+        help=f"simulated participant count (default: {DEFAULT_PARTICIPANT_COUNT})",
+    )
+    study_dry_run.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="output path for the analysis-ready dataset (JSON)",
+    )
+    study_dry_run.set_defaults(handler=_study_dry_run)
     return parser
 
 
@@ -854,6 +890,44 @@ def _view(args: argparse.Namespace) -> int:
     finally:
         fixture.ledger.close()
     return EXIT_OK
+
+
+def _study_dry_run(args: argparse.Namespace) -> int:
+    if args.participants < MINIMUM_PARTICIPANTS:
+        print(
+            f"laconic study: --participants must be at least {MINIMUM_PARTICIPANTS} "
+            f"(the pre-registered minimum the equivalence analysis requires); "
+            f"got {args.participants}",
+            file=sys.stderr,
+        )
+        return EXIT_STUDY_INSUFFICIENT_PARTICIPANTS
+    result = run_study_dry_run(seed=args.seed, participant_count=args.participants)
+    payload = study_dry_run_to_json(result)
+    try:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except OSError as error:
+        print(f"laconic study: cannot write {args.out}: {error}", file=sys.stderr)
+        return EXIT_STUDY_OUTPUT_ERROR
+    _report_study_dry_run(result)
+    print(f"laconic study: wrote analysis-ready dataset to {args.out}", file=sys.stderr)
+    return EXIT_OK
+
+
+def _report_study_dry_run(result: DryRunResult) -> None:
+    detection = result.analysis.detection
+    print(
+        f"laconic study dry-run: seed={result.seed} participants={result.participant_count} "
+        f"responses={len(result.responses)} pairs={result.analysis.n_pairs}"
+    )
+    print(
+        f"  detection rate: rendered={detection.rendered_rate * 100:.2f}% "
+        f"raw={detection.raw_rate * 100:.2f}% diff={detection.diff_pp:+.2f}pp "
+        f"(90% CI [{detection.ci_low_pp:+.2f}, {detection.ci_high_pp:+.2f}]pp, "
+        f"margin=\u00b1{detection.margin_pp:.1f}pp)"
+    )
+    verdict = "equivalent" if detection.equivalent else "not equivalent"
+    print(f"  K3 verdict (dry run, simulated data): {verdict}")
 
 
 def _turn_range(value: str) -> tuple[int, int]:

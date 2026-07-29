@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import statistics
+from pathlib import Path
 
 import pytest
 
+from laconic.cli import EXIT_OK, EXIT_STUDY_INSUFFICIENT_PARTICIPANTS, main
 from laconic.ledger import Ledger, ObservationKind
 from laconic.study.analysis import (
     EQUIVALENCE_MARGIN_PP,
@@ -15,6 +18,9 @@ from laconic.study.analysis import (
 )
 from laconic.study.assignment import Condition, assign_conditions
 from laconic.study.capture import ResponseRecord, capture_response
+from laconic.study.dryrun import DEFAULT_PARTICIPANT_COUNT
+from laconic.study.dryrun import run as run_dry_run
+from laconic.study.dryrun import to_json as dry_run_to_json
 from laconic.study.materials import DefectClass, build_materials, materials_for
 
 
@@ -528,3 +534,122 @@ def test_analysis_computes_paired_secondary_measures() -> None:
     assert result.confidence.mean_diff == pytest.approx(0.3)
     assert result.time_to_decision.mean_diff == pytest.approx(5.0)
     assert result.calibration_gap.mean_diff == pytest.approx(0.3)
+
+
+def test_dryrun_produces_two_responses_per_trial() -> None:
+    result = run_dry_run(seed=0, participant_count=MINIMUM_PARTICIPANTS)
+    assert len(result.trials) == MINIMUM_PARTICIPANTS * len(DefectClass)
+    assert len(result.responses) == len(result.trials) * 2
+
+
+def test_dryrun_covers_every_defect_class() -> None:
+    result = run_dry_run(seed=0, participant_count=MINIMUM_PARTICIPANTS)
+    assert {response.defect_class for response in result.responses} == set(DefectClass)
+
+
+def test_dryrun_is_reproducible_for_the_same_seed() -> None:
+    first = run_dry_run(seed=3, participant_count=MINIMUM_PARTICIPANTS)
+    second = run_dry_run(seed=3, participant_count=MINIMUM_PARTICIPANTS)
+    assert dry_run_to_json(first) == dry_run_to_json(second)
+
+
+def test_dryrun_default_participant_count_clears_the_minimum() -> None:
+    assert DEFAULT_PARTICIPANT_COUNT >= MINIMUM_PARTICIPANTS
+
+
+def test_dryrun_honors_order_first_in_simulation_order() -> None:
+    """Each trial's two responses are simulated in ``trial.order_first``
+    order, so the RNG draw order matches the presentation order the
+    counterbalanced design assigned -- not an arbitrary rendered-then-raw
+    sequence regardless of what the trial says.
+    """
+    result = run_dry_run(seed=0, participant_count=MINIMUM_PARTICIPANTS)
+    responses_by_trial: dict[tuple[int, DefectClass], list[Condition]] = {}
+    for response in result.responses:
+        key = (response.participant_id, response.defect_class)
+        responses_by_trial.setdefault(key, []).append(response.condition)
+    for trial in result.trials:
+        first_seen, second_seen = responses_by_trial[(trial.participant_id, trial.defect_class)]
+        assert first_seen is trial.order_first
+        assert second_seen is not trial.order_first
+
+
+def test_dryrun_to_json_round_trips_through_json_dumps() -> None:
+    result = run_dry_run(seed=0, participant_count=MINIMUM_PARTICIPANTS)
+    payload = dry_run_to_json(result)
+    reloaded = json.loads(json.dumps(payload))
+    assert reloaded["seed"] == 0
+    assert reloaded["participant_count"] == MINIMUM_PARTICIPANTS
+    assert len(reloaded["dataset"]) == len(result.responses)
+    assert "detection" in reloaded["analysis"]
+    assert set(reloaded["analysis"]["detection"]) == {
+        "rendered_rate",
+        "raw_rate",
+        "diff_pp",
+        "margin_pp",
+        "ci_low_pp",
+        "ci_high_pp",
+        "equivalent",
+    }
+    for row in reloaded["dataset"]:
+        assert row["order_first"] in {"rendered", "raw"}
+        assert isinstance(row["sequence_index"], int)
+
+
+def test_cli_study_dry_run_writes_analysis_ready_dataset(tmp_path: Path) -> None:
+    out = tmp_path / "k3.json"
+    assert main(["study", "dry-run", "--seed", "0", "--out", str(out)]) == EXIT_OK
+    payload = json.loads(out.read_text())
+    assert payload["seed"] == 0
+    assert payload["participant_count"] == DEFAULT_PARTICIPANT_COUNT
+    assert len(payload["dataset"]) == DEFAULT_PARTICIPANT_COUNT * len(DefectClass) * 2
+    defect_classes = {row["defect_class"] for row in payload["dataset"]}
+    assert defect_classes == {defect_class.value for defect_class in DefectClass}
+
+
+def test_cli_study_dry_run_is_reproducible_for_the_same_seed(tmp_path: Path) -> None:
+    first_out = tmp_path / "first.json"
+    second_out = tmp_path / "second.json"
+    assert main(["study", "dry-run", "--seed", "5", "--out", str(first_out)]) == EXIT_OK
+    assert main(["study", "dry-run", "--seed", "5", "--out", str(second_out)]) == EXIT_OK
+    assert first_out.read_text() == second_out.read_text()
+
+
+def test_cli_study_dry_run_honors_participants_flag(tmp_path: Path) -> None:
+    out = tmp_path / "k3.json"
+    assert (
+        main(
+            [
+                "study",
+                "dry-run",
+                "--seed",
+                "0",
+                "--participants",
+                str(MINIMUM_PARTICIPANTS),
+                "--out",
+                str(out),
+            ]
+        )
+        == EXIT_OK
+    )
+    payload = json.loads(out.read_text())
+    assert payload["participant_count"] == MINIMUM_PARTICIPANTS
+    assert len(payload["dataset"]) == MINIMUM_PARTICIPANTS * len(DefectClass) * 2
+
+
+def test_cli_study_dry_run_rejects_participants_below_the_minimum(tmp_path: Path) -> None:
+    out = tmp_path / "k3.json"
+    exit_code = main(
+        [
+            "study",
+            "dry-run",
+            "--seed",
+            "0",
+            "--participants",
+            str(MINIMUM_PARTICIPANTS - 1),
+            "--out",
+            str(out),
+        ]
+    )
+    assert exit_code == EXIT_STUDY_INSUFFICIENT_PARTICIPANTS
+    assert not out.exists()
