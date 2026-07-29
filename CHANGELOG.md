@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-29
+
 ### Added
 
 - The K3 human-study harness (`laconic.study`): instrumentation and materials for measuring whether a developer reading a rendered compressed trace catches the same bugs as one reading the raw trace, per `docs/system-design.md` §4.1's protocol. Eight seeded-defect trace materials (`laconic.study.materials`) form four matched pairs, one per defect class -- an unhandled error path, an incorrect boundary condition, a silently swallowed exception, and an edit applied to the wrong target -- each exposed in both study conditions: the full raw trace, and exactly what `laconic view` renders (handles minted with the same per-kind ordinal scheme as `Ledger.register`), including a deterministic, committed narration fixture that exercises the real M11 narration-rendering path without a live model call. Within-subjects, counterbalanced condition assignment (`laconic.study.assignment`) gives every simulated or real participant one matched-pair variant per defect class in each condition, with presentation order and variant-to-condition mapping independently counterbalanced -- exact per seed, and confirmed unbiased over many seeds by a binomial confidence-interval check. Response capture (`laconic.study.capture`) records detection, time to decision, confidence, and the resulting confidence-correctness calibration gap, validating every field at construction. The pre-registered analysis (`laconic.study.analysis`) computes a paired two-one-sided-tests equivalence test on detection rate, aggregated to one mean difference per participant to avoid pseudo-replication across a participant's four defect-class pairs, against a fixed 5-percentage-point margin -- sourced from the published K3 target and not exposed as a parameter or CLI flag anywhere in the package -- plus paired secondary-measure summaries; a pre-registered minimum of 10 participants and a finite-sample variance floor keep a small or perfectly-agreeing sample from collapsing to a zero-width interval and being declared equivalent unconditionally. `laconic study dry-run --seed N --participants N --out FILE` (`laconic.study.dryrun`) runs the full pipeline against simulated responses, honoring each trial's assigned presentation order, and writes an analysis-ready dataset including that order; no real participant is ever involved.
@@ -72,7 +74,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Initial packaging, lint, strict typing, test, and CI surface, with an importable `laconic` package and a `laconic` console script exposing `--version` and `--help`.
 
-[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.5.0...v0.7.0
 [0.5.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.2.0...v0.3.0
