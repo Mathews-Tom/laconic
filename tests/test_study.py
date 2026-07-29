@@ -8,6 +8,7 @@ import pytest
 
 from laconic.ledger import Ledger, ObservationKind
 from laconic.study.assignment import Condition, assign_conditions
+from laconic.study.capture import ResponseRecord, capture_response
 from laconic.study.materials import DefectClass, build_materials, materials_for
 
 
@@ -230,3 +231,112 @@ def test_balance_order_first_assignment_is_not_positionally_biased_across_seeds(
     standard_error = (0.5 * 0.5 / n) ** 0.5
     low, high = 0.5 - z * standard_error, 0.5 + z * standard_error
     assert low <= p_hat <= high, (p_hat, low, high)
+
+
+def test_capture_computes_calibration_gap_when_defect_detected() -> None:
+    response = capture_response(
+        participant_id=0,
+        task_id="boundary-a",
+        defect_class=DefectClass.BOUNDARY_CONDITION,
+        condition=Condition.RENDERED,
+        detected=True,
+        time_to_decision_s=12.5,
+        confidence=0.75,
+    )
+    assert response.calibration_gap == pytest.approx(-0.25)
+
+
+def test_capture_computes_calibration_gap_when_defect_missed() -> None:
+    response = capture_response(
+        participant_id=0,
+        task_id="boundary-a",
+        defect_class=DefectClass.BOUNDARY_CONDITION,
+        condition=Condition.RAW,
+        detected=False,
+        time_to_decision_s=8.0,
+        confidence=0.75,
+    )
+    assert response.calibration_gap == pytest.approx(0.75)
+
+
+def test_capture_accepts_boundary_confidence_values() -> None:
+    low = capture_response(
+        participant_id=0,
+        task_id="boundary-a",
+        defect_class=DefectClass.BOUNDARY_CONDITION,
+        condition=Condition.RAW,
+        detected=False,
+        time_to_decision_s=1.0,
+        confidence=0.0,
+    )
+    high = capture_response(
+        participant_id=0,
+        task_id="boundary-a",
+        defect_class=DefectClass.BOUNDARY_CONDITION,
+        condition=Condition.RAW,
+        detected=True,
+        time_to_decision_s=1.0,
+        confidence=1.0,
+    )
+    assert low.confidence == 0.0
+    assert high.confidence == 1.0
+
+
+@pytest.mark.parametrize("confidence", [-0.01, 1.01, -5.0, 2.0])
+def test_capture_rejects_confidence_out_of_range(confidence: float) -> None:
+    with pytest.raises(ValueError, match="confidence must be within"):
+        capture_response(
+            participant_id=0,
+            task_id="boundary-a",
+            defect_class=DefectClass.BOUNDARY_CONDITION,
+            condition=Condition.RAW,
+            detected=False,
+            time_to_decision_s=1.0,
+            confidence=confidence,
+        )
+
+
+def test_capture_rejects_negative_time_to_decision() -> None:
+    with pytest.raises(ValueError, match="time_to_decision_s must not be negative"):
+        capture_response(
+            participant_id=0,
+            task_id="boundary-a",
+            defect_class=DefectClass.BOUNDARY_CONDITION,
+            condition=Condition.RAW,
+            detected=False,
+            time_to_decision_s=-0.1,
+            confidence=0.5,
+        )
+
+
+def test_capture_rejects_negative_participant_id() -> None:
+    with pytest.raises(ValueError, match="participant_id must not be negative"):
+        capture_response(
+            participant_id=-1,
+            task_id="boundary-a",
+            defect_class=DefectClass.BOUNDARY_CONDITION,
+            condition=Condition.RAW,
+            detected=False,
+            time_to_decision_s=1.0,
+            confidence=0.5,
+        )
+
+
+def test_capture_response_round_trips_every_field() -> None:
+    response = capture_response(
+        participant_id=3,
+        task_id="wrong-target-b",
+        defect_class=DefectClass.WRONG_TARGET_EDIT,
+        condition=Condition.RENDERED,
+        detected=True,
+        time_to_decision_s=42.0,
+        confidence=0.6,
+    )
+    assert isinstance(response, ResponseRecord)
+    assert response.participant_id == 3
+    assert response.task_id == "wrong-target-b"
+    assert response.defect_class is DefectClass.WRONG_TARGET_EDIT
+    assert response.condition is Condition.RENDERED
+    assert response.detected is True
+    assert response.time_to_decision_s == 42.0
+    assert response.confidence == 0.6
