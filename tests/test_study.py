@@ -7,6 +7,12 @@ import statistics
 import pytest
 
 from laconic.ledger import Ledger, ObservationKind
+from laconic.study.analysis import (
+    EQUIVALENCE_MARGIN_PP,
+    MINIMUM_PARTICIPANTS,
+    InsufficientDataError,
+    analyze,
+)
 from laconic.study.assignment import Condition, assign_conditions
 from laconic.study.capture import ResponseRecord, capture_response
 from laconic.study.materials import DefectClass, build_materials, materials_for
@@ -340,3 +346,185 @@ def test_capture_response_round_trips_every_field() -> None:
     assert response.detected is True
     assert response.time_to_decision_s == 42.0
     assert response.confidence == 0.6
+
+
+def _response(
+    *,
+    participant_id: int = 0,
+    task_id: str = "boundary-a",
+    defect_class: DefectClass = DefectClass.BOUNDARY_CONDITION,
+    condition: Condition,
+    detected: bool,
+    confidence: float = 0.7,
+    time_to_decision_s: float = 10.0,
+) -> ResponseRecord:
+    return capture_response(
+        participant_id=participant_id,
+        task_id=task_id,
+        defect_class=defect_class,
+        condition=condition,
+        detected=detected,
+        time_to_decision_s=time_to_decision_s,
+        confidence=confidence,
+    )
+
+
+def test_analysis_equivalence_margin_is_five_percentage_points() -> None:
+    assert EQUIVALENCE_MARGIN_PP == 5.0
+
+
+def test_analysis_takes_no_margin_parameter() -> None:
+    """Structural enforcement of the pre-registration constraint: no
+    call-site anywhere can pass a different margin, because there is no
+    parameter to pass it through.
+    """
+    import inspect
+
+    signature = inspect.signature(analyze)
+    assert list(signature.parameters) == ["responses"]
+
+
+def test_analysis_raises_on_unmatched_single_response() -> None:
+    responses = [_response(condition=Condition.RENDERED, detected=True)]
+    with pytest.raises(InsufficientDataError, match="missing"):
+        analyze(responses)
+
+
+def test_analysis_raises_on_duplicate_condition_response() -> None:
+    responses = [
+        _response(condition=Condition.RENDERED, detected=True),
+        _response(condition=Condition.RENDERED, detected=False),
+    ]
+    with pytest.raises(InsufficientDataError, match="duplicate"):
+        analyze(responses)
+
+
+def test_analysis_raises_on_empty_response_set() -> None:
+    with pytest.raises(InsufficientDataError, match="no matched"):
+        analyze([])
+
+
+def test_analysis_raises_below_minimum_participants() -> None:
+    responses = [
+        _response(participant_id=participant, condition=condition, detected=True)
+        for participant in range(MINIMUM_PARTICIPANTS - 1)
+        for condition in (Condition.RENDERED, Condition.RAW)
+    ]
+    with pytest.raises(InsufficientDataError, match=f"at least {MINIMUM_PARTICIPANTS}"):
+        analyze(responses)
+
+
+def test_analysis_perfect_agreement_at_the_minimum_is_equivalent() -> None:
+    responses = [
+        _response(participant_id=participant, condition=condition, detected=True)
+        for participant in range(MINIMUM_PARTICIPANTS)
+        for condition in (Condition.RENDERED, Condition.RAW)
+    ]
+    result = analyze(responses)
+    assert result.n_pairs == MINIMUM_PARTICIPANTS
+    assert result.n_participants == MINIMUM_PARTICIPANTS
+    assert result.detection.diff_pp == pytest.approx(0.0)
+    assert result.detection.ci_low_pp < 0.0 < result.detection.ci_high_pp
+    assert result.detection.equivalent is True
+
+
+def test_analysis_large_true_difference_is_not_judged_equivalent() -> None:
+    responses = [
+        _response(participant_id=participant, condition=Condition.RENDERED, detected=False)
+        for participant in range(MINIMUM_PARTICIPANTS)
+    ] + [
+        _response(participant_id=participant, condition=Condition.RAW, detected=True)
+        for participant in range(MINIMUM_PARTICIPANTS)
+    ]
+    result = analyze(responses)
+    assert result.detection.diff_pp == pytest.approx(-100.0)
+    assert result.detection.equivalent is False
+
+
+def _pair_for_diff(participant_id: int, quarter_steps: int) -> list[ResponseRecord]:
+    """Build one participant's four defect-class pairs so their mean
+    detection-rate difference (rendered - raw) is exactly
+    ``quarter_steps / 4``: ``|quarter_steps|`` pairs are discordant in the
+    matching direction, the rest agree in both conditions.
+    """
+    defect_classes = list(DefectClass)
+    responses: list[ResponseRecord] = []
+    for index, defect_class in enumerate(defect_classes):
+        if index < abs(quarter_steps):
+            rendered_detected = quarter_steps > 0
+            raw_detected = not rendered_detected
+        else:
+            rendered_detected = raw_detected = True
+        responses.append(
+            _response(
+                participant_id=participant_id,
+                task_id=f"{defect_class.value}-task",
+                defect_class=defect_class,
+                condition=Condition.RENDERED,
+                detected=rendered_detected,
+            )
+        )
+        responses.append(
+            _response(
+                participant_id=participant_id,
+                task_id=f"{defect_class.value}-task",
+                defect_class=defect_class,
+                condition=Condition.RAW,
+                detected=raw_detected,
+            )
+        )
+    return responses
+
+
+def test_analysis_narrow_variance_within_margin_is_equivalent() -> None:
+    """Real between-participant variance (not the zero-variance shape
+    B1 exercised), with the CI narrow enough to sit inside the margin.
+    """
+    per_participant_steps = [0] * 18 + [1] * 3 + [-1] * 3
+    responses = [
+        response
+        for participant_id, steps in enumerate(per_participant_steps)
+        for response in _pair_for_diff(participant_id, steps)
+    ]
+    result = analyze(responses)
+    assert result.n_participants == 24
+    assert result.detection.diff_pp == pytest.approx(0.0, abs=1e-9)
+    assert result.detection.ci_high_pp < EQUIVALENCE_MARGIN_PP
+    assert result.detection.ci_low_pp > -EQUIVALENCE_MARGIN_PP
+    assert result.detection.equivalent is True
+
+
+def test_analysis_same_mean_wider_variance_is_not_equivalent() -> None:
+    """Same mean difference (0pp) as the narrow-variance case above, but
+    wider spread across participants -- proving the verdict tracks the
+    confidence interval, not merely the point estimate.
+    """
+    per_participant_steps = [1] * 8 + [-1] * 8 + [2] * 4 + [-2] * 4
+    responses = [
+        response
+        for participant_id, steps in enumerate(per_participant_steps)
+        for response in _pair_for_diff(participant_id, steps)
+    ]
+    result = analyze(responses)
+    assert result.n_participants == 24
+    assert result.detection.diff_pp == pytest.approx(0.0, abs=1e-9)
+    assert result.detection.ci_high_pp > EQUIVALENCE_MARGIN_PP
+    assert result.detection.equivalent is False
+
+
+def test_analysis_computes_paired_secondary_measures() -> None:
+    responses = [
+        _response(
+            participant_id=participant,
+            condition=condition,
+            detected=True,
+            confidence=0.9 if condition is Condition.RENDERED else 0.6,
+            time_to_decision_s=15.0 if condition is Condition.RENDERED else 10.0,
+        )
+        for participant in range(MINIMUM_PARTICIPANTS)
+        for condition in (Condition.RENDERED, Condition.RAW)
+    ]
+    result = analyze(responses)
+    assert result.confidence.mean_diff == pytest.approx(0.3)
+    assert result.time_to_decision.mean_diff == pytest.approx(5.0)
+    assert result.calibration_gap.mean_diff == pytest.approx(0.3)
