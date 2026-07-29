@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import statistics
+
 import pytest
 
 from laconic.ledger import Ledger, ObservationKind
+from laconic.study.assignment import Condition, assign_conditions
 from laconic.study.materials import DefectClass, build_materials, materials_for
 
 
@@ -116,3 +119,114 @@ def test_materials_are_deterministic_across_builds() -> None:
     first = {m.task_id: (m.rendered_text, m.raw_text, m.handles) for m in build_materials()}
     second = {m.task_id: (m.rendered_text, m.raw_text, m.handles) for m in build_materials()}
     assert first == second
+
+
+def test_balance_trial_count_is_participants_times_defect_classes() -> None:
+    materials = build_materials()
+    trials = assign_conditions(materials, participant_count=10, seed=0)
+    assert len(trials) == 10 * len(DefectClass)
+
+
+def test_balance_each_participant_gets_one_trial_per_defect_class() -> None:
+    materials = build_materials()
+    trials = assign_conditions(materials, participant_count=6, seed=1)
+    for participant_id in range(6):
+        classes = {t.defect_class for t in trials if t.participant_id == participant_id}
+        assert classes == set(DefectClass)
+
+
+def test_balance_sequence_index_spans_every_defect_class_without_gaps() -> None:
+    materials = build_materials()
+    trials = assign_conditions(materials, participant_count=4, seed=2)
+    for participant_id in range(4):
+        indices = sorted(t.sequence_index for t in trials if t.participant_id == participant_id)
+        assert indices == list(range(len(DefectClass)))
+
+
+def test_balance_order_first_is_exactly_even_per_seed() -> None:
+    materials = build_materials()
+    for participant_count in (8, 9, 24, 25):
+        for seed in range(10):
+            trials = assign_conditions(materials, participant_count=participant_count, seed=seed)
+            first_per_participant = {
+                t.participant_id: t.order_first for t in trials if t.sequence_index == 0
+            }
+            assert len(first_per_participant) == participant_count
+            rendered_first = sum(
+                1 for order in first_per_participant.values() if order is Condition.RENDERED
+            )
+            assert rendered_first == participant_count // 2
+
+
+def test_balance_variant_to_condition_mapping_is_exactly_even_per_class_per_seed() -> None:
+    materials = build_materials()
+    for seed in range(10):
+        trials = assign_conditions(materials, participant_count=20, seed=seed)
+        for defect_class in DefectClass:
+            variant_a, _variant_b = materials_for(materials, defect_class)
+            class_trials = [t for t in trials if t.defect_class == defect_class]
+            assert len(class_trials) == 20
+            variant_a_rendered = sum(
+                1 for t in class_trials if t.rendered_task_id == variant_a.task_id
+            )
+            assert variant_a_rendered == 20 // 2
+
+
+def test_balance_participant_count_below_two_raises() -> None:
+    materials = build_materials()
+    with pytest.raises(ValueError, match="at least 2"):
+        assign_conditions(materials, participant_count=1, seed=0)
+
+
+def test_balance_assignment_is_reproducible_for_the_same_seed() -> None:
+    materials = build_materials()
+    first = assign_conditions(materials, participant_count=12, seed=7)
+    second = assign_conditions(materials, participant_count=12, seed=7)
+    assert first == second
+
+
+def test_balance_variant_assignment_actually_varies_across_seeds() -> None:
+    """Exact per-seed evenness (verified above) could, in principle, be
+    satisfied by a rigged, non-random assignment that always gives
+    participant 0 the same variant. This confirms real randomization: both
+    possible task assignments for participant 0's first trial are observed
+    across a range of seeds.
+    """
+    materials = build_materials()
+    defect_class = next(iter(DefectClass))
+    observed_rendered_tasks = {
+        next(
+            t.rendered_task_id
+            for t in assign_conditions(materials, participant_count=8, seed=seed)
+            if t.participant_id == 0 and t.defect_class == defect_class
+        )
+        for seed in range(30)
+    }
+    variant_a, variant_b = materials_for(materials, defect_class)
+    assert observed_rendered_tasks == {variant_a.task_id, variant_b.task_id}
+
+
+def test_balance_order_first_assignment_is_not_positionally_biased_across_seeds() -> None:
+    """Statistical verification over repeated seeds: whichever participant
+    slot is checked, the probability it lands "rendered first" must sit
+    inside a proper binomial confidence interval around 0.5 -- a shuffle
+    with a hidden positional bias (e.g. participant 0 always landing in the
+    same half) would fail this over enough seeds even though every single
+    seed's own split (tested above) is exactly even.
+    """
+    materials = build_materials()
+    participant_count = 20
+    seeds = range(600)
+    rendered_first_for_participant_0 = 0
+    for seed in seeds:
+        trials = assign_conditions(materials, participant_count=participant_count, seed=seed)
+        first_trial = next(t for t in trials if t.participant_id == 0 and t.sequence_index == 0)
+        if first_trial.order_first is Condition.RENDERED:
+            rendered_first_for_participant_0 += 1
+
+    n = len(seeds)
+    p_hat = rendered_first_for_participant_0 / n
+    z = statistics.NormalDist().inv_cdf(0.9995)  # two-sided 99.9% CI
+    standard_error = (0.5 * 0.5 / n) ** 0.5
+    low, high = 0.5 - z * standard_error, 0.5 + z * standard_error
+    assert low <= p_hat <= high, (p_hat, low, high)
