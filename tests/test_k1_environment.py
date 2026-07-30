@@ -8,6 +8,8 @@ import pytest
 
 from laconic.k1.environment import (
     EnvironmentError,
+    RecordedToolObservation,
+    RecordedToolResolver,
     SnapshotEnvironment,
     resolve_snapshot_path,
     snapshot_tree_sha256,
@@ -86,3 +88,80 @@ def test_snapshot_digest_frames_file_boundaries(tmp_path: Path) -> None:
         root.chmod(0o500)
 
     assert snapshot_tree_sha256(first) != snapshot_tree_sha256(second)
+
+
+def test_recorded_resolver_serves_only_the_exact_next_call() -> None:
+    resolver = RecordedToolResolver(
+        (
+            RecordedToolObservation("Read", {"path": "/workspace/a.py"}, {"text": "one"}),
+            RecordedToolObservation("Read", {"path": "/workspace/b.py"}, {"text": "two"}),
+        )
+    )
+
+    first = resolver.resolve("Read", {"path": "/workspace/a.py"})
+
+    assert first.status == "resolved"
+    assert first.output == {"text": "one"}
+    assert resolver.position == 1
+    assert not resolver.terminated
+
+
+def test_recorded_resolver_mismatch_terminates_without_advancing() -> None:
+    resolver = RecordedToolResolver(
+        (RecordedToolObservation("Read", {"path": "/workspace/a.py"}, {"text": "one"}),)
+    )
+
+    mismatch = resolver.resolve("Read", {"path": "/workspace/other.py"})
+    after_mismatch = resolver.resolve("Read", {"path": "/workspace/a.py"})
+
+    assert mismatch.status == "unsupported"
+    assert mismatch.output is None
+    assert resolver.position == 0
+    assert resolver.terminated
+    assert after_mismatch.status == "unsupported"
+    assert after_mismatch.output is None
+
+
+def test_recorded_resolver_rejects_json_near_matches_and_exhaustion() -> None:
+    resolver = RecordedToolResolver((RecordedToolObservation("Search", {"limit": 1}, None),))
+
+    near_match = resolver.resolve("Search", {"limit": True})
+    assert near_match.status == "unsupported"
+    assert resolver.position == 0
+
+    resolver = RecordedToolResolver((RecordedToolObservation("Search", {"limit": 1}, None),))
+    resolved = resolver.resolve("Search", {"limit": 1})
+    exhausted = resolver.resolve("Search", {"limit": 1})
+
+    assert resolved.status == "resolved"
+    assert resolved.output is None
+    assert exhausted.status == "unsupported"
+
+
+def test_recorded_resolver_empty_trace_fails_closed() -> None:
+    resolver = RecordedToolResolver(())
+
+    result = resolver.resolve("Read", {"path": "src/main.py"})
+
+    assert result.status == "unsupported"
+    assert result.output is None
+    assert resolver.position == 0
+    assert resolver.terminated
+
+
+def test_recorded_resolver_rejects_non_json_number() -> None:
+    with pytest.raises(EnvironmentError, match="valid JSON"):
+        RecordedToolObservation("Search", {"limit": float("nan")}, None)
+
+
+def test_recorded_resolver_returns_independent_recorded_output() -> None:
+    original_output = {"lines": ["one"]}
+    resolver = RecordedToolResolver(
+        (RecordedToolObservation("Read", {"path": "/workspace/a.py"}, original_output),)
+    )
+
+    result = resolver.resolve("Read", {"path": "/workspace/a.py"})
+    assert isinstance(result.output, dict)
+    result.output["lines"] = ["changed"]
+
+    assert original_output == {"lines": ["one"]}
