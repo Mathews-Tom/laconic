@@ -327,6 +327,71 @@ def test_codex_probe_refuses_unlinked_billable_usage(tmp_path: Path) -> None:
         extract_native(candidate)
 
 
+def test_omp_extractor_rejects_unmatched_native_tool_result(tmp_path: Path) -> None:
+    candidate = _candidate(
+        tmp_path,
+        provider="omp",
+        model="openai-codex/gpt-5.6-terra",
+        model_family="gpt-5.6",
+    )
+    _write_records(
+        candidate.source_path,
+        [
+            {"type": "model_change", "model": "openai-codex/gpt-5.6-terra"},
+            {
+                "type": "message",
+                "timestamp": "2026-07-30T17:00:01Z",
+                "message": {"role": "toolResult", "toolCallId": "missing", "content": "nope"},
+            },
+        ],
+    )
+    candidate = _refresh_candidate_hash(candidate)
+
+    session = extract_omp(candidate)
+
+    with pytest.raises(NativeEvidenceError, match="unmatched tool result 'missing'"):
+        validate_confirmatory_evidence(candidate, session)
+
+
+def test_claude_extractor_rejects_malformed_native_json(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path)
+    candidate.source_path.write_text("{not-json}\n", encoding="utf-8")
+    candidate = _refresh_candidate_hash(candidate)
+
+    with pytest.raises(NativeEvidenceError, match="invalid JSON"):
+        extract_claude_code(candidate)
+
+
+def test_claude_extractor_keeps_missing_usage_nonconfirmatory(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path)
+    _write_records(
+        candidate.source_path,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-07-30T17:00:00Z",
+                "message": {"role": "user", "content": "Inspect the code."},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-30T17:00:01Z",
+                "message": {
+                    "id": "message-1",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "I will inspect it."}],
+                },
+            },
+        ],
+    )
+    candidate = _refresh_candidate_hash(candidate)
+
+    session = extract_claude_code(candidate)
+
+    with pytest.raises(NativeEvidenceError, match="assistant usage is missing or incomplete"):
+        validate_confirmatory_evidence(candidate, session)
+
+
 def _write_records(path: Path, records: list[dict[str, object]]) -> None:
     path.write_text(
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8"
