@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from laconic.k1.eligibility import EligibilityLedgerError, verify_eligibility
 from laconic.k1.environment_ledger import (
@@ -35,6 +35,9 @@ class PairedReplayAdmissionError(PairedReplayError):
 
 class PairedReplayCostCapError(PairedReplayError):
     """Raised after recording the billed arm that exceeds a frozen cost cap."""
+
+
+TurnClassification = Literal["completed", "induced", "unsupported"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,17 +117,23 @@ class PairedReplayRequest:
 class PairedResponseTurn:
     """One contemporary response turn, retained only in a private raw artifact."""
 
-    response: JsonValue
+    response: JsonValue | None
     native_usage: Mapping[str, object]
-    induced: bool = False
+    classification: TurnClassification
+    unsupported_reason: str | None = None
 
     def __post_init__(self) -> None:
         try:
             json.dumps(self.response, allow_nan=False)
         except (TypeError, ValueError) as error:
             raise PairedReplayError("response must be JSON-serializable") from error
-        if not isinstance(self.induced, bool):
-            raise PairedReplayError("induced must be a boolean")
+        if self.classification not in {"completed", "induced", "unsupported"}:
+            raise PairedReplayError(f"unknown turn classification {self.classification!r}")
+        if self.classification == "unsupported":
+            if self.unsupported_reason is None or not self.unsupported_reason.strip():
+                raise PairedReplayError("unsupported turn requires a non-empty reason")
+        elif self.unsupported_reason is not None:
+            raise PairedReplayError("only unsupported turns may carry a reason")
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +145,13 @@ class PairedReplayResponse:
     def __post_init__(self) -> None:
         if not self.turns:
             raise PairedReplayError("paired replay response must contain at least one turn")
+        unsupported = [
+            index for index, turn in enumerate(self.turns) if turn.classification == "unsupported"
+        ]
+        if len(unsupported) > 1:
+            raise PairedReplayError("paired replay response may contain one unsupported turn")
+        if unsupported and unsupported[0] != len(self.turns) - 1:
+            raise PairedReplayError("unsupported turn must terminate the replay response")
 
 
 class PairedReplayClient(Protocol):
@@ -147,6 +163,33 @@ class PairedReplayClient(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PairedTurnAccounting:
+    """Explicit outcome totals for one arm; no induced or unsupported turn is hidden."""
+
+    completed_turn_count: int
+    induced_turn_count: int
+    unsupported_turn_count: int
+
+    def __post_init__(self) -> None:
+        if any(
+            count < 0
+            for count in (
+                self.completed_turn_count,
+                self.induced_turn_count,
+                self.unsupported_turn_count,
+            )
+        ):
+            raise PairedReplayError("turn accounting counts must be non-negative")
+        if self.total_turn_count == 0:
+            raise PairedReplayError("turn accounting must account for at least one turn")
+
+    @property
+    def total_turn_count(self) -> int:
+        """Return the exhaustive count of observed turn outcomes."""
+        return self.completed_turn_count + self.induced_turn_count + self.unsupported_turn_count
+
+
+@dataclass(frozen=True, slots=True)
 class PairedArmReceipt:
     """Non-content accounting and provenance for one stored private arm result."""
 
@@ -154,13 +197,28 @@ class PairedArmReceipt:
     artifact_path: Path
     usage: tuple[BillableResponseUsage, ...]
     cost_usd: Decimal
-    induced_turn_count: int
+    turn_accounting: PairedTurnAccounting
 
     def __post_init__(self) -> None:
         if self.cost_usd < 0:
             raise PairedReplayError("arm cost must be non-negative")
-        if self.induced_turn_count < 0:
-            raise PairedReplayError("induced_turn_count must be non-negative")
+        if len(self.usage) != self.turn_accounting.total_turn_count:
+            raise PairedReplayError("arm usage must account for every response turn")
+
+
+@dataclass(frozen=True, slots=True)
+class PairedTerminatedPairReceipt:
+    """One explicit pair-scoped unsupported outcome retained for causal reporting."""
+
+    raw: PairedArmReceipt
+    codec: PairedArmReceipt | None
+
+    def __post_init__(self) -> None:
+        receipts = (self.raw,) if self.codec is None else (self.raw, self.codec)
+        if not any(receipt.turn_accounting.unsupported_turn_count for receipt in receipts):
+            raise PairedReplayError("terminated pair must contain an unsupported arm")
+        if self.codec is not None and self.codec.provenance.arm != "codec":
+            raise PairedReplayError("terminated pair codec receipt must be codec arm")
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +260,7 @@ class PairedRunReceipt:
     config_digest: str
     pairs: tuple[PairedPairReceipt, ...]
     total_cost_usd: Decimal
+    terminated_pairs: tuple[PairedTerminatedPairReceipt, ...] = ()
 
     def __post_init__(self) -> None:
         if not is_sha256(self.config_digest):
@@ -288,6 +347,7 @@ def run_paired_replay(
     workloads = admitted_workloads
     total_cost = Decimal(0)
     pairs: list[PairedPairReceipt] = []
+    terminated_pairs: list[PairedTerminatedPairReceipt] = []
     for workload in workloads:
         for repeat_index in range(config.repeat_count):
             raw = _run_arm(config, workload, client, run_id, "raw", repeat_index)
@@ -301,6 +361,12 @@ def run_paired_replay(
                     f"run {run_id!r} spent ${total_cost + raw.cost_usd}, "
                     f"past the ${config.cost_cap_run_usd} run cap"
                 )
+            if raw.turn_accounting.unsupported_turn_count:
+                if config.unsupported_policy != "terminate_pair":
+                    raise PairedReplayError("unsupported policy does not terminate pairs")
+                terminated_pairs.append(PairedTerminatedPairReceipt(raw, None))
+                total_cost += raw.cost_usd
+                continue
             codec = _run_arm(config, workload, client, run_id, "codec", repeat_index)
             pair = PairedPairReceipt(raw, codec)
             if pair.cost_usd > Decimal(config.cost_cap_per_pair_usd):
@@ -313,9 +379,20 @@ def run_paired_replay(
                     f"run {run_id!r} spent ${total_cost + pair.cost_usd}, "
                     f"past the ${config.cost_cap_run_usd} run cap"
                 )
+            if codec.turn_accounting.unsupported_turn_count:
+                if config.unsupported_policy != "terminate_pair":
+                    raise PairedReplayError("unsupported policy does not terminate pairs")
+                terminated_pairs.append(PairedTerminatedPairReceipt(raw, codec))
+                total_cost += pair.cost_usd
+                continue
             pairs.append(pair)
             total_cost += pair.cost_usd
-    return PairedRunReceipt(config.digest, tuple(pairs), total_cost)
+    return PairedRunReceipt(
+        config.digest,
+        tuple(pairs),
+        total_cost,
+        tuple(terminated_pairs),
+    )
 
 
 def _run_arm(
@@ -328,6 +405,8 @@ def _run_arm(
 ) -> PairedArmReceipt:
     request = PairedReplayRequest(run_id, workload, config, arm, repeat_index)
     response = client.respond(request)
+    if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
+        raise PairedReplayError("raw arm must not contain induced turns")
     usage = tuple(
         normalize_usage(turn.native_usage, config.usage_mapping) for turn in response.turns
     )
@@ -357,7 +436,7 @@ def _run_arm(
         artifact_path,
         usage,
         cost,
-        sum(turn.induced for turn in response.turns),
+        _account_turns(response),
     )
 
 
@@ -381,8 +460,9 @@ def _write_response_artifact(
         "settings_digest": request.settings_digest,
         "turns": [
             {
-                "induced": turn.induced,
+                "classification": turn.classification,
                 "response": turn.response,
+                "unsupported_reason": turn.unsupported_reason,
                 "usage": {
                     "cache_read_tokens": normalized.cache_read_tokens,
                     "cache_write_tokens": normalized.cache_write_tokens,
@@ -422,6 +502,14 @@ def _write_response_artifact(
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _account_turns(response: PairedReplayResponse) -> PairedTurnAccounting:
+    return PairedTurnAccounting(
+        completed_turn_count=sum(turn.classification == "completed" for turn in response.turns),
+        induced_turn_count=sum(turn.classification == "induced" for turn in response.turns),
+        unsupported_turn_count=sum(turn.classification == "unsupported" for turn in response.turns),
+    )
 
 
 def _ensure_private_directory(path: Path) -> None:

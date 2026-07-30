@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -23,6 +24,7 @@ from laconic.k1.paired_config import (
 )
 from laconic.k1.paired_runner import (
     PairedReplayCostCapError,
+    PairedReplayError,
     PairedReplayRequest,
     PairedReplayResponse,
     PairedResponseTurn,
@@ -168,9 +170,42 @@ class _ReplayClient:
                         "cache_creation_input_tokens": 0,
                         "output_tokens": 10,
                     },
+                    classification="completed",
                 ),
             )
         )
+
+
+def _turn(
+    classification: Literal["completed", "induced", "unsupported"] = "completed",
+    *,
+    unsupported_reason: str | None = None,
+) -> PairedResponseTurn:
+    return PairedResponseTurn(
+        response={"classification": classification},
+        native_usage={
+            "input_tokens": 100,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 10,
+        },
+        classification=classification,
+        unsupported_reason=unsupported_reason,
+    )
+
+
+class _OutcomeClient:
+    def __init__(
+        self, raw_turns: tuple[PairedResponseTurn, ...], codec_turns: tuple[PairedResponseTurn, ...]
+    ) -> None:
+        self.raw_turns = raw_turns
+        self.codec_turns = codec_turns
+        self.requests: list[PairedReplayRequest] = []
+
+    def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
+        self.requests.append(request)
+        turns = self.raw_turns if request.arm == "raw" else self.codec_turns
+        return PairedReplayResponse(turns)
 
 
 def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_path: Path) -> None:
@@ -437,3 +472,60 @@ def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: 
 
     assert [request.arm for request in client.requests] == ["raw"]
     assert (config.artifact_root / "run-over-cap" / "candidate-a" / "0000-raw.json").is_file()
+
+
+def test_paired_runner_accounts_for_induced_codec_turns(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    client = _OutcomeClient(
+        (_turn(),),
+        (_turn(), _turn("induced")),
+    )
+
+    receipt = run_paired_replay(config, (_workload(tmp_path),), client, run_id="run-induced")
+
+    assert all(
+        pair.raw.turn_accounting.completed_turn_count == 1
+        and pair.raw.turn_accounting.induced_turn_count == 0
+        and pair.codec.turn_accounting.completed_turn_count == 1
+        and pair.codec.turn_accounting.induced_turn_count == 1
+        and pair.codec.turn_accounting.unsupported_turn_count == 0
+        for pair in receipt.pairs
+    )
+    assert '"classification":"induced"' in receipt.pairs[0].codec.artifact_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_unsupported_turn_terminates_only_its_pair_and_preserves_artifacts(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    client = _OutcomeClient(
+        (_turn("unsupported", unsupported_reason="snapshot has no matching tool call"),),
+        (_turn(),),
+    )
+
+    receipt = run_paired_replay(config, (_workload(tmp_path),), client, run_id="run-unsupported")
+
+    assert [request.arm for request in client.requests] == ["raw", "raw"]
+    assert receipt.pairs == ()
+    assert len(receipt.terminated_pairs) == config.repeat_count
+    terminated = receipt.terminated_pairs[0]
+    assert terminated.raw.turn_accounting.unsupported_turn_count == 1
+    assert terminated.raw.artifact_path.is_file()
+    assert "snapshot has no matching tool call" in terminated.raw.artifact_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(PairedReplayError, match="must terminate"):
+        PairedReplayResponse((_turn("unsupported", unsupported_reason="unsupported"), _turn()))
+
+    client = _OutcomeClient((_turn("induced"),), (_turn(),))
+    with pytest.raises(PairedReplayError, match="raw arm must not"):
+        run_paired_replay(_config(tmp_path), (_workload(tmp_path),), client, run_id="run-invalid")
+
+    assert [request.arm for request in client.requests] == ["raw"]
