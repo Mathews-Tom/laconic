@@ -36,12 +36,13 @@ def _ledger() -> EligibilityLedger:
 
 
 def test_private_ledger_round_trip_enforces_permissions(tmp_path: Path) -> None:
-    path = tmp_path / "private" / "eligibility.json"
+    path = tmp_path / "private" / "nested" / "eligibility.json"
 
     write_eligibility_ledger(path, _ledger())
 
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert path.parent.parent.stat().st_mode & 0o777 == 0o700
     assert read_eligibility_ledger(path) == _ledger()
 
 

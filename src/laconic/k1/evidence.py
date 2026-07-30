@@ -9,12 +9,19 @@ from typing import Literal
 
 from laconic.k1.manifest import Candidate, source_sha256
 
-type JsonScalar = str | int | float | bool | None
-type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
+type EvidenceFailureCause = Literal["integrity", "missing_evidence"]
 
 
 class NativeEvidenceError(ValueError):
     """Raised when native evidence cannot satisfy K1's replay contract."""
+
+    def __init__(self, message: str, *, cause: EvidenceFailureCause = "integrity") -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
+type JsonScalar = str | int | float | bool | None
+type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +170,9 @@ def validate_confirmatory_evidence(candidate: Candidate, session: NativeSession)
     if candidate.model is not None and session.model != candidate.model:
         raise NativeEvidenceError("model does not match manifest")
     if session.model is None:
-        raise NativeEvidenceError("native session has no model identifier")
+        raise NativeEvidenceError(
+            "native session has no model identifier", cause="missing_evidence"
+        )
 
     open_calls: set[str] = set()
     seen_calls: set[str] = set()
@@ -177,7 +186,8 @@ def validate_confirmatory_evidence(candidate: Candidate, session: NativeSession)
             saw_assistant = True
             if event.usage is None or not event.usage.is_billable:
                 raise NativeEvidenceError(
-                    f"event {event.index}: assistant usage is missing or incomplete"
+                    f"event {event.index}: assistant usage is missing or incomplete",
+                    cause="missing_evidence",
                 )
             for call in event.tool_calls:
                 if call.call_id in seen_calls:
@@ -190,16 +200,20 @@ def validate_confirmatory_evidence(candidate: Candidate, session: NativeSession)
         result = event.tool_result
         if result is None or result.call_id not in open_calls:
             call_id = result.call_id if result is not None else "<missing>"
-            raise NativeEvidenceError(f"event {event.index}: unmatched tool result {call_id!r}")
+            raise NativeEvidenceError(
+                f"event {event.index}: unmatched tool result {call_id!r}",
+                cause="missing_evidence",
+            )
         open_calls.remove(result.call_id)
 
     if not saw_prompt:
-        raise NativeEvidenceError("native session has no user prompt")
+        raise NativeEvidenceError("native session has no user prompt", cause="missing_evidence")
     if not saw_assistant:
-        raise NativeEvidenceError("native session has no assistant event")
+        raise NativeEvidenceError("native session has no assistant event", cause="missing_evidence")
     if open_calls:
         raise NativeEvidenceError(
-            f"native session has unmatched tool calls: {sorted(open_calls)!r}"
+            f"native session has unmatched tool calls: {sorted(open_calls)!r}",
+            cause="missing_evidence",
         )
 
 
