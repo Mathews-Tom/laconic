@@ -37,6 +37,8 @@ def extract_native(candidate: Candidate) -> NativeSession:
         return extract_claude_code(candidate)
     if candidate.provider == "omp":
         return extract_omp(candidate)
+    if candidate.provider == "codex":
+        return extract_codex(candidate)
     raise NativeEvidenceError(f"unsupported native provider {candidate.provider!r}")
 
 
@@ -71,6 +73,48 @@ def extract_claude_code(candidate: Candidate) -> NativeSession:
 
     events = _build_claude_events(entries, assistants)
     return _session(candidate, "claude-code-jsonl-v1", events)
+
+
+def extract_codex(candidate: Candidate) -> NativeSession:
+    """Reject Codex JSONL when its usage cannot identify a response event."""
+    pending_calls: set[str] = set()
+    saw_usage = False
+    for line_number, record in _records(candidate.source_path):
+        record_type = record.get("type")
+        payload = _mapping(record.get("payload"))
+        payload_type = payload.get("type")
+        if record_type == "response_item" and payload_type in {
+            "custom_tool_call",
+            "function_call",
+        }:
+            call_id = _required_text(payload.get("call_id"), line_number, "tool call id")
+            if call_id in pending_calls:
+                raise _error(line_number, f"duplicate tool call id {call_id!r}")
+            pending_calls.add(call_id)
+        elif record_type == "response_item" and payload_type in {
+            "custom_tool_call_output",
+            "function_call_output",
+        }:
+            call_id = _required_text(payload.get("call_id"), line_number, "tool result id")
+            if call_id not in pending_calls:
+                raise _error(line_number, f"unmatched tool result {call_id!r}")
+            pending_calls.remove(call_id)
+        elif record_type == "event_msg" and payload_type == "token_count":
+            info = _mapping(payload.get("info"))
+            usage = _mapping(info.get("last_token_usage"))
+            _counter(usage, "input_tokens", line_number)
+            _counter(usage, "output_tokens", line_number)
+            _counter(usage, "cached_input_tokens", line_number)
+            saw_usage = True
+    if pending_calls:
+        raise NativeEvidenceError(
+            f"native source has unmatched tool calls: {sorted(pending_calls)!r}"
+        )
+    if saw_usage:
+        raise NativeEvidenceError(
+            "Codex token_count usage has no response identifier; cannot associate billable usage"
+        )
+    raise NativeEvidenceError("Codex native source has no billable usage evidence")
 
 
 def extract_omp(candidate: Candidate) -> NativeSession:

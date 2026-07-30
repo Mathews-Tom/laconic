@@ -16,7 +16,7 @@ from laconic.k1.evidence import (
     ToolResult,
     validate_confirmatory_evidence,
 )
-from laconic.k1.extractors import extract_claude_code, extract_omp
+from laconic.k1.extractors import extract_claude_code, extract_native, extract_omp
 from laconic.k1.manifest import Candidate, source_sha256
 
 
@@ -277,6 +277,54 @@ def test_omp_extractor_preserves_native_usage_and_tool_identity(tmp_path: Path) 
     assert session.events[2].tool_result == ToolResult(
         "call-1", [{"type": "text", "text": "print('ok')"}]
     )
+
+
+def test_codex_probe_refuses_unlinked_billable_usage(tmp_path: Path) -> None:
+    candidate = _candidate(
+        tmp_path,
+        provider="codex",
+        model="gpt-5.6",
+        model_family="gpt-5.6",
+    )
+    _write_records(
+        candidate.source_path,
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "read",
+                    "arguments": '{"path":"src/app.py"}',
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "print('ok')",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                            "cached_input_tokens": 50,
+                        }
+                    },
+                },
+            },
+        ],
+    )
+    candidate = _refresh_candidate_hash(candidate)
+
+    with pytest.raises(NativeEvidenceError, match="has no response identifier"):
+        extract_native(candidate)
 
 
 def _write_records(path: Path, records: list[dict[str, object]]) -> None:
