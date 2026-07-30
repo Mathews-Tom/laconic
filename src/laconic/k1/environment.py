@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import struct
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
+from laconic.k1.evidence import JsonValue
 from laconic.k1.manifest import is_sha256
 
 _SNAPSHOT_CHUNK_BYTES: Final = 1024 * 1024
@@ -131,3 +134,94 @@ def _update_digest_length(digest: hashlib._Hash, length: int) -> None:
 def _require_not_writable(path: Path, entry_stat: os.stat_result) -> None:
     if entry_stat.st_mode & 0o222:
         raise EnvironmentError(f"snapshot entry is writable: {path}")
+
+
+ResolutionStatus = Literal["resolved", "unsupported"]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResolution:
+    """The result of resolving one contemporary tool call."""
+
+    status: ResolutionStatus
+    output: JsonValue | None
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.status not in {"resolved", "unsupported"}:
+            raise EnvironmentError(f"unknown tool resolution status {self.status!r}")
+        if not self.reason.strip():
+            raise EnvironmentError("tool resolution reason must not be empty")
+        if self.status == "unsupported" and self.output is not None:
+            raise EnvironmentError("unsupported tool result must not carry an output")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedToolObservation:
+    """One recorded tool action and its recorded result, without inference."""
+
+    name: str
+    input: dict[str, JsonValue]
+    output: JsonValue
+    _input_json: str = field(init=False, repr=False)
+    _output_json: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise EnvironmentError("recorded tool name must not be empty")
+        object.__setattr__(self, "_input_json", _canonical_json(self.input))
+        object.__setattr__(self, "_output_json", _canonical_json(self.output))
+
+
+class RecordedToolResolver:
+    """Serve a recorded result only for the exact next recorded tool call."""
+
+    def __init__(self, observations: Sequence[RecordedToolObservation]) -> None:
+        self._observations = tuple(observations)
+        self._position = 0
+        self._terminated = False
+
+    @property
+    def position(self) -> int:
+        """Return the number of exactly matched observations served."""
+        return self._position
+
+    @property
+    def terminated(self) -> bool:
+        """Return whether an unsupported call has terminated this resolver."""
+        return self._terminated
+
+    def resolve(self, name: str, tool_input: dict[str, JsonValue]) -> ToolResolution:
+        """Resolve one exact call or terminate without advancing on a mismatch."""
+        if self._position == len(self._observations):
+            self._terminated = True
+            return ToolResolution("unsupported", None, "recorded tool trace is exhausted")
+        if self._terminated:
+            return ToolResolution("unsupported", None, "replay already terminated")
+        if not name.strip():
+            self._terminated = True
+            return ToolResolution("unsupported", None, "tool name is empty")
+        try:
+            actual_input = _canonical_json(tool_input)
+        except EnvironmentError:
+            self._terminated = True
+            return ToolResolution("unsupported", None, "tool input is not valid JSON")
+        expected = self._observations[self._position]
+        if name != expected.name or actual_input != expected._input_json:
+            self._terminated = True
+            return ToolResolution("unsupported", None, "tool call differs from recorded trace")
+        self._position += 1
+        return ToolResolution(
+            "resolved",
+            json.loads(expected._output_json),
+            "exact recorded tool call",
+        )
+
+
+def _canonical_json(value: JsonValue) -> str:
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError) as error:
+        raise EnvironmentError("tool payload must be valid JSON") from error
