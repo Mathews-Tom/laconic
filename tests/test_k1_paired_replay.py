@@ -10,8 +10,12 @@ from typing import Literal
 
 import pytest
 
+from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
 from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
-from laconic.k1.environment_ledger import assess_environments, write_environment_ledger
+from laconic.k1.environment_ledger import (
+    assess_environments,
+    write_environment_ledger,
+)
 from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
 from laconic.k1.paired_config import (
     PairedReplayConfig,
@@ -529,3 +533,53 @@ def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(
         run_paired_replay(_config(tmp_path), (_workload(tmp_path),), client, run_id="run-invalid")
 
     assert [request.arm for request in client.requests] == ["raw"]
+
+
+def test_paired_config_cli_and_artifact_root_hygiene(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    config_path = tmp_path / "private" / "paired-replay.json"
+    write_paired_config(config_path, config)
+
+    assert main(["k1", "replay", "verify-config", "--config", str(config_path)]) == EXIT_OK
+    assert "verified K1 paired replay config" in capsys.readouterr().out
+
+    bad_root = replace(config, artifact_root=tmp_path / "private" / "bad-artifacts")
+    bad_root.artifact_root.mkdir(mode=0o755)
+    bad_root.artifact_root.chmod(0o755)
+    client = _ReplayClient()
+    with pytest.raises(PairedReplayError, match="mode 0700"):
+        run_paired_replay(bad_root, (_workload(tmp_path),), client, run_id="run-private")
+    assert client.requests == []
+
+
+def test_runner_rejects_unsafe_or_symlinked_artifact_paths_before_request(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    workload = _workload(tmp_path)
+    client = _ReplayClient()
+
+    with pytest.raises(PairedReplayError, match="simple names"):
+        run_paired_replay(config, (workload,), client, run_id="../escape")
+    assert client.requests == []
+
+    target = tmp_path / "private" / "outside"
+    target.mkdir(mode=0o700)
+    (config.artifact_root / "run-link").symlink_to(target, target_is_directory=True)
+    with pytest.raises(PairedReplayError, match="non-symlink directory"):
+        run_paired_replay(config, (workload,), client, run_id="run-link")
+    assert client.requests == []
+
+
+def test_paired_config_cli_rejects_nonprivate_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    config_path = tmp_path / "private" / "paired-replay.json"
+    write_paired_config(config_path, config)
+    config_path.chmod(0o644)
+
+    assert main(["k1", "replay", "verify-config", "--config", str(config_path)]) == EXIT_K1_MANIFEST
+    assert "mode 0600" in capsys.readouterr().err

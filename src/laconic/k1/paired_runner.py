@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -345,6 +346,14 @@ def run_paired_replay(
             "workloads must exactly match the configuration's revalidated M1/M2/M3 evidence"
         )
     workloads = admitted_workloads
+    _ensure_private_directory(config.artifact_root)
+    _safe_path_component(run_id)
+    for workload in workloads:
+        candidate_id = _safe_path_component(workload.candidate.candidate_id)
+        _ensure_private_directory(
+            config.artifact_root / run_id / candidate_id,
+            root=config.artifact_root,
+        )
     total_cost = Decimal(0)
     pairs: list[PairedPairReceipt] = []
     terminated_pairs: list[PairedTerminatedPairReceipt] = []
@@ -441,7 +450,12 @@ def _run_arm(
 
 
 def _artifact_path(root: Path, run_id: str, candidate_id: str, arm: Arm, repeat_index: int) -> Path:
-    return root / run_id / candidate_id / f"{repeat_index:04d}-{arm}.json"
+    return (
+        root
+        / _safe_path_component(run_id)
+        / _safe_path_component(candidate_id)
+        / (f"{repeat_index:04d}-{arm}.json")
+    )
 
 
 def _write_response_artifact(
@@ -450,7 +464,7 @@ def _write_response_artifact(
     response: PairedReplayResponse,
     usage: tuple[BillableResponseUsage, ...],
 ) -> str:
-    _ensure_private_directory(path.parent)
+    _ensure_private_directory(path.parent, root=request.config.artifact_root)
     document: dict[str, JsonValue] = {
         "arm": request.arm,
         "candidate_id": request.workload.candidate.candidate_id,
@@ -512,7 +526,35 @@ def _account_turns(response: PairedReplayResponse) -> PairedTurnAccounting:
     )
 
 
-def _ensure_private_directory(path: Path) -> None:
+def _safe_path_component(value: str) -> str:
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise PairedReplayError("artifact path components must be non-empty simple names")
+    return value
+
+
+def _ensure_private_directory(path: Path, *, root: Path | None = None) -> None:
+    if root is not None:
+        _ensure_private_directory(root)
+        try:
+            relative = path.relative_to(root)
+        except ValueError as error:
+            raise PairedReplayError(
+                "artifact directory escapes configured artifact root"
+            ) from error
+        current = root
+        for component in relative.parts:
+            current /= component
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            except OSError as error:
+                raise PairedReplayError(
+                    f"cannot create artifact directory {current}: {error}"
+                ) from error
+            _validate_private_directory(current)
+        return
+
     missing: list[Path] = []
     ancestor = path
     while not ancestor.exists():
@@ -521,7 +563,19 @@ def _ensure_private_directory(path: Path) -> None:
     for directory in reversed(missing):
         directory.mkdir(mode=0o700)
         os.chmod(directory, 0o700)
-    mode = path.stat().st_mode & 0o777
+    _validate_private_directory(path)
+
+
+def _validate_private_directory(path: Path) -> None:
+    try:
+        entry_stat = path.lstat()
+    except OSError as error:
+        raise PairedReplayError(f"cannot stat artifact directory {path}: {error}") from error
+    if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
+        raise PairedReplayError("artifact directory must be a non-symlink directory")
+    if entry_stat.st_uid != os.getuid():
+        raise PairedReplayError("artifact directory must be owned by the current user")
+    mode = entry_stat.st_mode & 0o777
     if mode != 0o700:
         raise PairedReplayError(f"artifact directory must have mode 0700, found {mode:04o}")
 

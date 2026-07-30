@@ -31,6 +31,7 @@ from laconic.k1.environment_ledger import (
     write_environment_ledger,
 )
 from laconic.k1.manifest import ManifestError, verify_manifest
+from laconic.k1.paired_config import PairedReplayConfigError, read_paired_config
 from laconic.k1.searchat_export import produce_manifest
 from laconic.k1.split import SplitPolicy
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
@@ -353,6 +354,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
     )
     k1_environment_verify.set_defaults(handler=_k1_environment_verify)
+    k1_replay = k1_subcommands.add_parser(
+        "replay",
+        help="validate private configuration for a contemporary K1 paired replay",
+    )
+    k1_replay_subcommands = k1_replay.add_subparsers(dest="k1_replay_command")
+    k1_replay_verify_config = k1_replay_subcommands.add_parser(
+        "verify-config",
+        help="verify a private, integrity-checked paired replay configuration",
+    )
+    k1_replay_verify_config.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private paired replay configuration",
+    )
+    k1_replay_verify_config.set_defaults(handler=_k1_replay_verify_config)
 
     expand = subcommands.add_parser(
         "expand",
@@ -999,6 +1017,19 @@ def _k1_environment_verify(args: argparse.Namespace) -> int:
         f"verified K1 environment ledger {args.ledger}: {len(ledger.records)} candidate(s), "
         f"valid={counts['valid']}, unsupported={counts['unsupported']}, "
         f"unavailable={counts['unavailable']}"
+    )
+    return EXIT_OK
+
+
+def _k1_replay_verify_config(args: argparse.Namespace) -> int:
+    try:
+        config = read_paired_config(args.config)
+    except PairedReplayConfigError as error:
+        print(f"laconic k1 replay verify-config: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(
+        f"verified K1 paired replay config {args.config}: "
+        f"provider={config.provider}, model={config.model}, digest {config.digest}"
     )
     return EXIT_OK
 
