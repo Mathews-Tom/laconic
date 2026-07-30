@@ -17,6 +17,12 @@ from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_mode
 from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
+from laconic.k1.eligibility import (
+    EligibilityLedgerError,
+    assess_manifest,
+    verify_eligibility,
+    write_eligibility_ledger,
+)
 from laconic.k1.manifest import ManifestError, verify_manifest
 from laconic.k1.searchat_export import produce_manifest
 from laconic.k1.split import SplitPolicy
@@ -286,6 +292,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="deterministic split seed (default: laconic-k1-v1)",
     )
     k1_manifest_from_searchat.set_defaults(handler=_k1_manifest_from_searchat)
+    k1_eligibility = k1_subcommands.add_parser(
+        "eligibility",
+        help="build and verify a private native-evidence eligibility ledger",
+    )
+    k1_eligibility_subcommands = k1_eligibility.add_subparsers(dest="k1_eligibility_command")
+    k1_eligibility_build = k1_eligibility_subcommands.add_parser(
+        "build",
+        help="probe every manifest candidate and write private dispositions",
+    )
+    k1_eligibility_build.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_eligibility_build.add_argument(
+        "--ledger", type=Path, required=True, metavar="FILE", help="private eligibility ledger"
+    )
+    k1_eligibility_build.set_defaults(handler=_k1_eligibility_build)
+    k1_eligibility_verify = k1_eligibility_subcommands.add_parser(
+        "verify",
+        help="verify a complete eligibility ledger and recheck confirmatory records",
+    )
+    k1_eligibility_verify.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_eligibility_verify.add_argument(
+        "--ledger", type=Path, required=True, metavar="FILE", help="private eligibility ledger"
+    )
+    k1_eligibility_verify.set_defaults(handler=_k1_eligibility_verify)
 
     expand = subcommands.add_parser(
         "expand",
@@ -871,6 +904,36 @@ def _k1_manifest_verify(args: argparse.Namespace) -> int:
         f"verified K1 manifest {args.manifest}: {len(manifest.candidates)} candidate(s), "
         f"digest {manifest.digest}"
     )
+    return EXIT_OK
+
+
+def _k1_eligibility_build(args: argparse.Namespace) -> int:
+    try:
+        manifest = verify_manifest(args.manifest)
+        ledger = assess_manifest(manifest)
+        write_eligibility_ledger(args.ledger, ledger)
+    except (EligibilityLedgerError, ManifestError) as error:
+        print(f"laconic k1 eligibility build: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    counts = {
+        disposition: sum(record.disposition == disposition for record in ledger.records)
+        for disposition in ("confirmatory", "diagnostic_only", "excluded")
+    }
+    print(
+        f"wrote K1 eligibility ledger {args.ledger}: {len(ledger.records)} candidate(s), "
+        f"confirmatory={counts['confirmatory']}, "
+        f"diagnostic-only={counts['diagnostic_only']}, excluded={counts['excluded']}"
+    )
+    return EXIT_OK
+
+
+def _k1_eligibility_verify(args: argparse.Namespace) -> int:
+    try:
+        ledger = verify_eligibility(args.manifest, args.ledger)
+    except EligibilityLedgerError as error:
+        print(f"laconic k1 eligibility verify: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(f"verified K1 eligibility ledger {args.ledger}: {len(ledger.records)} candidate(s)")
     return EXIT_OK
 
 
