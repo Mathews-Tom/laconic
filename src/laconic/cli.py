@@ -17,6 +17,7 @@ from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_mode
 from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
+from laconic.k1.manifest import ManifestError, verify_manifest
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
 from laconic.render.narrate import (
     NarrationConfig,
@@ -96,6 +97,8 @@ EXIT_NARRATION_CONFIG = 16
 EXIT_NARRATION_RESPONSE = 17
 EXIT_STUDY_OUTPUT_ERROR = 18
 EXIT_STUDY_INSUFFICIENT_PARTICIPANTS = 19
+
+EXIT_K1_MANIFEST = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -228,6 +231,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="report format",
     )
     gates.set_defaults(handler=_gates)
+
+    k1 = subcommands.add_parser(
+        "k1",
+        help="manage private metadata-only artifacts for the K1 hybrid remeasurement",
+    )
+    k1_subcommands = k1.add_subparsers(dest="k1_command")
+    k1_manifest = k1_subcommands.add_parser(
+        "manifest",
+        help="read and verify a frozen metadata-only candidate manifest",
+    )
+    k1_manifest_subcommands = k1_manifest.add_subparsers(dest="k1_manifest_command")
+    k1_manifest_verify = k1_manifest_subcommands.add_parser(
+        "verify",
+        help="verify the manifest digest, frozen split, and native source hashes",
+    )
+    k1_manifest_verify.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private metadata-only K1 manifest",
+    )
+    k1_manifest_verify.set_defaults(handler=_k1_manifest_verify)
 
     expand = subcommands.add_parser(
         "expand",
@@ -801,6 +827,19 @@ def _gates(args: argparse.Namespace) -> int:
     else:
         _report_gates(suite)
     return suite.exit_code
+
+
+def _k1_manifest_verify(args: argparse.Namespace) -> int:
+    try:
+        manifest = verify_manifest(args.manifest)
+    except ManifestError as error:
+        print(f"laconic k1 manifest verify: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(
+        f"verified K1 manifest {args.manifest}: {len(manifest.candidates)} candidate(s), "
+        f"digest {manifest.digest}"
+    )
+    return EXIT_OK
 
 
 def _expand(args: argparse.Namespace) -> int:
