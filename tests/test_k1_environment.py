@@ -11,6 +11,7 @@ from laconic.k1.environment import (
     RecordedToolObservation,
     RecordedToolResolver,
     SnapshotEnvironment,
+    SnapshotToolResolver,
     resolve_snapshot_path,
     snapshot_tree_sha256,
     validate_snapshot,
@@ -165,3 +166,60 @@ def test_recorded_resolver_returns_independent_recorded_output() -> None:
     result.output["lines"] = ["changed"]
 
     assert original_output == {"lines": ["one"]}
+
+
+def test_snapshot_resolver_reads_only_contained_immutable_files(tmp_path: Path) -> None:
+    root = _immutable_snapshot(tmp_path)
+    resolver = SnapshotToolResolver(SnapshotEnvironment(root, snapshot_tree_sha256(root)))
+
+    read = resolver.resolve("Read", {"path": "src/main.py"})
+    escaped = resolver.resolve("Read", {"path": "../outside.txt"})
+
+    assert read.status == "resolved"
+    assert read.output == "print('safe')\n"
+    assert escaped.status == "unsupported"
+    assert escaped.output is None
+    assert resolver.terminated
+
+
+def test_snapshot_resolver_stops_when_snapshot_digest_changes(tmp_path: Path) -> None:
+    root = _immutable_snapshot(tmp_path)
+    resolver = SnapshotToolResolver(SnapshotEnvironment(root, snapshot_tree_sha256(root)))
+    source = root / "src" / "main.py"
+    source.chmod(0o600)
+    source.write_text("print('changed')\n", encoding="utf-8")
+    source.chmod(0o400)
+
+    result = resolver.resolve("Read", {"path": "src/main.py"})
+
+    assert result.status == "unsupported"
+    assert "digest" in result.reason
+    assert resolver.terminated
+
+
+def test_snapshot_resolver_rejects_command_tools_without_execution(tmp_path: Path) -> None:
+    root = _immutable_snapshot(tmp_path)
+    resolver = SnapshotToolResolver(SnapshotEnvironment(root, snapshot_tree_sha256(root)))
+
+    result = resolver.resolve("Git", {"argv": ["show", "--output", "/tmp/outside", "HEAD"]})
+
+    assert result.status == "unsupported"
+    assert result.output is None
+    assert resolver.terminated
+
+
+def test_snapshot_resolver_rejects_oversized_read(tmp_path: Path) -> None:
+    root = _immutable_snapshot(tmp_path)
+    source = root / "src"
+    source.chmod(0o700)
+    large = source / "large.txt"
+    large.write_bytes(b"x" * (1024 * 1024 + 1))
+    large.chmod(0o400)
+    source.chmod(0o500)
+    resolver = SnapshotToolResolver(SnapshotEnvironment(root, snapshot_tree_sha256(root)))
+
+    result = resolver.resolve("Read", {"path": "src/large.txt"})
+
+    assert result.status == "unsupported"
+    assert "output limit" in result.reason
+    assert resolver.terminated

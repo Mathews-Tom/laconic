@@ -15,6 +15,8 @@ from typing import Final, Literal
 from laconic.k1.evidence import JsonValue
 from laconic.k1.manifest import is_sha256
 
+_MAX_SNAPSHOT_READ_BYTES: Final = 1024 * 1024
+
 _SNAPSHOT_CHUNK_BYTES: Final = 1024 * 1024
 
 
@@ -225,3 +227,52 @@ def _canonical_json(value: JsonValue) -> str:
         )
     except (TypeError, ValueError) as error:
         raise EnvironmentError("tool payload must be valid JSON") from error
+
+
+class SnapshotToolResolver:
+    """Resolve root-contained read-only tools against an immutable snapshot."""
+
+    def __init__(self, snapshot: SnapshotEnvironment) -> None:
+        self._snapshot = snapshot
+        self._root = validate_snapshot(snapshot)
+        self._terminated = False
+
+    @property
+    def terminated(self) -> bool:
+        """Return whether a compromised environment or unsupported call stopped replay."""
+        return self._terminated
+
+    def resolve(self, name: str, tool_input: dict[str, JsonValue]) -> ToolResolution:
+        """Resolve a permitted read-only tool or fail closed as unsupported."""
+        if self._terminated:
+            return ToolResolution("unsupported", None, "replay already terminated")
+        try:
+            self._root = validate_snapshot(self._snapshot)
+            if name == "Read":
+                return _resolve_snapshot_read(self._root, tool_input)
+        except EnvironmentError as error:
+            self._terminated = True
+            return ToolResolution("unsupported", None, str(error))
+        self._terminated = True
+        return ToolResolution("unsupported", None, "tool is not supported by snapshot environment")
+
+
+def _resolve_snapshot_read(root: Path, tool_input: dict[str, JsonValue]) -> ToolResolution:
+    if set(tool_input) != {"path"} or not isinstance(tool_input["path"], str):
+        raise EnvironmentError("Read requires exactly one string path")
+    path = resolve_snapshot_path(root, tool_input["path"])
+    try:
+        entry_stat = path.stat()
+    except OSError as error:
+        raise EnvironmentError(f"cannot stat snapshot target: {error}") from error
+    if not stat.S_ISREG(entry_stat.st_mode):
+        raise EnvironmentError("Read target must be a regular file")
+    if entry_stat.st_size > _MAX_SNAPSHOT_READ_BYTES:
+        raise EnvironmentError("Read target exceeds the snapshot output limit")
+    try:
+        output = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise EnvironmentError("Read target is not UTF-8 text") from error
+    except OSError as error:
+        raise EnvironmentError(f"cannot read snapshot target: {error}") from error
+    return ToolResolution("resolved", output, "immutable snapshot read")
