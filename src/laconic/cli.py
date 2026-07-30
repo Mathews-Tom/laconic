@@ -23,6 +23,13 @@ from laconic.k1.eligibility import (
     verify_eligibility,
     write_eligibility_ledger,
 )
+from laconic.k1.environment_ledger import (
+    EnvironmentLedgerError,
+    assess_environments,
+    environment_counts,
+    verify_environment,
+    write_environment_ledger,
+)
 from laconic.k1.manifest import ManifestError, verify_manifest
 from laconic.k1.searchat_export import produce_manifest
 from laconic.k1.split import SplitPolicy
@@ -319,6 +326,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--ledger", type=Path, required=True, metavar="FILE", help="private eligibility ledger"
     )
     k1_eligibility_verify.set_defaults(handler=_k1_eligibility_verify)
+    k1_environment = k1_subcommands.add_parser(
+        "environment",
+        help="verify private non-content tool-environment admission receipts",
+    )
+    k1_environment_subcommands = k1_environment.add_subparsers(dest="k1_environment_command")
+    k1_environment_build = k1_environment_subcommands.add_parser(
+        "build",
+        help="validate recorded-tool environments and write private admission receipts",
+    )
+    k1_environment_build.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_environment_build.add_argument(
+        "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
+    )
+    k1_environment_build.set_defaults(handler=_k1_environment_build)
+    k1_environment_verify = k1_environment_subcommands.add_parser(
+        "verify",
+        help="verify every confirmatory candidate has a valid tool environment",
+    )
+    k1_environment_verify.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_environment_verify.add_argument(
+        "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
+    )
+    k1_environment_verify.set_defaults(handler=_k1_environment_verify)
 
     expand = subcommands.add_parser(
         "expand",
@@ -934,6 +968,38 @@ def _k1_eligibility_verify(args: argparse.Namespace) -> int:
         print(f"laconic k1 eligibility verify: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST
     print(f"verified K1 eligibility ledger {args.ledger}: {len(ledger.records)} candidate(s)")
+    return EXIT_OK
+
+
+def _k1_environment_build(args: argparse.Namespace) -> int:
+    try:
+        manifest = verify_manifest(args.manifest)
+        ledger = assess_environments(manifest)
+        write_environment_ledger(args.ledger, ledger)
+    except (EnvironmentLedgerError, ManifestError) as error:
+        print(f"laconic k1 environment build: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    counts = environment_counts(ledger)
+    print(
+        f"wrote K1 environment ledger {args.ledger}: {len(ledger.records)} candidate(s), "
+        f"valid={counts['valid']}, unsupported={counts['unsupported']}, "
+        f"unavailable={counts['unavailable']}"
+    )
+    return EXIT_OK
+
+
+def _k1_environment_verify(args: argparse.Namespace) -> int:
+    try:
+        ledger = verify_environment(args.manifest, args.ledger)
+    except EnvironmentLedgerError as error:
+        print(f"laconic k1 environment verify: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    counts = environment_counts(ledger)
+    print(
+        f"verified K1 environment ledger {args.ledger}: {len(ledger.records)} candidate(s), "
+        f"valid={counts['valid']}, unsupported={counts['unsupported']}, "
+        f"unavailable={counts['unavailable']}"
+    )
     return EXIT_OK
 
 
