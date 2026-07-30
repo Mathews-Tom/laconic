@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from laconic.k1.paired_config import (
     read_paired_config,
     write_paired_config,
 )
+from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
 
 def _config(tmp_path: Path) -> PairedReplayConfig:
@@ -250,3 +252,37 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         "run_id": "run-1",
         "source_sha256": "a" * 64,
     }
+
+
+def test_normalize_usage_requires_every_declared_native_counter(tmp_path: Path) -> None:
+    mapping = _config(tmp_path).usage_mapping
+    native_usage = {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 20,
+        "cache_creation_input_tokens": 10,
+        "output_tokens": 50,
+    }
+
+    assert normalize_usage(native_usage, mapping) == BillableResponseUsage(100, 20, 10, 50)
+
+    native_usage.pop("cache_creation_input_tokens")
+    with pytest.raises(PairedReplayConfigError, match="missing configured field"):
+        normalize_usage(native_usage, mapping)
+    native_usage["cache_creation_input_tokens"] = True
+    with pytest.raises(PairedReplayConfigError, match="non-negative integer"):
+        normalize_usage(native_usage, mapping)
+    native_usage["new_billable_counter"] = 1
+    with pytest.raises(PairedReplayConfigError, match="undeclared fields"):
+        normalize_usage(native_usage, mapping)
+
+
+def test_decimal_pricing_uses_explicit_cache_categories(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    usage = BillableResponseUsage(
+        input_tokens=1_000_000,
+        cache_read_tokens=2_000_000,
+        cache_write_tokens=4_000_000,
+        output_tokens=8_000_000,
+    )
+
+    assert cost_usage(usage, config.pricing) == Decimal("138.6")
