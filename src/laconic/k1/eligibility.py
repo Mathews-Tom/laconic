@@ -11,13 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from laconic.k1.evidence import NativeEvidenceError, NativeSession, validate_confirmatory_evidence
+from laconic.k1.evidence import (
+    EvidenceFailureCause,
+    NativeEvidenceError,
+    NativeSession,
+    validate_confirmatory_evidence,
+)
 from laconic.k1.extractors import extract_native
 from laconic.k1.manifest import Candidate, Manifest, ManifestError, is_sha256, read_manifest
 
 LEDGER_SCHEMA_VERSION = 1
 
-EligibilityDisposition = Literal["confirmatory", "diagnostic_only", "excluded"]
+LedgerDisposition = Literal["confirmatory", "diagnostic_only", "excluded"]
 
 
 class EligibilityLedgerError(ValueError):
@@ -30,7 +35,7 @@ class EligibilityRecord:
 
     candidate_id: str
     source_sha256: str
-    disposition: EligibilityDisposition
+    disposition: LedgerDisposition
     reason: str
     parser: str | None
     model: str | None
@@ -134,8 +139,17 @@ def verify_eligibility(manifest_path: Path, ledger_path: Path) -> EligibilityLed
             raise EligibilityLedgerError(
                 f"candidate {candidate.candidate_id}: source_sha256 mismatch"
             )
+        if candidate.eligibility_disposition not in {"unreviewed", record.disposition}:
+            raise EligibilityLedgerError(
+                f"candidate {candidate.candidate_id}: manifest and ledger dispositions disagree"
+            )
         if record.disposition == "confirmatory":
-            session = _confirmatory_session(candidate)
+            try:
+                session = _confirmatory_session(candidate)
+            except (NativeEvidenceError, OSError) as error:
+                raise EligibilityLedgerError(
+                    f"candidate {candidate.candidate_id}: confirmatory evidence no longer extracts"
+                ) from error
             if (
                 record.parser != session.parser
                 or record.model != session.model
@@ -151,16 +165,7 @@ def write_eligibility_ledger(path: Path, ledger: EligibilityLedger) -> None:
     """Atomically write a ledger to a 0700 directory as a 0600 file."""
     temporary: Path | None = None
     try:
-        try:
-            mode = path.parent.stat().st_mode & 0o777
-        except FileNotFoundError:
-            path.parent.mkdir(parents=True, mode=0o700)
-            os.chmod(path.parent, 0o700)
-        else:
-            if mode != 0o700:
-                raise EligibilityLedgerError(
-                    f"eligibility ledger directory must have mode 0700, found {mode:04o}"
-                )
+        _ensure_private_directory(path.parent)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -221,12 +226,21 @@ def read_eligibility_ledger(path: Path) -> EligibilityLedger:
 def _assess_candidate(candidate: Candidate) -> EligibilityRecord:
     try:
         session = _confirmatory_session(candidate)
-    except NativeEvidenceError as error:
-        disposition = _failure_disposition(str(error))
+    except OSError:
         return EligibilityRecord(
             candidate.candidate_id,
             candidate.source_sha256,
-            disposition,
+            "excluded",
+            "native source is unavailable",
+            None,
+            None,
+            None,
+        )
+    except NativeEvidenceError as error:
+        return EligibilityRecord(
+            candidate.candidate_id,
+            candidate.source_sha256,
+            _failure_disposition(error.cause),
             str(error),
             None,
             None,
@@ -249,11 +263,8 @@ def _confirmatory_session(candidate: Candidate) -> NativeSession:
     return session
 
 
-def _failure_disposition(reason: str) -> EligibilityDisposition:
-    diagnostic_markers = ("usage", "unmatched tool", "no model identifier", "no assistant event")
-    return (
-        "diagnostic_only" if any(marker in reason for marker in diagnostic_markers) else "excluded"
-    )
+def _failure_disposition(cause: EvidenceFailureCause) -> LedgerDisposition:
+    return "diagnostic_only" if cause == "missing_evidence" else "excluded"
 
 
 def _record_from_payload(index: int, payload: object) -> EligibilityRecord:
@@ -284,7 +295,7 @@ def _record_from_payload(index: int, payload: object) -> EligibilityRecord:
     return EligibilityRecord(
         _required_text(payload, "candidate_id"),
         _required_text(payload, "source_sha256"),
-        cast(EligibilityDisposition, disposition),
+        cast(LedgerDisposition, disposition),
         _required_text(payload, "reason"),
         parser,
         model,
@@ -299,10 +310,22 @@ def _require_private_path(path: Path) -> None:
         raise EligibilityLedgerError(f"cannot stat eligibility ledger {path}: {error}") from error
     if mode != 0o600:
         raise EligibilityLedgerError(f"eligibility ledger must have mode 0600, found {mode:04o}")
-    parent_mode = path.parent.stat().st_mode & 0o777
-    if parent_mode != 0o700:
+    _ensure_private_directory(path.parent)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    missing: list[Path] = []
+    ancestor = path
+    while not ancestor.exists():
+        missing.append(ancestor)
+        ancestor = ancestor.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+        os.chmod(directory, 0o700)
+    mode = path.stat().st_mode & 0o777
+    if mode != 0o700:
         raise EligibilityLedgerError(
-            f"eligibility ledger directory must have mode 0700, found {parent_mode:04o}"
+            f"eligibility ledger directory must have mode 0700, found {mode:04o}"
         )
 
 

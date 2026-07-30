@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -108,13 +109,17 @@ def extract_codex(candidate: Candidate) -> NativeSession:
             saw_usage = True
     if pending_calls:
         raise NativeEvidenceError(
-            f"native source has unmatched tool calls: {sorted(pending_calls)!r}"
+            f"native source has unmatched tool calls: {sorted(pending_calls)!r}",
+            cause="missing_evidence",
         )
     if saw_usage:
         raise NativeEvidenceError(
-            "Codex token_count usage has no response identifier; cannot associate billable usage"
+            "Codex token_count usage has no response identifier; cannot associate billable usage",
+            cause="missing_evidence",
         )
-    raise NativeEvidenceError("Codex native source has no billable usage evidence")
+    raise NativeEvidenceError(
+        "Codex native source has no billable usage evidence", cause="missing_evidence"
+    )
 
 
 def extract_omp(candidate: Candidate) -> NativeSession:
@@ -189,6 +194,9 @@ def _append_claude_user_entries(
                 raise _error(line_number, "user text block has no text")
             text_parts.append(text)
         elif block_type == "tool_result":
+            if text_parts:
+                entries.append(("user_prompt", (timestamp, "\n".join(text_parts))))
+                text_parts.clear()
             call_id = _required_text(item.get("tool_use_id"), line_number, "tool result id")
             entries.append(
                 (
@@ -261,6 +269,8 @@ def _build_claude_events(
             if not isinstance(data, str):
                 raise NativeEvidenceError("invalid Claude assistant entry")
             fragment = assistants[data]
+            if not fragment.text_parts and not fragment.tool_calls:
+                continue
             text = "\n".join(fragment.text_parts) if fragment.text_parts else None
             events.append(
                 NativeEvent(
@@ -290,6 +300,8 @@ def _session(
         raise NativeEvidenceError(
             f"native source records multiple declared models: {sorted(declared_models)!r}"
         )
+    if declared_models is not None and models and models != declared_models:
+        raise NativeEvidenceError("assistant model does not match model_change provenance")
     model = next(iter(declared_models), None) if declared_models else next(iter(models), None)
     return NativeSession(
         candidate_id=candidate.candidate_id,
@@ -302,21 +314,19 @@ def _session(
     )
 
 
-def _records(path: Path) -> list[tuple[int, dict[str, JsonValue]]]:
-    records: list[tuple[int, dict[str, JsonValue]]] = []
+def _records(path: Path) -> Iterator[tuple[int, dict[str, JsonValue]]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise _error(line_number, f"invalid JSON: {error.msg}") from error
+                if not isinstance(parsed, dict):
+                    raise _error(line_number, "record must be an object")
+                yield line_number, parsed
     except OSError as error:
-        raise NativeEvidenceError(f"cannot read native source {path}: {error}") from error
-    for line_number, line in enumerate(lines, start=1):
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise _error(line_number, f"invalid JSON: {error.msg}") from error
-        if not isinstance(parsed, dict):
-            raise _error(line_number, "record must be an object")
-        records.append((line_number, parsed))
-    return records
+        raise NativeEvidenceError("cannot read native source") from error
 
 
 def _claude_usage(value: JsonValue, line_number: int) -> BillableUsage | None:
@@ -353,6 +363,8 @@ def _counter(usage: dict[str, JsonValue], field_name: str, line_number: int) -> 
 
 
 def _omp_tool_calls(content: JsonValue, line_number: int) -> list[ToolCall]:
+    if isinstance(content, str):
+        return []
     calls: list[ToolCall] = []
     for block in _list(content, line_number, "assistant content"):
         item = _mapping(block)
