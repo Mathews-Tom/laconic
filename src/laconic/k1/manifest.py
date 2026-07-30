@@ -251,6 +251,10 @@ def verify_manifest(path: Path, *, require_frozen_split: bool = True) -> Manifes
         raise ManifestError(
             "manifest has unassigned candidates; freeze its split before verification"
         )
+    if require_frozen_split:
+        from laconic.k1.split import validate_frozen_split
+
+        validate_frozen_split(manifest)
     for candidate in manifest.candidates:
         try:
             actual_hash = source_sha256(candidate.source_path)
