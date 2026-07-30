@@ -18,6 +18,8 @@ from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.k1.manifest import ManifestError, verify_manifest
+from laconic.k1.searchat_export import produce_manifest
+from laconic.k1.split import SplitPolicy
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
 from laconic.render.narrate import (
     NarrationConfig,
@@ -254,6 +256,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="private metadata-only K1 manifest",
     )
     k1_manifest_verify.set_defaults(handler=_k1_manifest_verify)
+    k1_manifest_from_searchat = k1_manifest_subcommands.add_parser(
+        "from-searchat",
+        help="freeze a manifest from a private metadata-only Searchat export",
+    )
+    k1_manifest_from_searchat.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="metadata-only Searchat export",
+    )
+    k1_manifest_from_searchat.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="destination for the private frozen manifest",
+    )
+    k1_manifest_from_searchat.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.2,
+        help="fraction assigned to confirmatory holdout (default: 0.2)",
+    )
+    k1_manifest_from_searchat.add_argument(
+        "--seed",
+        default="laconic-k1-v1",
+        help="deterministic split seed (default: laconic-k1-v1)",
+    )
+    k1_manifest_from_searchat.set_defaults(handler=_k1_manifest_from_searchat)
 
     expand = subcommands.add_parser(
         "expand",
@@ -837,6 +869,26 @@ def _k1_manifest_verify(args: argparse.Namespace) -> int:
         return EXIT_K1_MANIFEST
     print(
         f"verified K1 manifest {args.manifest}: {len(manifest.candidates)} candidate(s), "
+        f"digest {manifest.digest}"
+    )
+    return EXIT_OK
+
+
+def _k1_manifest_from_searchat(args: argparse.Namespace) -> int:
+    try:
+        manifest = produce_manifest(
+            args.input,
+            args.output,
+            policy=SplitPolicy(
+                holdout_fraction=args.holdout_fraction,
+                seed=args.seed,
+            ),
+        )
+    except ManifestError as error:
+        print(f"laconic k1 manifest from-searchat: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(
+        f"wrote K1 manifest {args.output}: {len(manifest.candidates)} candidate(s), "
         f"digest {manifest.digest}"
     )
     return EXIT_OK
