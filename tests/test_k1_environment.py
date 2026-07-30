@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
 from laconic.k1.environment import (
     EnvironmentError,
     RecordedToolObservation,
@@ -16,6 +19,15 @@ from laconic.k1.environment import (
     snapshot_tree_sha256,
     validate_snapshot,
 )
+from laconic.k1.environment_ledger import (
+    EnvironmentLedger,
+    EnvironmentLedgerError,
+    EnvironmentRecord,
+    assess_environments,
+    read_environment_ledger,
+    write_environment_ledger,
+)
+from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
 
 
 def _immutable_snapshot(tmp_path: Path) -> Path:
@@ -223,3 +235,315 @@ def test_snapshot_resolver_rejects_oversized_read(tmp_path: Path) -> None:
     assert result.status == "unsupported"
     assert "output limit" in result.reason
     assert resolver.terminated
+
+
+def test_environment_cli_verifies_private_non_content_admission_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    ledger_path = private / "environment.json"
+    build_exit = main(
+        [
+            "k1",
+            "environment",
+            "build",
+            "--manifest",
+            str(manifest_path),
+            "--ledger",
+            str(ledger_path),
+        ]
+    )
+    assert build_exit == EXIT_OK
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "k1",
+            "environment",
+            "verify",
+            "--manifest",
+            str(manifest_path),
+            "--ledger",
+            str(ledger_path),
+        ]
+    )
+
+    assert exit_code == EXIT_OK
+    assert "valid=2, unsupported=0, unavailable=0" in capsys.readouterr().out
+    assert str(manifest.candidates[0].source_path) not in ledger_path.read_text(encoding="utf-8")
+
+
+def test_environment_build_marks_nonfinite_tool_payload_unsupported(tmp_path: Path) -> None:
+    manifest_path, manifest, _ = _confirmatory_manifest(tmp_path)
+    source = manifest.candidates[0].source_path
+    source.write_text(
+        source.read_text(encoding="utf-8").replace('"text": "print(\'ok\')"', '"text": NaN'),
+        encoding="utf-8",
+    )
+    rebuilt = Manifest(
+        (
+            replace(manifest.candidates[0], source_sha256=source_sha256(source)),
+            manifest.candidates[1],
+        )
+    )
+    write_manifest(manifest_path, rebuilt)
+
+    ledger = assess_environments(rebuilt)
+
+    assert ledger.records[0].status == "unsupported"
+    assert ledger.records[0].reason == "unsupported_tool"
+
+
+def test_environment_cli_revalidates_snapshot_receipts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    root = _immutable_snapshot(tmp_path)
+    ledger_path = private / "environment.json"
+    ledger = EnvironmentLedger(
+        manifest.digest,
+        tuple(
+            EnvironmentRecord(
+                candidate.candidate_id,
+                candidate.source_sha256,
+                "valid",
+                "snapshot",
+                snapshot_tree_sha256(root),
+                "snapshot_validated",
+                str(root),
+            )
+            for candidate in manifest.candidates
+        ),
+    )
+    write_environment_ledger(ledger_path, ledger)
+
+    assert (
+        main(
+            [
+                "k1",
+                "environment",
+                "verify",
+                "--manifest",
+                str(manifest_path),
+                "--ledger",
+                str(ledger_path),
+            ]
+        )
+        == EXIT_OK
+    )
+
+    root.chmod(0o700)
+    (root / "src" / "main.py").chmod(0o600)
+    (root / "src").chmod(0o700)
+    (root / "src" / "main.py").write_text("changed\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "k1",
+                "environment",
+                "verify",
+                "--manifest",
+                str(manifest_path),
+                "--ledger",
+                str(ledger_path),
+            ]
+        )
+        == EXIT_K1_MANIFEST
+    )
+    assert "cannot revalidate snapshot environment" in capsys.readouterr().err
+
+
+def test_environment_verification_rejects_confirmatory_candidate_without_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    ledger_path = private / "environment.json"
+    ledger = EnvironmentLedger(
+        manifest.digest,
+        tuple(
+            EnvironmentRecord(
+                candidate.candidate_id,
+                candidate.source_sha256,
+                "unavailable",
+                None,
+                None,
+                "environment_unavailable",
+            )
+            for candidate in manifest.candidates
+        ),
+    )
+    write_environment_ledger(ledger_path, ledger)
+
+    exit_code = main(
+        [
+            "k1",
+            "environment",
+            "verify",
+            "--manifest",
+            str(manifest_path),
+            "--ledger",
+            str(ledger_path),
+        ]
+    )
+
+    assert exit_code == EXIT_K1_MANIFEST
+    assert "lacks valid environment" in capsys.readouterr().err
+
+
+def test_environment_ledger_rejects_tampering_and_insecure_paths(tmp_path: Path) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    ledger_path = private / "environment.json"
+    snapshot_root = str(_immutable_snapshot(tmp_path))
+    ledger = EnvironmentLedger(
+        manifest.digest,
+        tuple(
+            EnvironmentRecord(
+                candidate.candidate_id,
+                candidate.source_sha256,
+                "valid",
+                "snapshot",
+                "a" * 64,
+                "snapshot_validated",
+                snapshot_root,
+            )
+            for candidate in manifest.candidates
+        ),
+    )
+    write_environment_ledger(ledger_path, ledger)
+    document = json.loads(ledger_path.read_text(encoding="utf-8"))
+    document["digest"] = "b" * 64
+    ledger_path.write_text(json.dumps(document), encoding="utf-8")
+    ledger_path.chmod(0o600)
+
+    with pytest.raises(EnvironmentLedgerError, match="digest mismatch"):
+        read_environment_ledger(ledger_path)
+
+    write_environment_ledger(ledger_path, ledger)
+    ledger_path.chmod(0o644)
+    with pytest.raises(EnvironmentLedgerError, match="mode 0600"):
+        read_environment_ledger(ledger_path)
+
+    ledger_path.chmod(0o600)
+    private.chmod(0o755)
+    with pytest.raises(EnvironmentLedgerError, match="directory must have mode 0700"):
+        read_environment_ledger(ledger_path)
+
+
+def test_environment_ledger_rejects_symlink(tmp_path: Path) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    ledger_path = private / "environment.json"
+    snapshot_root = str(_immutable_snapshot(tmp_path))
+    ledger = EnvironmentLedger(
+        manifest.digest,
+        tuple(
+            EnvironmentRecord(
+                candidate.candidate_id,
+                candidate.source_sha256,
+                "valid",
+                "snapshot",
+                "a" * 64,
+                "snapshot_validated",
+                snapshot_root,
+            )
+            for candidate in manifest.candidates
+        ),
+    )
+    write_environment_ledger(ledger_path, ledger)
+    target = tmp_path / "target.json"
+    target.write_text(ledger_path.read_text(encoding="utf-8"), encoding="utf-8")
+    target.chmod(0o600)
+    link = private / "linked.json"
+    link.symlink_to(target)
+
+    with pytest.raises(EnvironmentLedgerError, match="non-symlink"):
+        read_environment_ledger(link)
+
+
+def test_environment_ledger_rejects_content_bearing_reason() -> None:
+    with pytest.raises(EnvironmentLedgerError, match="reason"):
+        EnvironmentRecord(
+            "candidate",
+            "a" * 64,
+            "unsupported",
+            None,
+            None,
+            "historical output",
+        )
+
+
+def _confirmatory_manifest(tmp_path: Path) -> tuple[Path, Manifest, Path]:
+    private = tmp_path / "private"
+    sources = private / "sources"
+    sources.mkdir(parents=True, mode=0o700)
+    candidates: list[Candidate] = []
+    for candidate_id, split in (("redesign", "redesign"), ("holdout", "holdout")):
+        source = sources / f"{candidate_id}.jsonl"
+        records = [
+            {
+                "timestamp": "2026-07-30T21:00:00Z",
+                "type": "user",
+                "message": {"role": "user", "content": f"Inspect {candidate_id}."},
+            },
+            {
+                "timestamp": "2026-07-30T21:00:01Z",
+                "message": {
+                    "id": f"message-{candidate_id}",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"input_tokens": 100, "output_tokens": 20},
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call-1",
+                            "name": "Read",
+                            "input": {"path": "src/app.py"},
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-30T21:00:02Z",
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call-1",
+                            "content": {"text": "print('ok')"},
+                        }
+                    ],
+                },
+            },
+        ]
+        source.write_text(
+            "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        candidates.append(
+            Candidate(
+                candidate_id=candidate_id,
+                source_path=source.resolve(),
+                source_sha256=source_sha256(source),
+                provider="claude-code",
+                model="claude-sonnet-4-6",
+                model_family="claude-4",
+                project=f"project-{candidate_id}",
+                timestamp="2026-07-30T21:00:00Z",
+                session_length=1,
+                message_count=1,
+                has_code=True,
+                tool_density=1.0,
+                time_period="2026-Q3",
+                session_size_band="small",
+                selection_stratum="claude-code|claude-4|2026-Q3|small",
+                lineage=f"lineage-{candidate_id}",
+                eligibility_disposition="confirmatory",
+                split=split,
+            )
+        )
+    manifest = Manifest(tuple(candidates))
+    manifest_path = private / "manifest.json"
+    write_manifest(manifest_path, manifest)
+    return manifest_path, manifest, private
