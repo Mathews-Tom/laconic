@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
+from laconic.k1.environment_ledger import assess_environments, write_environment_ledger
+from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
 from laconic.k1.paired_config import (
     PairedReplayConfig,
     PairedReplayConfigError,
@@ -18,12 +21,21 @@ from laconic.k1.paired_config import (
     read_paired_config,
     write_paired_config,
 )
+from laconic.k1.paired_runner import (
+    PairedReplayCostCapError,
+    PairedReplayRequest,
+    PairedReplayResponse,
+    PairedResponseTurn,
+    PairedWorkload,
+    admit_paired_workloads,
+    run_paired_replay,
+)
 from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
 
 def _config(tmp_path: Path) -> PairedReplayConfig:
     private = tmp_path / "private"
-    private.mkdir(mode=0o700)
+    private.mkdir(mode=0o700, exist_ok=True)
     return PairedReplayConfig(
         manifest_path=(private / "manifest.json").resolve(),
         eligibility_ledger_path=(private / "eligibility.json").resolve(),
@@ -51,6 +63,114 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
         unsupported_policy="terminate_pair",
         induced_policy="include_in_codec_cost",
     )
+
+
+def _workload(tmp_path: Path) -> PairedWorkload:
+    private = tmp_path / "private"
+    source = private / "candidate.jsonl"
+    records = [
+        {
+            "timestamp": "2026-07-30T21:00:00Z",
+            "type": "user",
+            "message": {"role": "user", "content": "Inspect."},
+        },
+        {
+            "timestamp": "2026-07-30T21:00:01Z",
+            "message": {
+                "id": "message-1",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "Read",
+                        "input": {"path": "src/app.py"},
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-30T21:00:02Z",
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": {"text": "print('ok')"},
+                    }
+                ],
+            },
+        },
+    ]
+    source.write_text(
+        "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    candidate = Candidate(
+        candidate_id="candidate-a",
+        source_path=source.resolve(),
+        source_sha256=source_sha256(source),
+        provider="claude-code",
+        model="claude-sonnet-4-6",
+        model_family="claude-4",
+        project="acme/service",
+        timestamp="2026-07-30T21:00:00Z",
+        session_length=1,
+        message_count=1,
+        has_code=True,
+        tool_density=1.0,
+        time_period="2026-Q3",
+        session_size_band="small",
+        selection_stratum="claude-code|claude-4|2026-Q3|small",
+        lineage="issue-1",
+        eligibility_disposition="confirmatory",
+        split="redesign",
+    )
+    holdout_source = private / "holdout.jsonl"
+    holdout_source.write_text(
+        source.read_text(encoding="utf-8").replace("Inspect.", "Inspect holdout."),
+        encoding="utf-8",
+    )
+    holdout = replace(
+        candidate,
+        candidate_id="candidate-holdout",
+        source_path=holdout_source.resolve(),
+        source_sha256=source_sha256(holdout_source),
+        project="acme/holdout",
+        lineage="issue-holdout",
+        split="holdout",
+    )
+    manifest = Manifest((candidate, holdout))
+    write_manifest(private / "manifest.json", manifest)
+    write_eligibility_ledger(private / "eligibility.json", assess_manifest(manifest))
+    write_environment_ledger(private / "environment.json", assess_environments(manifest))
+    return admit_paired_workloads(_config(tmp_path))[0]
+
+
+class _ReplayClient:
+    def __init__(self, *, input_tokens: int = 100) -> None:
+        self.input_tokens = input_tokens
+        self.requests: list[PairedReplayRequest] = []
+
+    def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
+        self.requests.append(request)
+        return PairedReplayResponse(
+            (
+                PairedResponseTurn(
+                    response={"arm": request.arm, "fresh": True},
+                    native_usage={
+                        "input_tokens": self.input_tokens,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "output_tokens": 10,
+                    },
+                ),
+            )
+        )
 
 
 def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_path: Path) -> None:
@@ -286,3 +406,34 @@ def test_decimal_pricing_uses_explicit_cache_categories(tmp_path: Path) -> None:
     )
 
     assert cost_usage(usage, config.pricing) == Decimal("138.6")
+
+
+def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    workload = _workload(tmp_path)
+    client = _ReplayClient()
+
+    receipt = run_paired_replay(config, (workload,), client, run_id="run-1")
+
+    assert [request.arm for request in client.requests] == ["raw", "codec", "raw", "codec"]
+    assert {request.settings_digest for request in client.requests} == {config.settings_digest}
+    assert receipt.config_digest == config.digest
+    assert len(receipt.pairs) == config.repeat_count
+    for pair in receipt.pairs:
+        assert pair.raw.provenance.config_digest == pair.codec.provenance.config_digest
+        assert pair.raw.artifact_path.stat().st_mode & 0o777 == 0o600
+        assert pair.codec.artifact_path.stat().st_mode & 0o777 == 0o600
+        assert '"fresh":true' in pair.raw.artifact_path.read_text(encoding="utf-8")
+    assert all(not hasattr(request.workload, "session") for request in client.requests)
+
+
+def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
+    config = replace(_config(tmp_path), cost_cap_per_pair_usd="0.0001")
+    workload = _workload(tmp_path)
+    client = _ReplayClient()
+
+    with pytest.raises(PairedReplayCostCapError, match="past the"):
+        run_paired_replay(config, (workload,), client, run_id="run-over-cap")
+
+    assert [request.arm for request in client.requests] == ["raw"]
+    assert (config.artifact_root / "run-over-cap" / "candidate-a" / "0000-raw.json").is_file()
