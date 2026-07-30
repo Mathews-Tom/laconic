@@ -121,6 +121,7 @@ def extract_codex(candidate: Candidate) -> NativeSession:
         "Codex native source has no billable usage evidence", cause="missing_evidence"
     )
 
+
 def extract_omp(candidate: Candidate) -> NativeSession:
     """Extract OMP JSONL messages with their recorded usage and tool ids."""
     events: list[NativeEvent] = []
