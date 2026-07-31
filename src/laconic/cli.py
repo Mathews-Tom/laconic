@@ -30,8 +30,10 @@ from laconic.k1.environment_ledger import (
     verify_environment,
     write_environment_ledger,
 )
+from laconic.k1.epoch import EpochError, create_epoch, verify_epoch
 from laconic.k1.manifest import ManifestError, verify_manifest
 from laconic.k1.paired_config import PairedReplayConfigError, read_paired_config
+from laconic.k1.paired_report import PairedReportError, verify_paired_report
 from laconic.k1.searchat_export import produce_manifest
 from laconic.k1.split import SplitPolicy
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
@@ -366,6 +368,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
     )
     k1_environment_verify.set_defaults(handler=_k1_environment_verify)
+    k1_epoch = k1_subcommands.add_parser(
+        "epoch",
+        help="create and verify a private K1 sealed evidence epoch",
+    )
+    k1_epoch_subcommands = k1_epoch.add_subparsers(dest="k1_epoch_command")
+    k1_epoch_create = k1_epoch_subcommands.add_parser(
+        "create",
+        help="seal a frozen metadata-only manifest without opening candidate sources",
+    )
+    k1_epoch_create.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_epoch_create.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
+    )
+    k1_epoch_create.add_argument(
+        "--audit", type=Path, required=True, metavar="FILE", help="private access audit"
+    )
+    k1_epoch_create.add_argument(
+        "--approved-root",
+        action="append",
+        type=Path,
+        required=True,
+        metavar="DIRECTORY",
+        help="approved private root; repeat for multiple roots",
+    )
+    k1_epoch_create.add_argument("--epoch-id", required=True, help="new private epoch identifier")
+    k1_epoch_create.add_argument(
+        "--created-at", required=True, help="ISO-8601 epoch creation timestamp"
+    )
+    k1_epoch_create.set_defaults(handler=_k1_epoch_create)
+    k1_epoch_verify = k1_epoch_subcommands.add_parser(
+        "verify",
+        help="verify an epoch receipt and hash-chained audit without opening candidate sources",
+    )
+    k1_epoch_verify.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
+    )
+    k1_epoch_verify.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_epoch_verify.set_defaults(handler=_k1_epoch_verify)
+
     k1_replay = k1_subcommands.add_parser(
         "replay",
         help="validate private configuration for a contemporary K1 paired replay",
@@ -383,6 +428,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="private paired replay configuration",
     )
     k1_replay_verify_config.set_defaults(handler=_k1_replay_verify_config)
+    k1_replay_verify_report = k1_replay_subcommands.add_parser(
+        "verify-report",
+        help="verify a private M5-ready paired receipt report and response-artifact digests",
+    )
+    k1_replay_verify_report.add_argument(
+        "--report", type=Path, required=True, metavar="FILE", help="private paired receipt report"
+    )
+    k1_replay_verify_report.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private paired replay configuration",
+    )
+    k1_replay_verify_report.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
+    )
+    k1_replay_verify_report.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_replay_verify_report.set_defaults(handler=_k1_replay_verify_report)
 
     expand = subcommands.add_parser(
         "expand",
@@ -958,6 +1024,33 @@ def _gates(args: argparse.Namespace) -> int:
     return suite.exit_code
 
 
+def _k1_epoch_create(args: argparse.Namespace) -> int:
+    try:
+        epoch = create_epoch(
+            args.manifest,
+            args.epoch,
+            audit_path=args.audit,
+            approved_roots=tuple(args.approved_root),
+            epoch_id=args.epoch_id,
+            created_at=args.created_at,
+        )
+    except (EpochError, ManifestError) as error:
+        print(f"laconic k1 epoch create: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(f"sealed K1 epoch {args.epoch}: digest {epoch.digest}, audit {epoch.audit_path}")
+    return EXIT_OK
+
+
+def _k1_epoch_verify(args: argparse.Namespace) -> int:
+    try:
+        epoch = verify_epoch(args.epoch, args.manifest)
+    except (EpochError, ManifestError) as error:
+        print(f"laconic k1 epoch verify: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(f"verified K1 epoch {args.epoch}: digest {epoch.digest}, audit {epoch.audit_path}")
+    return EXIT_OK
+
+
 def _k1_manifest_verify(args: argparse.Namespace) -> int:
     try:
         manifest = verify_manifest(args.manifest)
@@ -1040,6 +1133,20 @@ def _k1_replay_verify_config(args: argparse.Namespace) -> int:
     print(
         f"verified K1 paired replay config {args.config}: "
         f"provider={config.provider}, model={config.model}, digest {config.digest}"
+    )
+    return EXIT_OK
+
+
+def _k1_replay_verify_report(args: argparse.Namespace) -> int:
+    try:
+        config = read_paired_config(args.config)
+        report = verify_paired_report(args.report, args.epoch, args.manifest, config)
+    except (PairedReplayConfigError, PairedReportError) as error:
+        print(f"laconic k1 replay verify-report: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(
+        f"verified K1 paired report {args.report}: {len(report.strata)} stratum/strata, "
+        f"digest {report.digest}"
     )
     return EXIT_OK
 

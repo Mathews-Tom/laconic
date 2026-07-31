@@ -495,7 +495,7 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
 
 
 def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config, workload = _workload(tmp_path)
     receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
@@ -507,12 +507,51 @@ def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
 
     verified = verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
     assert verified.digest == report.digest
+    config_path = config.epoch_path.parent / "paired-config.json"
+    write_paired_config(config_path, config)
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "verify-report",
+                "--report",
+                str(report_path),
+                "--config",
+                str(config_path),
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+            ]
+        )
+        == EXIT_OK
+    )
     assert report_path.stat().st_mode & 0o777 == 0o600
     assert '"response"' not in report_path.read_text(encoding="utf-8")
     receipt.pairs[0].raw.artifact_path.write_text("tampered", encoding="utf-8")
 
     with pytest.raises(PairedReportError, match="response artifact digest mismatch"):
         verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "verify-report",
+                "--report",
+                str(report_path),
+                "--config",
+                str(config_path),
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+            ]
+        )
+        == EXIT_K1_MANIFEST
+    )
+    assert "response artifact digest mismatch" in capsys.readouterr().err
 
 
 def test_paired_report_reports_response_artifact_permission_failure(

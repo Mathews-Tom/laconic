@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
 from laconic.k1 import epoch as epoch_module
 from laconic.k1.epoch import (
     EpochError,
@@ -134,6 +135,38 @@ def test_redesign_access_extends_hash_chain_and_tampering_fails(tmp_path: Path) 
 
     with pytest.raises(EpochError, match="record digest mismatch"):
         verify_epoch(epoch_path, manifest_path)
+
+
+def test_epoch_cli_verifies_sealed_epoch_and_rejects_tampered_audit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, manifest_path, epoch_path, redesign, _ = _create_epoch(tmp_path)
+    verify_args = [
+        "k1",
+        "epoch",
+        "verify",
+        "--epoch",
+        str(epoch_path),
+        "--manifest",
+        str(manifest_path),
+    ]
+
+    assert main(verify_args) == EXIT_OK
+    assert "verified K1 epoch" in capsys.readouterr().out
+    record_redesign_access(
+        epoch_path,
+        manifest_path,
+        redesign.candidate_id,
+        "native_extract",
+        timestamp="2026-07-31T11:01:00Z",
+    )
+    audit_path = read_epoch(epoch_path).audit_path
+    document = json.loads(audit_path.read_text(encoding="utf-8"))
+    document["records"][0]["operation"] = "tampered"
+    audit_path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert main(verify_args) == EXIT_K1_MANIFEST
+    assert "record digest mismatch" in capsys.readouterr().err
 
 
 def test_holdout_request_is_rejected_without_audit_record(tmp_path: Path) -> None:
