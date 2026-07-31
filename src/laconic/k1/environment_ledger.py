@@ -9,10 +9,12 @@ import os
 import stat
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
 from laconic.k1.environment import EnvironmentError, SnapshotEnvironment, validate_snapshot
+from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
 from laconic.k1.evidence import (
     JsonValue,
     NativeEvidenceError,
@@ -20,9 +22,9 @@ from laconic.k1.evidence import (
     validate_confirmatory_evidence,
 )
 from laconic.k1.extractors import extract_native
-from laconic.k1.manifest import Candidate, Manifest, ManifestError, is_sha256, verify_manifest
+from laconic.k1.manifest import Candidate, Split, is_sha256
 
-ENVIRONMENT_LEDGER_SCHEMA_VERSION = 1
+ENVIRONMENT_LEDGER_SCHEMA_VERSION = 3
 
 EnvironmentStatus = Literal["valid", "unsupported", "unavailable"]
 EnvironmentMode = Literal["recorded_tool", "snapshot"]
@@ -108,14 +110,20 @@ class EnvironmentRecord:
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentLedger:
-    """A complete private environment-admission ledger for one manifest."""
+    """Complete redesign-only environment admission decisions for one sealed manifest."""
 
+    epoch_digest: str
     manifest_digest: str
+    split: Split
     records: tuple[EnvironmentRecord, ...]
 
     def __post_init__(self) -> None:
         if not is_sha256(self.manifest_digest):
             raise EnvironmentLedgerError("manifest_digest must be 64 lowercase hex")
+        if not is_sha256(self.epoch_digest):
+            raise EnvironmentLedgerError("epoch_digest must be 64 lowercase hex")
+        if self.split != "redesign":
+            raise EnvironmentLedgerError("environment ledger must be scoped to redesign")
         if not self.records:
             raise EnvironmentLedgerError("environment ledger must contain records")
         if len({record.candidate_id for record in self.records}) != len(self.records):
@@ -129,12 +137,14 @@ class EnvironmentLedger:
     def payload_without_digest(self) -> dict[str, object]:
         """Return the ledger fields covered by its digest."""
         return {
+            "epoch_digest": self.epoch_digest,
             "manifest_digest": self.manifest_digest,
             "records": [
                 record.to_payload()
                 for record in sorted(self.records, key=lambda record: record.candidate_id)
             ],
             "schema_version": ENVIRONMENT_LEDGER_SCHEMA_VERSION,
+            "split": self.split,
         }
 
     def to_document(self) -> dict[str, object]:
@@ -142,30 +152,45 @@ class EnvironmentLedger:
         return {"digest": self.digest, **self.payload_without_digest()}
 
 
-def assess_environments(manifest: Manifest) -> EnvironmentLedger:
-    """Validate native recorded-tool environments and create their receipts."""
-    return EnvironmentLedger(
-        manifest.digest,
-        tuple(_assess_candidate_environment(candidate) for candidate in manifest.candidates),
-    )
-
-
-def verify_environment(manifest_path: Path, ledger_path: Path) -> EnvironmentLedger:
-    """Revalidate every recorded-tool receipt before admitting confirmatory candidates."""
+def assess_environments(epoch_path: Path, manifest_path: Path) -> EnvironmentLedger:
+    """Validate only sealed-redesign environments after audit authorization."""
     try:
-        manifest = verify_manifest(manifest_path)
-    except ManifestError as error:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        records = tuple(
+            _assess_redesign_candidate_environment(epoch_path, manifest_path, candidate)
+            for candidate in manifest.candidates
+            if candidate.split == "redesign"
+        )
+    except EpochError as error:
+        raise EnvironmentLedgerError(str(error)) from error
+    return EnvironmentLedger(epoch.digest, manifest.digest, "redesign", records)
+
+
+def verify_environment(
+    epoch_path: Path, manifest_path: Path, ledger_path: Path
+) -> EnvironmentLedger:
+    """Revalidate redesign-confirmatory environments after audit authorization."""
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+    except EpochError as error:
         raise EnvironmentLedgerError(str(error)) from error
     ledger = read_environment_ledger(ledger_path)
     if ledger.manifest_digest != manifest.digest:
         raise EnvironmentLedgerError("ledger manifest_digest does not match manifest")
+    if ledger.epoch_digest != epoch.digest:
+        raise EnvironmentLedgerError("ledger epoch_digest does not match sealed epoch")
+    if ledger.split != "redesign":
+        raise EnvironmentLedgerError("ledger split must be redesign")
+    candidates = tuple(
+        candidate for candidate in manifest.candidates if candidate.split == "redesign"
+    )
     records = {record.candidate_id: record for record in ledger.records}
-    candidate_ids = {candidate.candidate_id for candidate in manifest.candidates}
+    candidate_ids = {candidate.candidate_id for candidate in candidates}
     if set(records) != candidate_ids:
         raise EnvironmentLedgerError(
-            "ledger must contain exactly one record for every manifest candidate"
+            "ledger must contain exactly one record for every redesign manifest candidate"
         )
-    for candidate in manifest.candidates:
+    for candidate in candidates:
         record = records[candidate.candidate_id]
         if record.source_sha256 != candidate.source_sha256:
             raise EnvironmentLedgerError(
@@ -179,6 +204,18 @@ def verify_environment(manifest_path: Path, ledger_path: Path) -> EnvironmentLed
                 "valid environment"
             )
         if record.mode == "recorded_tool":
+            try:
+                record_redesign_access(
+                    epoch_path,
+                    manifest_path,
+                    candidate.candidate_id,
+                    "environment_verify",
+                    timestamp=_audit_timestamp(),
+                )
+            except EpochError as error:
+                raise EnvironmentLedgerError(
+                    f"candidate {candidate.candidate_id}: audit authorization failed: {error}"
+                ) from error
             try:
                 actual_digest = _recorded_tool_digest(candidate)
             except (NativeEvidenceError, OSError) as error:
@@ -245,8 +282,10 @@ def read_environment_ledger(path: Path) -> EnvironmentLedger:
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
         "digest",
+        "epoch_digest",
         "manifest_digest",
         "records",
+        "split",
     }:
         raise EnvironmentLedgerError("environment ledger has invalid fields")
     if document["schema_version"] != ENVIRONMENT_LEDGER_SCHEMA_VERSION:
@@ -260,7 +299,9 @@ def read_environment_ledger(path: Path) -> EnvironmentLedger:
     if not isinstance(raw_records, list):
         raise EnvironmentLedgerError("environment ledger records must be an array")
     ledger = EnvironmentLedger(
+        _required_text(document, "epoch_digest"),
         _required_text(document, "manifest_digest"),
+        cast(Split, _required_text(document, "split")),
         tuple(_record_from_payload(index, record) for index, record in enumerate(raw_records)),
     )
     if not hmac.compare_digest(digest, ledger.digest):
@@ -316,6 +357,23 @@ def _record_from_payload(index: int, payload: object) -> EnvironmentRecord:
         cast(EnvironmentReason, reason),
         snapshot_root,
     )
+
+
+def _assess_redesign_candidate_environment(
+    epoch_path: Path, manifest_path: Path, candidate: Candidate
+) -> EnvironmentRecord:
+    record_redesign_access(
+        epoch_path,
+        manifest_path,
+        candidate.candidate_id,
+        "environment_assess",
+        timestamp=_audit_timestamp(),
+    )
+    return _assess_candidate_environment(candidate)
+
+
+def _audit_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _assess_candidate_environment(candidate: Candidate) -> EnvironmentRecord:

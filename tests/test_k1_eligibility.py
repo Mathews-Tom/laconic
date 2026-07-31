@@ -16,6 +16,7 @@ from laconic.k1.eligibility import (
     read_eligibility_ledger,
     write_eligibility_ledger,
 )
+from laconic.k1.epoch import create_epoch, read_access_audit
 from laconic.k1.manifest import Candidate, Manifest, Split, source_sha256, write_manifest
 
 _DIGEST = "a" * 64
@@ -24,6 +25,8 @@ _DIGEST = "a" * 64
 def _ledger() -> EligibilityLedger:
     return EligibilityLedger(
         _DIGEST,
+        _DIGEST,
+        "redesign",
         (
             EligibilityRecord(
                 "session-a",
@@ -74,8 +77,10 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     private_dir = tmp_path / "private"
+    private_dir.mkdir(mode=0o700)
     manifest_path = private_dir / "manifest.json"
     ledger_path = private_dir / "eligibility.json"
+    epoch_path = private_dir / "epoch.json"
     candidate_specs: tuple[tuple[str, str, str, Split], ...] = (
         ("session-a", "acme/redesign", "issue-42", "redesign"),
         ("session-b", "acme/holdout", "issue-43", "holdout"),
@@ -91,10 +96,20 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
         for candidate_id, project, lineage, split in candidate_specs
     )
     write_manifest(manifest_path, Manifest(candidates))
+    create_epoch(
+        manifest_path,
+        epoch_path,
+        audit_path=private_dir / "access-audit.json",
+        approved_roots=(private_dir,),
+        epoch_id="k1-test-eligibility",
+        created_at="2026-07-31T11:00:00Z",
+    )
     build_args = [
         "k1",
         "eligibility",
         "build",
+        "--epoch",
+        str(epoch_path),
         "--manifest",
         str(manifest_path),
         "--ledger",
@@ -104,6 +119,8 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
         "k1",
         "eligibility",
         "verify",
+        "--epoch",
+        str(epoch_path),
         "--manifest",
         str(manifest_path),
         "--ledger",
@@ -111,7 +128,9 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
     ]
 
     assert main(build_args) == EXIT_OK
-    assert "confirmatory=2" in capsys.readouterr().out
+    assert "confirmatory=1" in capsys.readouterr().out
+    audit = read_access_audit(private_dir / "access-audit.json")
+    assert [record.candidate_id for record in audit.records] == ["session-a"]
     assert main(verify_args) == EXIT_OK
 
     candidates[0].source_path.write_text('{"changed":true}\n', encoding="utf-8")
@@ -128,7 +147,7 @@ def _confirmatory_candidate(
     lineage: str,
     split: Split,
 ) -> Candidate:
-    source_path = tmp_path / f"{candidate_id}.jsonl"
+    source_path = tmp_path / "private" / f"{candidate_id}.jsonl"
     source_path.write_text(
         "\n".join(
             json.dumps(record)

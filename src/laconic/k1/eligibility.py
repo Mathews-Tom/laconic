@@ -8,9 +8,11 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
 from laconic.k1.evidence import (
     EvidenceFailureCause,
     NativeEvidenceError,
@@ -18,9 +20,9 @@ from laconic.k1.evidence import (
     validate_confirmatory_evidence,
 )
 from laconic.k1.extractors import extract_native
-from laconic.k1.manifest import Candidate, Manifest, ManifestError, is_sha256, read_manifest
+from laconic.k1.manifest import Candidate, Split, is_sha256
 
-LEDGER_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 3
 
 LedgerDisposition = Literal["confirmatory", "diagnostic_only", "excluded"]
 
@@ -77,14 +79,20 @@ class EligibilityRecord:
 
 @dataclass(frozen=True, slots=True)
 class EligibilityLedger:
-    """A complete set of K1 eligibility decisions for one frozen manifest."""
+    """Complete redesign-only eligibility decisions for one sealed manifest."""
 
+    epoch_digest: str
     manifest_digest: str
+    split: Split
     records: tuple[EligibilityRecord, ...]
 
     def __post_init__(self) -> None:
         if not is_sha256(self.manifest_digest):
             raise EligibilityLedgerError("manifest_digest must be 64 lowercase hex")
+        if not is_sha256(self.epoch_digest):
+            raise EligibilityLedgerError("epoch_digest must be 64 lowercase hex")
+        if self.split != "redesign":
+            raise EligibilityLedgerError("eligibility ledger must be scoped to redesign")
         if not self.records:
             raise EligibilityLedgerError("eligibility ledger must contain records")
         ids = [record.candidate_id for record in self.records]
@@ -99,12 +107,14 @@ class EligibilityLedger:
     def payload_without_digest(self) -> dict[str, object]:
         """Return canonical private ledger content without its digest."""
         return {
+            "epoch_digest": self.epoch_digest,
             "manifest_digest": self.manifest_digest,
             "records": [
                 record.to_payload()
                 for record in sorted(self.records, key=lambda item: item.candidate_id)
             ],
             "schema_version": LEDGER_SCHEMA_VERSION,
+            "split": self.split,
         }
 
     def to_document(self) -> dict[str, object]:
@@ -112,28 +122,45 @@ class EligibilityLedger:
         return {"digest": self.digest, **self.payload_without_digest()}
 
 
-def assess_manifest(manifest: Manifest) -> EligibilityLedger:
-    """Probe every native source and produce one fail-closed disposition each."""
-    records = tuple(_assess_candidate(candidate) for candidate in manifest.candidates)
-    return EligibilityLedger(manifest.digest, records)
-
-
-def verify_eligibility(manifest_path: Path, ledger_path: Path) -> EligibilityLedger:
-    """Verify ledger completeness and revalidate every confirmatory source."""
+def assess_manifest(epoch_path: Path, manifest_path: Path) -> EligibilityLedger:
+    """Probe only sealed-redesign sources and record every controlled native read."""
     try:
-        manifest = read_manifest(manifest_path)
-    except ManifestError as error:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        records = tuple(
+            _assess_redesign_candidate(epoch_path, manifest_path, candidate)
+            for candidate in manifest.candidates
+            if candidate.split == "redesign"
+        )
+    except EpochError as error:
+        raise EligibilityLedgerError(str(error)) from error
+    return EligibilityLedger(epoch.digest, manifest.digest, "redesign", records)
+
+
+def verify_eligibility(
+    epoch_path: Path, manifest_path: Path, ledger_path: Path
+) -> EligibilityLedger:
+    """Revalidate redesign-confirmatory evidence after audit authorization."""
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+    except EpochError as error:
         raise EligibilityLedgerError(str(error)) from error
     ledger = read_eligibility_ledger(ledger_path)
     if ledger.manifest_digest != manifest.digest:
         raise EligibilityLedgerError("ledger manifest_digest does not match manifest")
+    if ledger.epoch_digest != epoch.digest:
+        raise EligibilityLedgerError("ledger epoch_digest does not match sealed epoch")
+    if ledger.split != "redesign":
+        raise EligibilityLedgerError("ledger split must be redesign")
+    candidates = tuple(
+        candidate for candidate in manifest.candidates if candidate.split == "redesign"
+    )
     by_id = {record.candidate_id: record for record in ledger.records}
-    manifest_ids = {candidate.candidate_id for candidate in manifest.candidates}
-    if set(by_id) != manifest_ids:
+    candidate_ids = {candidate.candidate_id for candidate in candidates}
+    if set(by_id) != candidate_ids:
         raise EligibilityLedgerError(
-            "ledger must contain exactly one record for every manifest candidate"
+            "ledger must contain exactly one record for every redesign manifest candidate"
         )
-    for candidate in manifest.candidates:
+    for candidate in candidates:
         record = by_id[candidate.candidate_id]
         if record.source_sha256 != candidate.source_sha256:
             raise EligibilityLedgerError(
@@ -144,6 +171,18 @@ def verify_eligibility(manifest_path: Path, ledger_path: Path) -> EligibilityLed
                 f"candidate {candidate.candidate_id}: manifest and ledger dispositions disagree"
             )
         if record.disposition == "confirmatory":
+            try:
+                record_redesign_access(
+                    epoch_path,
+                    manifest_path,
+                    candidate.candidate_id,
+                    "eligibility_verify",
+                    timestamp=_audit_timestamp(),
+                )
+            except EpochError as error:
+                raise EligibilityLedgerError(
+                    f"candidate {candidate.candidate_id}: audit authorization failed: {error}"
+                ) from error
             try:
                 session = _confirmatory_session(candidate)
             except (NativeEvidenceError, OSError) as error:
@@ -200,8 +239,10 @@ def read_eligibility_ledger(path: Path) -> EligibilityLedger:
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
         "digest",
+        "epoch_digest",
         "manifest_digest",
         "records",
+        "split",
     }:
         raise EligibilityLedgerError("eligibility ledger has invalid fields")
     if document["schema_version"] != LEDGER_SCHEMA_VERSION:
@@ -215,12 +256,31 @@ def read_eligibility_ledger(path: Path) -> EligibilityLedger:
     if not isinstance(raw_records, list):
         raise EligibilityLedgerError("eligibility ledger records must be an array")
     ledger = EligibilityLedger(
+        _required_text(document, "epoch_digest"),
         _required_text(document, "manifest_digest"),
+        cast(Split, _required_text(document, "split")),
         tuple(_record_from_payload(index, item) for index, item in enumerate(raw_records)),
     )
     if not hmac.compare_digest(digest, ledger.digest):
         raise EligibilityLedgerError("eligibility ledger digest mismatch")
     return ledger
+
+
+def _assess_redesign_candidate(
+    epoch_path: Path, manifest_path: Path, candidate: Candidate
+) -> EligibilityRecord:
+    record_redesign_access(
+        epoch_path,
+        manifest_path,
+        candidate.candidate_id,
+        "eligibility_assess",
+        timestamp=_audit_timestamp(),
+    )
+    return _assess_candidate(candidate)
+
+
+def _audit_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _assess_candidate(candidate: Candidate) -> EligibilityRecord:

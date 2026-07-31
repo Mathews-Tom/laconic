@@ -310,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="probe every manifest candidate and write private dispositions",
     )
     k1_eligibility_build.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
+    )
+    k1_eligibility_build.add_argument(
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
     )
     k1_eligibility_build.add_argument(
@@ -319,6 +322,9 @@ def build_parser() -> argparse.ArgumentParser:
     k1_eligibility_verify = k1_eligibility_subcommands.add_parser(
         "verify",
         help="verify a complete eligibility ledger and recheck confirmatory records",
+    )
+    k1_eligibility_verify.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
     )
     k1_eligibility_verify.add_argument(
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
@@ -337,6 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate recorded-tool environments and write private admission receipts",
     )
     k1_environment_build.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
+    )
+    k1_environment_build.add_argument(
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
     )
     k1_environment_build.add_argument(
@@ -346,6 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
     k1_environment_verify = k1_environment_subcommands.add_parser(
         "verify",
         help="verify every confirmatory candidate has a valid tool environment",
+    )
+    k1_environment_verify.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
     )
     k1_environment_verify.add_argument(
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
@@ -961,10 +973,9 @@ def _k1_manifest_verify(args: argparse.Namespace) -> int:
 
 def _k1_eligibility_build(args: argparse.Namespace) -> int:
     try:
-        manifest = verify_manifest(args.manifest)
-        ledger = assess_manifest(manifest)
+        ledger = assess_manifest(args.epoch, args.manifest)
         write_eligibility_ledger(args.ledger, ledger)
-    except (EligibilityLedgerError, ManifestError) as error:
+    except EligibilityLedgerError as error:
         print(f"laconic k1 eligibility build: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST
     counts = {
@@ -981,7 +992,7 @@ def _k1_eligibility_build(args: argparse.Namespace) -> int:
 
 def _k1_eligibility_verify(args: argparse.Namespace) -> int:
     try:
-        ledger = verify_eligibility(args.manifest, args.ledger)
+        ledger = verify_eligibility(args.epoch, args.manifest, args.ledger)
     except EligibilityLedgerError as error:
         print(f"laconic k1 eligibility verify: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST
@@ -991,10 +1002,9 @@ def _k1_eligibility_verify(args: argparse.Namespace) -> int:
 
 def _k1_environment_build(args: argparse.Namespace) -> int:
     try:
-        manifest = verify_manifest(args.manifest)
-        ledger = assess_environments(manifest)
+        ledger = assess_environments(args.epoch, args.manifest)
         write_environment_ledger(args.ledger, ledger)
-    except (EnvironmentLedgerError, ManifestError) as error:
+    except EnvironmentLedgerError as error:
         print(f"laconic k1 environment build: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST
     counts = environment_counts(ledger)
@@ -1008,7 +1018,7 @@ def _k1_environment_build(args: argparse.Namespace) -> int:
 
 def _k1_environment_verify(args: argparse.Namespace) -> int:
     try:
-        ledger = verify_environment(args.manifest, args.ledger)
+        ledger = verify_environment(args.epoch, args.manifest, args.ledger)
     except EnvironmentLedgerError as error:
         print(f"laconic k1 environment verify: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST

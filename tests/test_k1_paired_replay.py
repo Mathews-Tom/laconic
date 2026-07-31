@@ -16,6 +16,7 @@ from laconic.k1.environment_ledger import (
     assess_environments,
     write_environment_ledger,
 )
+from laconic.k1.epoch import create_epoch, read_epoch
 from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
 from laconic.k1.paired_config import (
     PairedReplayConfig,
@@ -27,6 +28,7 @@ from laconic.k1.paired_config import (
     write_paired_config,
 )
 from laconic.k1.paired_runner import (
+    PairedReplayAdmissionError,
     PairedReplayCostCapError,
     PairedReplayError,
     PairedReplayRequest,
@@ -43,6 +45,8 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
     private = tmp_path / "private"
     private.mkdir(mode=0o700, exist_ok=True)
     return PairedReplayConfig(
+        epoch_digest="a" * 64,
+        epoch_path=(private / "epoch.json").resolve(),
         manifest_path=(private / "manifest.json").resolve(),
         eligibility_ledger_path=(private / "eligibility.json").resolve(),
         environment_ledger_path=(private / "environment.json").resolve(),
@@ -71,8 +75,9 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
     )
 
 
-def _workload(tmp_path: Path) -> PairedWorkload:
+def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
     private = tmp_path / "private"
+    private.mkdir(mode=0o700)
     source = private / "candidate.jsonl"
     records = [
         {
@@ -151,10 +156,25 @@ def _workload(tmp_path: Path) -> PairedWorkload:
         split="holdout",
     )
     manifest = Manifest((candidate, holdout))
-    write_manifest(private / "manifest.json", manifest)
-    write_eligibility_ledger(private / "eligibility.json", assess_manifest(manifest))
-    write_environment_ledger(private / "environment.json", assess_environments(manifest))
-    return admit_paired_workloads(_config(tmp_path))[0]
+    manifest_path = private / "manifest.json"
+    epoch_path = private / "epoch.json"
+    write_manifest(manifest_path, manifest)
+    create_epoch(
+        manifest_path,
+        epoch_path,
+        audit_path=private / "access-audit.json",
+        approved_roots=(private,),
+        epoch_id="k1-test-paired-replay",
+        created_at="2026-07-31T11:00:00Z",
+    )
+    write_eligibility_ledger(
+        private / "eligibility.json", assess_manifest(epoch_path, manifest_path)
+    )
+    write_environment_ledger(
+        private / "environment.json", assess_environments(epoch_path, manifest_path)
+    )
+    config = replace(_config(tmp_path), epoch_digest=read_epoch(epoch_path).digest)
+    return config, admit_paired_workloads(config)[0]
 
 
 class _ReplayClient:
@@ -228,6 +248,8 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "decoding_parameters",
         "eligibility_ledger_path",
         "endpoint",
+        "epoch_digest",
+        "epoch_path",
         "environment_ledger_path",
         "induced_policy",
         "manifest_path",
@@ -448,8 +470,7 @@ def test_decimal_pricing_uses_explicit_cache_categories(tmp_path: Path) -> None:
 
 
 def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    workload = _workload(tmp_path)
+    config, workload = _workload(tmp_path)
     client = _ReplayClient()
 
     receipt = run_paired_replay(config, (workload,), client, run_id="run-1")
@@ -467,8 +488,8 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
 
 
 def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
-    config = replace(_config(tmp_path), cost_cap_per_pair_usd="0.0001")
-    workload = _workload(tmp_path)
+    config, workload = _workload(tmp_path)
+    config = replace(config, cost_cap_per_pair_usd="0.0001")
     client = _ReplayClient()
 
     with pytest.raises(PairedReplayCostCapError, match="past the"):
@@ -479,13 +500,13 @@ def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: 
 
 
 def test_paired_runner_accounts_for_induced_codec_turns(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+    config, workload = _workload(tmp_path)
     client = _OutcomeClient(
         (_turn(),),
         (_turn(), _turn("induced")),
     )
 
-    receipt = run_paired_replay(config, (_workload(tmp_path),), client, run_id="run-induced")
+    receipt = run_paired_replay(config, (workload,), client, run_id="run-induced")
 
     assert all(
         pair.raw.turn_accounting.completed_turn_count == 1
@@ -503,13 +524,13 @@ def test_paired_runner_accounts_for_induced_codec_turns(tmp_path: Path) -> None:
 def test_unsupported_turn_terminates_only_its_pair_and_preserves_artifacts(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path)
+    config, workload = _workload(tmp_path)
     client = _OutcomeClient(
         (_turn("unsupported", unsupported_reason="snapshot has no matching tool call"),),
         (_turn(),),
     )
 
-    receipt = run_paired_replay(config, (_workload(tmp_path),), client, run_id="run-unsupported")
+    receipt = run_paired_replay(config, (workload,), client, run_id="run-unsupported")
 
     assert [request.arm for request in client.requests] == ["raw", "raw"]
     assert receipt.pairs == ()
@@ -528,17 +549,24 @@ def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(
     with pytest.raises(PairedReplayError, match="must terminate"):
         PairedReplayResponse((_turn("unsupported", unsupported_reason="unsupported"), _turn()))
 
+    config, workload = _workload(tmp_path)
     client = _OutcomeClient((_turn("induced"),), (_turn(),))
     with pytest.raises(PairedReplayError, match="raw arm must not"):
-        run_paired_replay(_config(tmp_path), (_workload(tmp_path),), client, run_id="run-invalid")
-
+        run_paired_replay(config, (workload,), client, run_id="run-invalid")
     assert [request.arm for request in client.requests] == ["raw"]
+
+
+def test_paired_admission_rejects_holdout_config_before_native_read(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+
+    with pytest.raises(PairedReplayAdmissionError, match="requires the redesign split"):
+        admit_paired_workloads(replace(config, split="holdout"))
 
 
 def test_paired_config_cli_and_artifact_root_hygiene(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    config = _config(tmp_path)
+    config, workload = _workload(tmp_path)
     config_path = tmp_path / "private" / "paired-replay.json"
     write_paired_config(config_path, config)
 
@@ -550,15 +578,14 @@ def test_paired_config_cli_and_artifact_root_hygiene(
     bad_root.artifact_root.chmod(0o755)
     client = _ReplayClient()
     with pytest.raises(PairedReplayError, match="mode 0700"):
-        run_paired_replay(bad_root, (_workload(tmp_path),), client, run_id="run-private")
+        run_paired_replay(bad_root, (workload,), client, run_id="run-private")
     assert client.requests == []
 
 
 def test_runner_rejects_unsafe_or_symlinked_artifact_paths_before_request(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path)
-    workload = _workload(tmp_path)
+    config, workload = _workload(tmp_path)
     client = _ReplayClient()
 
     with pytest.raises(PairedReplayError, match="simple names"):

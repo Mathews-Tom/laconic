@@ -24,6 +24,7 @@ PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 1
 
 Arm = Literal["raw", "codec"]
 Split = Literal["redesign", "holdout"]
+PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 2
 
 
 class PairedReplayConfigError(ValueError):
@@ -100,6 +101,8 @@ class PairedReplayConfig:
     from its process environment when a run is explicitly authorized.
     """
 
+    epoch_digest: str
+    epoch_path: Path
     manifest_path: Path
     eligibility_ledger_path: Path
     environment_ledger_path: Path
@@ -132,6 +135,7 @@ class PairedReplayConfig:
                 raise PairedReplayConfigError(f"{field_name} must not be empty")
         _validate_endpoint(self.endpoint)
         for field_name, path in (
+            ("epoch_path", self.epoch_path),
             ("manifest_path", self.manifest_path),
             ("eligibility_ledger_path", self.eligibility_ledger_path),
             ("environment_ledger_path", self.environment_ledger_path),
@@ -140,6 +144,8 @@ class PairedReplayConfig:
             if not path.is_absolute():
                 raise PairedReplayConfigError(f"{field_name} must be absolute")
             object.__setattr__(self, field_name, path.resolve(strict=False))
+        if not is_sha256(self.epoch_digest):
+            raise PairedReplayConfigError("epoch_digest must be 64 lowercase hex")
         frozen_parameters = _freeze_parameters(self.decoding_parameters)
         object.__setattr__(self, "decoding_parameters", frozen_parameters)
         if self.seed_supported:
@@ -188,7 +194,9 @@ class PairedReplayConfig:
             "cost_cap_per_pair_usd": self.cost_cap_per_pair_usd,
             "cost_cap_run_usd": self.cost_cap_run_usd,
             "decoding_parameters": dict(self.decoding_parameters),
+            "epoch_digest": self.epoch_digest,
             "eligibility_ledger_path": str(self.eligibility_ledger_path),
+            "epoch_path": str(self.epoch_path),
             "endpoint": self.endpoint,
             "environment_ledger_path": str(self.environment_ledger_path),
             "induced_policy": self.induced_policy,
@@ -347,6 +355,8 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
     if unsupported_policy != "terminate_pair" or induced_policy != "include_in_codec_cost":
         raise PairedReplayConfigError("paired replay policies are invalid")
     return PairedReplayConfig(
+        epoch_digest=_required_text(document, "epoch_digest"),
+        epoch_path=_absolute_path(document, "epoch_path"),
         manifest_path=_absolute_path(document, "manifest_path"),
         eligibility_ledger_path=_absolute_path(document, "eligibility_ledger_path"),
         environment_ledger_path=_absolute_path(document, "environment_ledger_path"),
@@ -540,6 +550,8 @@ _DOCUMENT_FIELDS = frozenset(
         "decoding_parameters",
         "digest",
         "eligibility_ledger_path",
+        "epoch_path",
+        "epoch_digest",
         "endpoint",
         "environment_ledger_path",
         "induced_policy",
