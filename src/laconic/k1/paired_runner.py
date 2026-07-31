@@ -191,6 +191,14 @@ class PairedTurnAccounting:
         """Return the exhaustive count of observed turn outcomes."""
         return self.completed_turn_count + self.induced_turn_count + self.unsupported_turn_count
 
+    def to_payload(self) -> dict[str, int]:
+        """Return canonical non-content turn accounting."""
+        return {
+            "completed_turn_count": self.completed_turn_count,
+            "induced_turn_count": self.induced_turn_count,
+            "unsupported_turn_count": self.unsupported_turn_count,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class PairedArmReceipt:
@@ -208,6 +216,24 @@ class PairedArmReceipt:
         if len(self.usage) != self.turn_accounting.total_turn_count:
             raise PairedReplayError("arm usage must account for every response turn")
 
+    def to_payload(self) -> dict[str, object]:
+        """Return a private receipt payload without response content."""
+        return {
+            "artifact_path": str(self.artifact_path),
+            "cost_usd": str(self.cost_usd),
+            "provenance": self.provenance.to_payload(),
+            "turn_accounting": self.turn_accounting.to_payload(),
+            "usage": [
+                {
+                    "cache_read_tokens": item.cache_read_tokens,
+                    "cache_write_tokens": item.cache_write_tokens,
+                    "input_tokens": item.input_tokens,
+                    "output_tokens": item.output_tokens,
+                }
+                for item in self.usage
+            ],
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class PairedTerminatedPairReceipt:
@@ -222,6 +248,13 @@ class PairedTerminatedPairReceipt:
             raise PairedReplayError("terminated pair must contain an unsupported arm")
         if self.codec is not None and self.codec.provenance.arm != "codec":
             raise PairedReplayError("terminated pair codec receipt must be codec arm")
+
+    def to_payload(self) -> dict[str, object]:
+        """Return a private terminated-pair receipt without response content."""
+        return {
+            "codec": None if self.codec is None else self.codec.to_payload(),
+            "raw": self.raw.to_payload(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,21 +288,50 @@ class PairedPairReceipt:
         """Return both arm costs for enforcing the per-pair cap."""
         return self.raw.cost_usd + self.codec.cost_usd
 
+    def to_payload(self) -> dict[str, object]:
+        """Return a private paired receipt without response content."""
+        return {"codec": self.codec.to_payload(), "raw": self.raw.to_payload()}
+
 
 @dataclass(frozen=True, slots=True)
 class PairedRunReceipt:
     """Complete non-content receipt for a cost-bounded paired runner invocation."""
 
+    epoch_digest: str
     config_digest: str
     pairs: tuple[PairedPairReceipt, ...]
     total_cost_usd: Decimal
     terminated_pairs: tuple[PairedTerminatedPairReceipt, ...] = ()
 
     def __post_init__(self) -> None:
-        if not is_sha256(self.config_digest):
-            raise PairedReplayError("config_digest must be 64 lowercase hex")
+        for field_name, value in (
+            ("epoch_digest", self.epoch_digest),
+            ("config_digest", self.config_digest),
+        ):
+            if not is_sha256(value):
+                raise PairedReplayError(f"{field_name} must be 64 lowercase hex")
         if self.total_cost_usd < 0:
             raise PairedReplayError("total_cost_usd must be non-negative")
+
+    def payload_without_digest(self) -> dict[str, object]:
+        """Return the exhaustive non-content receipt payload."""
+        return {
+            "config_digest": self.config_digest,
+            "epoch_digest": self.epoch_digest,
+            "pairs": [pair.to_payload() for pair in self.pairs],
+            "schema_version": 1,
+            "terminated_pairs": [pair.to_payload() for pair in self.terminated_pairs],
+            "total_cost_usd": str(self.total_cost_usd),
+        }
+
+    @property
+    def digest(self) -> str:
+        """Return the receipt digest binding every response-artifact digest."""
+        return _digest(self.payload_without_digest())
+
+    def to_document(self) -> dict[str, object]:
+        """Return the persistent private receipt document."""
+        return {"digest": self.digest, **self.payload_without_digest()}
 
 
 def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, ...]:
@@ -421,6 +483,7 @@ def run_paired_replay(
             pairs.append(pair)
             total_cost += pair.cost_usd
     return PairedRunReceipt(
+        config.epoch_digest,
         config.digest,
         tuple(pairs),
         total_cost,

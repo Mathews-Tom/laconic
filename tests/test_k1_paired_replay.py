@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from decimal import Decimal
@@ -26,6 +27,12 @@ from laconic.k1.paired_config import (
     UsageMapping,
     read_paired_config,
     write_paired_config,
+)
+from laconic.k1.paired_report import (
+    PairedReportError,
+    build_paired_report,
+    verify_paired_report,
+    write_paired_report,
 )
 from laconic.k1.paired_runner import (
     PairedReplayAdmissionError,
@@ -485,6 +492,91 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
         assert pair.codec.artifact_path.stat().st_mode & 0o777 == 0o600
         assert '"fresh":true' in pair.raw.artifact_path.read_text(encoding="utf-8")
     assert all(not hasattr(request.workload, "session") for request in client.requests)
+
+
+def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
+    tmp_path: Path,
+) -> None:
+    config, workload = _workload(tmp_path)
+    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    epoch = read_epoch(config.epoch_path)
+    report_path = config.epoch_path.parent / "paired-report.json"
+    report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+
+    write_paired_report(report_path, epoch, report)
+
+    verified = verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+    assert verified.digest == report.digest
+    assert report_path.stat().st_mode & 0o777 == 0o600
+    assert '"response"' not in report_path.read_text(encoding="utf-8")
+    receipt.pairs[0].raw.artifact_path.write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(PairedReportError, match="response artifact digest mismatch"):
+        verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+
+
+def test_paired_report_reports_response_artifact_permission_failure(
+    tmp_path: Path,
+) -> None:
+    config, workload = _workload(tmp_path)
+    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    epoch = read_epoch(config.epoch_path)
+    report_path = config.epoch_path.parent / "paired-report.json"
+    report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+    write_paired_report(report_path, epoch, report)
+    receipt.pairs[0].raw.artifact_path.chmod(0o644)
+
+    with pytest.raises(PairedReportError, match="response artifact must have mode 0600"):
+        verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+
+
+def test_paired_report_rejects_nonprivate_response_artifact_directory(
+    tmp_path: Path,
+) -> None:
+    config, workload = _workload(tmp_path)
+    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    epoch = read_epoch(config.epoch_path)
+    report_path = config.epoch_path.parent / "paired-report.json"
+    report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+    write_paired_report(report_path, epoch, report)
+    receipt.pairs[0].raw.artifact_path.parent.chmod(0o755)
+
+    with pytest.raises(PairedReportError, match="response artifact directory must have mode 0700"):
+        verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+
+
+def test_paired_report_rejects_recomputed_tampered_aggregate(tmp_path: Path) -> None:
+    config, workload = _workload(tmp_path)
+    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    epoch = read_epoch(config.epoch_path)
+    report_path = config.epoch_path.parent / "paired-report.json"
+    report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+    write_paired_report(report_path, epoch, report)
+
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    document["strata"][0]["raw_cost_usd"] = "999"
+    payload = {key: value for key, value in document.items() if key != "digest"}
+    document["digest"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    report_path.write_text(json.dumps(document), encoding="utf-8")
+    report_path.chmod(0o600)
+
+    with pytest.raises(PairedReportError, match="strata do not match"):
+        verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+
+
+def test_paired_report_rejects_nonprivate_parent_directory(tmp_path: Path) -> None:
+    config, workload = _workload(tmp_path)
+    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    epoch = read_epoch(config.epoch_path)
+    report_path = config.epoch_path.parent / "paired-report.json"
+    report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+    write_paired_report(report_path, epoch, report)
+    report_path.parent.chmod(0o755)
+
+    with pytest.raises(PairedReportError, match="directory must have mode 0700"):
+        verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
 
 
 def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
