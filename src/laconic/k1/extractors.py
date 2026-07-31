@@ -300,7 +300,7 @@ def _session(
         raise NativeEvidenceError(
             f"native source records multiple declared models: {sorted(declared_models)!r}"
         )
-    if declared_models is not None and models and models != declared_models:
+    if declared_models and models and not _matching_declared_model(declared_models, models):
         raise NativeEvidenceError("assistant model does not match model_change provenance")
     model = next(iter(declared_models), None) if declared_models else next(iter(models), None)
     return NativeSession(
@@ -312,6 +312,17 @@ def _session(
         model=model,
         events=ordered_events,
     )
+
+
+def _matching_declared_model(declared_models: set[str], assistant_models: set[str]) -> bool:
+    """Return whether a sole short assistant model matches declared provenance."""
+    if declared_models == assistant_models:
+        return True
+    if len(declared_models) != 1 or len(assistant_models) != 1:
+        return False
+    declared_model = next(iter(declared_models))
+    assistant_model = next(iter(assistant_models))
+    return "/" in declared_model and declared_model.rsplit("/", maxsplit=1)[1] == assistant_model
 
 
 def _records(path: Path) -> Iterator[tuple[int, dict[str, JsonValue]]]:

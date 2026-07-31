@@ -244,7 +244,7 @@ def test_omp_extractor_preserves_native_usage_and_tool_identity(tmp_path: Path) 
                 "timestamp": "2026-07-30T17:00:01Z",
                 "message": {
                     "role": "assistant",
-                    "model": "openai-codex/gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
                     "usage": {"input": 100, "output": 20, "cacheRead": 50, "cacheWrite": 10},
                     "content": [
                         {
