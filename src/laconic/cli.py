@@ -351,6 +351,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
     )
     k1_environment_build.add_argument(
+        "--eligibility-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private verified eligibility ledger",
+    )
+    k1_environment_build.add_argument(
         "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
     )
     k1_environment_build.set_defaults(handler=_k1_environment_build)
@@ -363,6 +370,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     k1_environment_verify.add_argument(
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_environment_verify.add_argument(
+        "--eligibility-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private verified eligibility ledger",
     )
     k1_environment_verify.add_argument(
         "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
@@ -1095,7 +1109,7 @@ def _k1_eligibility_verify(args: argparse.Namespace) -> int:
 
 def _k1_environment_build(args: argparse.Namespace) -> int:
     try:
-        ledger = assess_environments(args.epoch, args.manifest)
+        ledger = assess_environments(args.epoch, args.manifest, args.eligibility_ledger)
         write_environment_ledger(args.ledger, ledger)
     except EnvironmentLedgerError as error:
         print(f"laconic k1 environment build: {error}", file=sys.stderr)
@@ -1111,7 +1125,7 @@ def _k1_environment_build(args: argparse.Namespace) -> int:
 
 def _k1_environment_verify(args: argparse.Namespace) -> int:
     try:
-        ledger = verify_environment(args.epoch, args.manifest, args.ledger)
+        ledger = verify_environment(args.epoch, args.manifest, args.eligibility_ledger, args.ledger)
     except EnvironmentLedgerError as error:
         print(f"laconic k1 environment verify: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST

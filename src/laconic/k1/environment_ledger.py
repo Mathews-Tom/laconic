@@ -13,6 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from laconic.k1.eligibility import (
+    EligibilityLedgerError,
+    verify_eligibility,
+)
 from laconic.k1.environment import EnvironmentError, SnapshotEnvironment, validate_snapshot
 from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
 from laconic.k1.evidence import (
@@ -24,7 +28,7 @@ from laconic.k1.evidence import (
 from laconic.k1.extractors import extract_native
 from laconic.k1.manifest import Candidate, Split, is_sha256
 
-ENVIRONMENT_LEDGER_SCHEMA_VERSION = 3
+ENVIRONMENT_LEDGER_SCHEMA_VERSION = 4
 
 EnvironmentStatus = Literal["valid", "unsupported", "unavailable"]
 EnvironmentMode = Literal["recorded_tool", "snapshot"]
@@ -114,6 +118,7 @@ class EnvironmentLedger:
 
     epoch_digest: str
     manifest_digest: str
+    eligibility_ledger_digest: str
     split: Split
     records: tuple[EnvironmentRecord, ...]
 
@@ -122,6 +127,8 @@ class EnvironmentLedger:
             raise EnvironmentLedgerError("manifest_digest must be 64 lowercase hex")
         if not is_sha256(self.epoch_digest):
             raise EnvironmentLedgerError("epoch_digest must be 64 lowercase hex")
+        if not is_sha256(self.eligibility_ledger_digest):
+            raise EnvironmentLedgerError("eligibility_ledger_digest must be 64 lowercase hex")
         if self.split != "redesign":
             raise EnvironmentLedgerError("environment ledger must be scoped to redesign")
         if not self.records:
@@ -137,6 +144,7 @@ class EnvironmentLedger:
     def payload_without_digest(self) -> dict[str, object]:
         """Return the ledger fields covered by its digest."""
         return {
+            "eligibility_ledger_digest": self.eligibility_ledger_digest,
             "epoch_digest": self.epoch_digest,
             "manifest_digest": self.manifest_digest,
             "records": [
@@ -152,43 +160,63 @@ class EnvironmentLedger:
         return {"digest": self.digest, **self.payload_without_digest()}
 
 
-def assess_environments(epoch_path: Path, manifest_path: Path) -> EnvironmentLedger:
-    """Validate only sealed-redesign environments after audit authorization."""
+def assess_environments(
+    epoch_path: Path, manifest_path: Path, eligibility_ledger_path: Path
+) -> EnvironmentLedger:
+    """Validate only eligibility-confirmatory sealed-redesign environments."""
     try:
         epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        eligibility = verify_eligibility(epoch_path, manifest_path, eligibility_ledger_path)
+        dispositions = {record.candidate_id: record.disposition for record in eligibility.records}
         records = tuple(
-            _assess_redesign_candidate_environment(epoch_path, manifest_path, candidate)
+            _assess_redesign_candidate_environment(
+                epoch_path,
+                manifest_path,
+                candidate,
+                dispositions[candidate.candidate_id],
+            )
             for candidate in manifest.candidates
             if candidate.split == "redesign"
         )
-    except EpochError as error:
+    except (EligibilityLedgerError, EpochError, KeyError) as error:
         raise EnvironmentLedgerError(str(error)) from error
-    return EnvironmentLedger(epoch.digest, manifest.digest, "redesign", records)
+    return EnvironmentLedger(epoch.digest, manifest.digest, eligibility.digest, "redesign", records)
 
 
 def verify_environment(
-    epoch_path: Path, manifest_path: Path, ledger_path: Path
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    ledger_path: Path,
 ) -> EnvironmentLedger:
-    """Revalidate redesign-confirmatory environments after audit authorization."""
+    """Revalidate eligibility-confirmatory redesign environments after audit authorization."""
     try:
         epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
-    except EpochError as error:
+        verified_eligibility = verify_eligibility(
+            epoch_path, manifest_path, eligibility_ledger_path
+        )
+    except (EligibilityLedgerError, EpochError) as error:
         raise EnvironmentLedgerError(str(error)) from error
     ledger = read_environment_ledger(ledger_path)
     if ledger.manifest_digest != manifest.digest:
         raise EnvironmentLedgerError("ledger manifest_digest does not match manifest")
     if ledger.epoch_digest != epoch.digest:
         raise EnvironmentLedgerError("ledger epoch_digest does not match sealed epoch")
+    if ledger.eligibility_ledger_digest != verified_eligibility.digest:
+        raise EnvironmentLedgerError(
+            "ledger eligibility_ledger_digest does not match verified eligibility ledger"
+        )
     if ledger.split != "redesign":
         raise EnvironmentLedgerError("ledger split must be redesign")
     candidates = tuple(
         candidate for candidate in manifest.candidates if candidate.split == "redesign"
     )
     records = {record.candidate_id: record for record in ledger.records}
+    eligibility_records = {record.candidate_id: record for record in verified_eligibility.records}
     candidate_ids = {candidate.candidate_id for candidate in candidates}
-    if set(records) != candidate_ids:
+    if set(records) != candidate_ids or set(eligibility_records) != candidate_ids:
         raise EnvironmentLedgerError(
-            "ledger must contain exactly one record for every redesign manifest candidate"
+            "environment and eligibility ledgers must contain every redesign manifest candidate"
         )
     for candidate in candidates:
         record = records[candidate.candidate_id]
@@ -196,7 +224,7 @@ def verify_environment(
             raise EnvironmentLedgerError(
                 f"candidate {candidate.candidate_id}: source_sha256 mismatch"
             )
-        if candidate.eligibility_disposition != "confirmatory":
+        if eligibility_records[candidate.candidate_id].disposition != "confirmatory":
             continue
         if record.status != "valid" or record.mode is None:
             raise EnvironmentLedgerError(
@@ -212,13 +240,8 @@ def verify_environment(
                     "environment_verify",
                     timestamp=_audit_timestamp(),
                 )
-            except EpochError as error:
-                raise EnvironmentLedgerError(
-                    f"candidate {candidate.candidate_id}: audit authorization failed: {error}"
-                ) from error
-            try:
                 actual_digest = _recorded_tool_digest(candidate)
-            except (NativeEvidenceError, OSError) as error:
+            except (EpochError, NativeEvidenceError, OSError) as error:
                 raise EnvironmentLedgerError(
                     f"candidate {candidate.candidate_id}: cannot revalidate "
                     "recorded tool environment"
@@ -282,6 +305,7 @@ def read_environment_ledger(path: Path) -> EnvironmentLedger:
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
         "digest",
+        "eligibility_ledger_digest",
         "epoch_digest",
         "manifest_digest",
         "records",
@@ -301,6 +325,7 @@ def read_environment_ledger(path: Path) -> EnvironmentLedger:
     ledger = EnvironmentLedger(
         _required_text(document, "epoch_digest"),
         _required_text(document, "manifest_digest"),
+        _required_text(document, "eligibility_ledger_digest"),
         cast(Split, _required_text(document, "split")),
         tuple(_record_from_payload(index, record) for index, record in enumerate(raw_records)),
     )
@@ -360,7 +385,10 @@ def _record_from_payload(index: int, payload: object) -> EnvironmentRecord:
 
 
 def _assess_redesign_candidate_environment(
-    epoch_path: Path, manifest_path: Path, candidate: Candidate
+    epoch_path: Path,
+    manifest_path: Path,
+    candidate: Candidate,
+    disposition: str,
 ) -> EnvironmentRecord:
     record_redesign_access(
         epoch_path,
@@ -369,15 +397,17 @@ def _assess_redesign_candidate_environment(
         "environment_assess",
         timestamp=_audit_timestamp(),
     )
-    return _assess_candidate_environment(candidate)
+    return _assess_candidate_environment(candidate, disposition)
 
 
 def _audit_timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _assess_candidate_environment(candidate: Candidate) -> EnvironmentRecord:
-    if candidate.eligibility_disposition != "confirmatory":
+def _assess_candidate_environment(
+    candidate: Candidate, eligibility_disposition: str
+) -> EnvironmentRecord:
+    if eligibility_disposition != "confirmatory":
         return EnvironmentRecord(
             candidate.candidate_id,
             candidate.source_sha256,

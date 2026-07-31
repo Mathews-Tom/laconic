@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
+from laconic.k1.eligibility import (
+    assess_manifest,
+    read_eligibility_ledger,
+    write_eligibility_ledger,
+)
 from laconic.k1.environment import (
     EnvironmentError,
     RecordedToolObservation,
@@ -243,6 +248,7 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
 ) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
     epoch_path = _seal_epoch(manifest_path, private)
+    eligibility_path = _write_eligibility(epoch_path, manifest_path, private)
     ledger_path = private / "environment.json"
     build_exit = main(
         [
@@ -253,6 +259,8 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
             str(epoch_path),
             "--manifest",
             str(manifest_path),
+            "--eligibility-ledger",
+            str(eligibility_path),
             "--ledger",
             str(ledger_path),
         ]
@@ -269,6 +277,8 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
             str(epoch_path),
             "--manifest",
             str(manifest_path),
+            "--eligibility-ledger",
+            str(eligibility_path),
             "--ledger",
             str(ledger_path),
         ]
@@ -294,11 +304,33 @@ def test_environment_build_marks_nonfinite_tool_payload_unsupported(tmp_path: Pa
     )
     write_manifest(manifest_path, rebuilt)
     epoch_path = _seal_epoch(manifest_path, private)
+    eligibility_path = _write_eligibility(epoch_path, manifest_path, private)
 
-    ledger = assess_environments(epoch_path, manifest_path)
+    ledger = assess_environments(epoch_path, manifest_path, eligibility_path)
 
     assert ledger.records[0].status == "unsupported"
     assert ledger.records[0].reason == "unsupported_tool"
+
+
+def test_environment_build_uses_verified_eligibility_without_manifest_mutation(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    sealed_manifest = Manifest(
+        (
+            replace(manifest.candidates[0], eligibility_disposition="unreviewed"),
+            manifest.candidates[1],
+        )
+    )
+    write_manifest(manifest_path, sealed_manifest)
+    epoch_path = _seal_epoch(manifest_path, private)
+    eligibility_path = _write_eligibility(epoch_path, manifest_path, private)
+
+    ledger = assess_environments(epoch_path, manifest_path, eligibility_path)
+
+    assert ledger.eligibility_ledger_digest == read_eligibility_ledger(eligibility_path).digest
+    assert ledger.records[0].status == "valid"
+    assert sealed_manifest.candidates[0].eligibility_disposition == "unreviewed"
 
 
 def test_environment_cli_revalidates_snapshot_receipts(
@@ -306,11 +338,13 @@ def test_environment_cli_revalidates_snapshot_receipts(
 ) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
     epoch_path = _seal_epoch(manifest_path, private)
+    eligibility_path = _write_eligibility(epoch_path, manifest_path, private)
     root = _immutable_snapshot(tmp_path)
     ledger_path = private / "environment.json"
     ledger = EnvironmentLedger(
         read_epoch(epoch_path).digest,
         manifest.digest,
+        read_eligibility_ledger(eligibility_path).digest,
         "redesign",
         tuple(
             EnvironmentRecord(
@@ -338,6 +372,8 @@ def test_environment_cli_revalidates_snapshot_receipts(
                 str(epoch_path),
                 "--manifest",
                 str(manifest_path),
+                "--eligibility-ledger",
+                str(eligibility_path),
                 "--ledger",
                 str(ledger_path),
             ]
@@ -360,6 +396,8 @@ def test_environment_cli_revalidates_snapshot_receipts(
                 str(epoch_path),
                 "--manifest",
                 str(manifest_path),
+                "--eligibility-ledger",
+                str(eligibility_path),
                 "--ledger",
                 str(ledger_path),
             ]
@@ -373,11 +411,20 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    sealed_manifest = Manifest(
+        (
+            replace(manifest.candidates[0], eligibility_disposition="unreviewed"),
+            manifest.candidates[1],
+        )
+    )
+    write_manifest(manifest_path, sealed_manifest)
     epoch_path = _seal_epoch(manifest_path, private)
+    eligibility_path = _write_eligibility(epoch_path, manifest_path, private)
     ledger_path = private / "environment.json"
     ledger = EnvironmentLedger(
         read_epoch(epoch_path).digest,
-        manifest.digest,
+        sealed_manifest.digest,
+        read_eligibility_ledger(eligibility_path).digest,
         "redesign",
         tuple(
             EnvironmentRecord(
@@ -403,6 +450,8 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
             str(epoch_path),
             "--manifest",
             str(manifest_path),
+            "--eligibility-ledger",
+            str(eligibility_path),
             "--ledger",
             str(ledger_path),
         ]
@@ -412,6 +461,39 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
     assert "lacks valid environment" in capsys.readouterr().err
 
 
+def test_environment_verification_rejects_wrong_eligibility_ledger_binding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    epoch_path = _seal_epoch(manifest_path, private)
+    eligibility_path = _write_eligibility(epoch_path, manifest_path, private)
+    ledger_path = private / "environment.json"
+    ledger = assess_environments(epoch_path, manifest_path, eligibility_path)
+    write_environment_ledger(
+        ledger_path,
+        replace(ledger, eligibility_ledger_digest="b" * 64),
+    )
+
+    exit_code = main(
+        [
+            "k1",
+            "environment",
+            "verify",
+            "--epoch",
+            str(epoch_path),
+            "--manifest",
+            str(manifest_path),
+            "--eligibility-ledger",
+            str(eligibility_path),
+            "--ledger",
+            str(ledger_path),
+        ]
+    )
+
+    assert exit_code == EXIT_K1_MANIFEST
+    assert "eligibility_ledger_digest" in capsys.readouterr().err
+
+
 def test_environment_ledger_rejects_tampering_and_insecure_paths(tmp_path: Path) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
     ledger_path = private / "environment.json"
@@ -419,6 +501,7 @@ def test_environment_ledger_rejects_tampering_and_insecure_paths(tmp_path: Path)
     ledger = EnvironmentLedger(
         "a" * 64,
         manifest.digest,
+        "a" * 64,
         "redesign",
         tuple(
             EnvironmentRecord(
@@ -461,6 +544,7 @@ def test_environment_ledger_rejects_symlink(tmp_path: Path) -> None:
     ledger = EnvironmentLedger(
         "a" * 64,
         manifest.digest,
+        "a" * 64,
         "redesign",
         tuple(
             EnvironmentRecord(
@@ -497,6 +581,12 @@ def test_environment_ledger_rejects_content_bearing_reason() -> None:
             None,
             "historical output",
         )
+
+
+def _write_eligibility(epoch_path: Path, manifest_path: Path, private: Path) -> Path:
+    path = private / "eligibility.json"
+    write_eligibility_ledger(path, assess_manifest(epoch_path, manifest_path))
+    return path
 
 
 def _confirmatory_manifest(tmp_path: Path) -> tuple[Path, Manifest, Path]:
