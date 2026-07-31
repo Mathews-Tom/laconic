@@ -27,6 +27,7 @@ from laconic.k1.environment_ledger import (
     read_environment_ledger,
     write_environment_ledger,
 )
+from laconic.k1.epoch import create_epoch, read_epoch
 from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
 
 
@@ -241,12 +242,15 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    epoch_path = _seal_epoch(manifest_path, private)
     ledger_path = private / "environment.json"
     build_exit = main(
         [
             "k1",
             "environment",
             "build",
+            "--epoch",
+            str(epoch_path),
             "--manifest",
             str(manifest_path),
             "--ledger",
@@ -261,6 +265,8 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
             "k1",
             "environment",
             "verify",
+            "--epoch",
+            str(epoch_path),
             "--manifest",
             str(manifest_path),
             "--ledger",
@@ -269,12 +275,12 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
     )
 
     assert exit_code == EXIT_OK
-    assert "valid=2, unsupported=0, unavailable=0" in capsys.readouterr().out
+    assert "valid=1, unsupported=0, unavailable=0" in capsys.readouterr().out
     assert str(manifest.candidates[0].source_path) not in ledger_path.read_text(encoding="utf-8")
 
 
 def test_environment_build_marks_nonfinite_tool_payload_unsupported(tmp_path: Path) -> None:
-    manifest_path, manifest, _ = _confirmatory_manifest(tmp_path)
+    manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
     source = manifest.candidates[0].source_path
     source.write_text(
         source.read_text(encoding="utf-8").replace('"text": "print(\'ok\')"', '"text": NaN'),
@@ -287,8 +293,9 @@ def test_environment_build_marks_nonfinite_tool_payload_unsupported(tmp_path: Pa
         )
     )
     write_manifest(manifest_path, rebuilt)
+    epoch_path = _seal_epoch(manifest_path, private)
 
-    ledger = assess_environments(rebuilt)
+    ledger = assess_environments(epoch_path, manifest_path)
 
     assert ledger.records[0].status == "unsupported"
     assert ledger.records[0].reason == "unsupported_tool"
@@ -298,10 +305,13 @@ def test_environment_cli_revalidates_snapshot_receipts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    epoch_path = _seal_epoch(manifest_path, private)
     root = _immutable_snapshot(tmp_path)
     ledger_path = private / "environment.json"
     ledger = EnvironmentLedger(
+        read_epoch(epoch_path).digest,
         manifest.digest,
+        "redesign",
         tuple(
             EnvironmentRecord(
                 candidate.candidate_id,
@@ -313,6 +323,7 @@ def test_environment_cli_revalidates_snapshot_receipts(
                 str(root),
             )
             for candidate in manifest.candidates
+            if candidate.split == "redesign"
         ),
     )
     write_environment_ledger(ledger_path, ledger)
@@ -323,6 +334,8 @@ def test_environment_cli_revalidates_snapshot_receipts(
                 "k1",
                 "environment",
                 "verify",
+                "--epoch",
+                str(epoch_path),
                 "--manifest",
                 str(manifest_path),
                 "--ledger",
@@ -343,6 +356,8 @@ def test_environment_cli_revalidates_snapshot_receipts(
                 "k1",
                 "environment",
                 "verify",
+                "--epoch",
+                str(epoch_path),
                 "--manifest",
                 str(manifest_path),
                 "--ledger",
@@ -358,9 +373,12 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     manifest_path, manifest, private = _confirmatory_manifest(tmp_path)
+    epoch_path = _seal_epoch(manifest_path, private)
     ledger_path = private / "environment.json"
     ledger = EnvironmentLedger(
+        read_epoch(epoch_path).digest,
         manifest.digest,
+        "redesign",
         tuple(
             EnvironmentRecord(
                 candidate.candidate_id,
@@ -371,6 +389,7 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
                 "environment_unavailable",
             )
             for candidate in manifest.candidates
+            if candidate.split == "redesign"
         ),
     )
     write_environment_ledger(ledger_path, ledger)
@@ -380,6 +399,8 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
             "k1",
             "environment",
             "verify",
+            "--epoch",
+            str(epoch_path),
             "--manifest",
             str(manifest_path),
             "--ledger",
@@ -396,7 +417,9 @@ def test_environment_ledger_rejects_tampering_and_insecure_paths(tmp_path: Path)
     ledger_path = private / "environment.json"
     snapshot_root = str(_immutable_snapshot(tmp_path))
     ledger = EnvironmentLedger(
+        "a" * 64,
         manifest.digest,
+        "redesign",
         tuple(
             EnvironmentRecord(
                 candidate.candidate_id,
@@ -408,6 +431,7 @@ def test_environment_ledger_rejects_tampering_and_insecure_paths(tmp_path: Path)
                 snapshot_root,
             )
             for candidate in manifest.candidates
+            if candidate.split == "redesign"
         ),
     )
     write_environment_ledger(ledger_path, ledger)
@@ -435,7 +459,9 @@ def test_environment_ledger_rejects_symlink(tmp_path: Path) -> None:
     ledger_path = private / "environment.json"
     snapshot_root = str(_immutable_snapshot(tmp_path))
     ledger = EnvironmentLedger(
+        "a" * 64,
         manifest.digest,
+        "redesign",
         tuple(
             EnvironmentRecord(
                 candidate.candidate_id,
@@ -447,6 +473,7 @@ def test_environment_ledger_rejects_symlink(tmp_path: Path) -> None:
                 snapshot_root,
             )
             for candidate in manifest.candidates
+            if candidate.split == "redesign"
         ),
     )
     write_environment_ledger(ledger_path, ledger)
@@ -547,3 +574,16 @@ def _confirmatory_manifest(tmp_path: Path) -> tuple[Path, Manifest, Path]:
     manifest_path = private / "manifest.json"
     write_manifest(manifest_path, manifest)
     return manifest_path, manifest, private
+
+
+def _seal_epoch(manifest_path: Path, private: Path) -> Path:
+    epoch_path = private / "epoch.json"
+    create_epoch(
+        manifest_path,
+        epoch_path,
+        audit_path=private / "access-audit.json",
+        approved_roots=(private,),
+        epoch_id="k1-test-environment",
+        created_at="2026-07-31T11:00:00Z",
+    )
+    return epoch_path

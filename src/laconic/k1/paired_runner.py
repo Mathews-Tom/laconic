@@ -9,6 +9,7 @@ import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol
@@ -19,9 +20,10 @@ from laconic.k1.environment_ledger import (
     EnvironmentRecord,
     verify_environment,
 )
+from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
 from laconic.k1.evidence import JsonValue, NativeEvidenceError
 from laconic.k1.extractors import extract_native
-from laconic.k1.manifest import Candidate, ManifestError, is_sha256, verify_manifest
+from laconic.k1.manifest import Candidate, is_sha256
 from laconic.k1.paired_config import Arm, PairedReplayConfig, PairedRunProvenance
 from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
@@ -271,12 +273,22 @@ class PairedRunReceipt:
 
 
 def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, ...]:
-    """Revalidate all declared M1/M2/M3 evidence before any contemporary call."""
+    """Revalidate redesign-only M2/M3 evidence before any contemporary call."""
+    if config.split != "redesign":
+        raise PairedReplayAdmissionError("paired replay requires the redesign split before M6")
     try:
-        manifest = verify_manifest(config.manifest_path)
-        eligibility = verify_eligibility(config.manifest_path, config.eligibility_ledger_path)
-        environments = verify_environment(config.manifest_path, config.environment_ledger_path)
-    except (EligibilityLedgerError, EnvironmentLedgerError, ManifestError) as error:
+        epoch, manifest = verify_epoch_manifest(config.epoch_path, config.manifest_path)
+        if config.epoch_digest != epoch.digest:
+            raise PairedReplayAdmissionError(
+                "paired replay config epoch_digest does not match sealed epoch"
+            )
+        eligibility = verify_eligibility(
+            config.epoch_path, config.manifest_path, config.eligibility_ledger_path
+        )
+        environments = verify_environment(
+            config.epoch_path, config.manifest_path, config.environment_ledger_path
+        )
+    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
         raise PairedReplayAdmissionError(str(error)) from error
     candidates = {candidate.candidate_id: candidate for candidate in manifest.candidates}
     eligibility_records = {record.candidate_id: record for record in eligibility.records}
@@ -303,6 +315,18 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             raise PairedReplayAdmissionError(
                 f"candidate {candidate_id!r} lacks a valid environment receipt"
             )
+        try:
+            record_redesign_access(
+                config.epoch_path,
+                config.manifest_path,
+                candidate.candidate_id,
+                "paired_admit",
+                timestamp=_audit_timestamp(),
+            )
+        except EpochError as error:
+            raise PairedReplayAdmissionError(
+                f"candidate {candidate_id!r} audit authorization failed: {error}"
+            ) from error
         try:
             session = extract_native(candidate)
         except (NativeEvidenceError, OSError) as error:
@@ -524,6 +548,10 @@ def _account_turns(response: PairedReplayResponse) -> PairedTurnAccounting:
         induced_turn_count=sum(turn.classification == "induced" for turn in response.turns),
         unsupported_turn_count=sum(turn.classification == "unsupported" for turn in response.turns),
     )
+
+
+def _audit_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _safe_path_component(value: str) -> str:

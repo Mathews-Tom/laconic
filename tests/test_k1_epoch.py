@@ -15,6 +15,7 @@ from laconic.k1.epoch import (
     HoldoutAccessDenied,
     create_epoch,
     read_access_audit,
+    read_epoch,
     record_redesign_access,
     verify_epoch,
 )
@@ -271,6 +272,34 @@ def test_audit_rejects_non_ascii_digest_as_tampering(tmp_path: Path) -> None:
     audit_path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(EpochError, match="digest must be 64 lowercase hex"):
+        read_access_audit(audit_path)
+
+
+def test_epoch_and_audit_reject_boolean_schema_versions(tmp_path: Path) -> None:
+    _, manifest_path, epoch_path, redesign, _ = _create_epoch(tmp_path)
+    epoch_document = json.loads(epoch_path.read_text(encoding="utf-8"))
+    epoch_document["schema_version"] = True
+    epoch_path.write_text(json.dumps(epoch_document), encoding="utf-8")
+
+    with pytest.raises(EpochError, match="unsupported epoch schema_version"):
+        read_epoch(epoch_path)
+
+    audit_tmp_path = tmp_path / "audit"
+    audit_tmp_path.mkdir()
+    _, manifest_path, epoch_path, redesign, _ = _create_epoch(audit_tmp_path)
+    record_redesign_access(
+        epoch_path,
+        manifest_path,
+        redesign.candidate_id,
+        "native_extract",
+        timestamp="2026-07-31T11:01:00Z",
+    )
+    audit_path = verify_epoch(epoch_path, manifest_path).audit_path
+    audit_document = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit_document["schema_version"] = True
+    audit_path.write_text(json.dumps(audit_document), encoding="utf-8")
+
+    with pytest.raises(EpochError, match="unsupported audit schema_version"):
         read_access_audit(audit_path)
 
 
