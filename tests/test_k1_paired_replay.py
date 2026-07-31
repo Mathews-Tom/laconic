@@ -17,8 +17,8 @@ from laconic.k1.environment_ledger import (
     assess_environments,
     write_environment_ledger,
 )
-from laconic.k1.epoch import create_epoch, read_epoch
-from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
+from laconic.k1.epoch import read_access_audit, read_epoch
+from laconic.k1.manifest import Candidate, Manifest, read_manifest, source_sha256, write_manifest
 from laconic.k1.paired_config import (
     PairedReplayConfig,
     PairedReplayConfigError,
@@ -166,14 +166,29 @@ def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
     manifest_path = private / "manifest.json"
     epoch_path = private / "epoch.json"
     write_manifest(manifest_path, manifest)
-    create_epoch(
-        manifest_path,
-        epoch_path,
-        audit_path=private / "access-audit.json",
-        approved_roots=(private,),
-        epoch_id="k1-test-paired-replay",
-        created_at="2026-07-31T11:00:00Z",
+    assert (
+        main(
+            [
+                "k1",
+                "epoch",
+                "create",
+                "--manifest",
+                str(manifest_path),
+                "--epoch",
+                str(epoch_path),
+                "--audit",
+                str(private / "access-audit.json"),
+                "--approved-root",
+                str(private),
+                "--epoch-id",
+                "k1-test-paired-replay",
+                "--created-at",
+                "2026-07-31T11:00:00Z",
+            ]
+        )
+        == EXIT_OK
     )
+    holdout_source.unlink()
     write_eligibility_ledger(
         private / "eligibility.json", assess_manifest(epoch_path, manifest_path)
     )
@@ -616,6 +631,50 @@ def test_paired_report_rejects_nonprivate_parent_directory(tmp_path: Path) -> No
 
     with pytest.raises(PairedReportError, match="directory must have mode 0700"):
         verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+
+
+def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) -> None:
+    config, workload = _workload(tmp_path)
+    holdout = next(
+        candidate
+        for candidate in read_manifest(config.manifest_path).candidates
+        if candidate.split == "holdout"
+    )
+    assert not holdout.source_path.exists()
+    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-m5-ready")
+    epoch = read_epoch(config.epoch_path)
+    report_path = config.epoch_path.parent / "m5-ready-report.json"
+    report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+
+    write_paired_report(report_path, epoch, report)
+
+    assert (
+        main(
+            [
+                "k1",
+                "epoch",
+                "verify",
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+            ]
+        )
+        == EXIT_OK
+    )
+    verified = verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
+    audit = read_access_audit(epoch.audit_path)
+    assert verified.strata[0].completed_pair_count == config.repeat_count
+    assert [(record.candidate_id, record.operation, record.split) for record in audit.records] == [
+        ("candidate-a", "eligibility_assess", "redesign"),
+        ("candidate-a", "environment_assess", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
+        ("candidate-a", "environment_verify", "redesign"),
+        ("candidate-a", "paired_admit", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
+        ("candidate-a", "environment_verify", "redesign"),
+        ("candidate-a", "paired_admit", "redesign"),
+    ]
 
 
 def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
