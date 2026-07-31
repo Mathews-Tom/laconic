@@ -189,11 +189,11 @@ def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
         == EXIT_OK
     )
     holdout_source.unlink()
-    write_eligibility_ledger(
-        private / "eligibility.json", assess_manifest(epoch_path, manifest_path)
-    )
+    eligibility_path = private / "eligibility.json"
+    write_eligibility_ledger(eligibility_path, assess_manifest(epoch_path, manifest_path))
     write_environment_ledger(
-        private / "environment.json", assess_environments(epoch_path, manifest_path)
+        private / "environment.json",
+        assess_environments(epoch_path, manifest_path, eligibility_path),
     )
     config = replace(_config(tmp_path), epoch_digest=read_epoch(epoch_path).digest)
     return config, admit_paired_workloads(config)[0]
@@ -667,10 +667,13 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
     assert verified.strata[0].completed_pair_count == config.repeat_count
     assert [(record.candidate_id, record.operation, record.split) for record in audit.records] == [
         ("candidate-a", "eligibility_assess", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "environment_assess", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "environment_verify", "redesign"),
         ("candidate-a", "paired_admit", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "environment_verify", "redesign"),
         ("candidate-a", "paired_admit", "redesign"),

@@ -348,7 +348,10 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             config.epoch_path, config.manifest_path, config.eligibility_ledger_path
         )
         environments = verify_environment(
-            config.epoch_path, config.manifest_path, config.environment_ledger_path
+            config.epoch_path,
+            config.manifest_path,
+            config.eligibility_ledger_path,
+            config.environment_ledger_path,
         )
     except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
         raise PairedReplayAdmissionError(str(error)) from error
