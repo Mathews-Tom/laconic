@@ -23,6 +23,7 @@ from laconic.k1.interaction import (
     build_interaction_receipt,
     derive_interaction_receipt,
     read_interaction_receipt,
+    render_private_interaction,
     schema_for_json,
     verify_interaction_receipt,
     write_interaction_receipt,
@@ -219,6 +220,22 @@ def test_private_receipt_integration_revalidates_redesign_only_chain(
         == EXIT_OK
     )
     assert "verified K1 interaction receipt" in capsys.readouterr().out
+
+
+def test_private_renderer_exposes_only_authenticated_prompts_and_tool_authority(
+    tmp_path: Path,
+) -> None:
+    epoch, manifest, eligibility, environment, receipt_path, _ = _private_receipt_inputs(tmp_path)
+    build_interaction_receipt(epoch, manifest, eligibility, environment, "redesign", receipt_path)
+
+    renderer = render_private_interaction(receipt_path, epoch, manifest, eligibility, environment)
+    resolution = renderer.resolve_tool("Read", {"path": "src/app.py"})
+
+    assert [(prompt.native_index, prompt.text) for prompt in renderer.prompts] == [
+        (0, "Inspect redesign."),
+    ]
+    assert resolution.disposition == "recorded"
+    assert resolution.output == {"text": "print('ok')"}
 
 
 def test_receipt_preserves_non_content_chronology_and_tool_linkage() -> None:
