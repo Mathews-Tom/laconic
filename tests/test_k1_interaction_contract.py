@@ -9,8 +9,10 @@ from typing import cast
 
 import pytest
 
+from laconic.k1.environment import SnapshotEnvironment, SnapshotToolResolver, snapshot_tree_sha256
 from laconic.k1.evidence import NativeEvent, NativeSession, ToolCall, ToolResult
 from laconic.k1.interaction import (
+    InteractionActionResolver,
     InteractionReceipt,
     InteractionReceiptError,
     ToolInputSchema,
@@ -224,6 +226,51 @@ def test_receipt_links_repeated_identical_calls_by_native_identifier() -> None:
     assert len(calls) == len(results) == 2
     assert calls[0].call_digest != calls[1].call_digest
     assert [event.call_digest for event in calls] == [event.call_digest for event in results]
+
+
+def test_recorded_action_resolver_rejects_any_off_trace_call() -> None:
+    resolver = InteractionActionResolver(_receipt(), _session())
+
+    resolution = resolver.resolve("Read", {"path": "other.py"})
+
+    assert resolution.disposition == "unsupported"
+    assert resolution.output is None
+    assert resolver.position == 0
+    assert resolver.terminated
+
+
+def test_snapshot_action_resolver_marks_rooted_divergence_induced(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    source = root / "src"
+    source.mkdir(parents=True, mode=0o700)
+    (source / "a.py").write_text("a\n", encoding="utf-8")
+    (source / "b.py").write_text("b\n", encoding="utf-8")
+    for item in source.iterdir():
+        item.chmod(0o400)
+    source.chmod(0o500)
+    root.chmod(0o500)
+    session = _session()
+    receipt = derive_interaction_receipt(
+        session,
+        epoch_digest="b" * 64,
+        manifest_digest="c" * 64,
+        eligibility_ledger_digest="d" * 64,
+        environment_ledger_digest="e" * 64,
+        audit_head_digest="f" * 64,
+        environment_digest=snapshot_tree_sha256(root),
+        environment_mode="snapshot",
+    )
+    resolver = InteractionActionResolver(
+        receipt,
+        session,
+        snapshot=SnapshotToolResolver(SnapshotEnvironment(root, receipt.environment_digest)),
+    )
+
+    resolution = resolver.resolve("Read", {"path": "src/b.py"})
+
+    assert resolution.disposition == "induced"
+    assert resolution.output == "b\n"
+    assert resolver.position == 1
 
 
 def test_private_receipt_round_trip_detects_tampering(tmp_path: Path) -> None:
