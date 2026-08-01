@@ -40,6 +40,7 @@ class AnthropicReplayClient:
         if config.seed_supported or config.seed is not None:
             raise AnthropicReplayError("Anthropic Messages replay does not support a seed")
         _validate_decoding_parameters(config.decoding_parameters)
+        _require_credential()
         self._config = config
 
     def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
@@ -47,11 +48,7 @@ class AnthropicReplayClient:
             raise AnthropicReplayError("request configuration does not match Anthropic client")
         if len(request.condition.user_prompts) != 1:
             raise AnthropicReplayError("Anthropic replay requires exactly one native user prompt")
-        credential = os.environ.get(ANTHROPIC_API_KEY_ENVIRONMENT)
-        if credential is None or not credential.strip():
-            raise AnthropicReplayError(
-                f"missing required process environment credential {ANTHROPIC_API_KEY_ENVIRONMENT}"
-            )
+        credential = _require_credential()
         messages: list[dict[str, object]] = [
             {"role": "user", "content": request.condition.user_prompts[0]}
         ]
@@ -226,3 +223,13 @@ def _validate_decoding_parameters(parameters: Mapping[str, JsonValue]) -> None:
         raise AnthropicReplayError("Anthropic replay top_p must be a float in (0, 1]")
     if parameters["extended_thinking"] is not False:
         raise AnthropicReplayError("Anthropic replay extended_thinking must be false")
+
+
+
+def _require_credential() -> str:
+    credential = os.environ.get(ANTHROPIC_API_KEY_ENVIRONMENT)
+    if credential is None or not credential.strip():
+        raise AnthropicReplayError(
+            f"missing required process environment credential {ANTHROPIC_API_KEY_ENVIRONMENT}"
+        )
+    return credential

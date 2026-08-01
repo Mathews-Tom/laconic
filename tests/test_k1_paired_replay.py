@@ -357,11 +357,12 @@ def test_anthropic_client_rejects_missing_credentials_and_tool_divergence(
         "codec",
         0,
     )
-    client = AnthropicReplayClient(config)
-
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(AnthropicReplayError, match="ANTHROPIC_API_KEY"):
-        client.respond(request)
+        AnthropicReplayClient(config)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "private-test-key")
+    client = AnthropicReplayClient(config)
 
     def fake_urlopen(provider_request: Request, *, timeout: int) -> _ProviderStream:
         return _ProviderStream(
@@ -372,7 +373,6 @@ def test_anthropic_client_rejects_missing_credentials_and_tool_divergence(
             )
         )
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "private-test-key")
     monkeypatch.setattr("laconic.k1.anthropic.urlopen", fake_urlopen)
 
     response = client.respond(request)
@@ -979,6 +979,35 @@ def test_paired_config_cli_and_artifact_root_hygiene(
     with pytest.raises(PairedReplayError, match="mode 0700"):
         run_paired_replay(bad_root, (workload,), client, run_id="run-private")
     assert client.requests == []
+
+
+def test_replay_run_rejects_missing_credential_before_redesign_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, _ = _workload(tmp_path)
+    config_path = tmp_path / "private" / "paired-replay.json"
+    write_paired_config(config_path, config)
+    before = read_access_audit(read_epoch(config.epoch_path).audit_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "run",
+                "--config",
+                str(config_path),
+                "--run-id",
+                "missing-credential",
+            ]
+        )
+        == EXIT_K1_MANIFEST
+    )
+
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    after = read_access_audit(read_epoch(config.epoch_path).audit_path)
+    assert after.head_digest == before.head_digest
 
 
 def test_runner_rejects_unsafe_or_symlinked_artifact_paths_before_request(
