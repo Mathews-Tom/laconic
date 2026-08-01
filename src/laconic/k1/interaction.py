@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from laconic.k1.environment import SnapshotToolResolver
 from laconic.k1.evidence import JsonValue, NativeSession, ToolCall, ToolResult
 from laconic.k1.manifest import is_sha256
 
@@ -263,6 +264,114 @@ def derive_interaction_receipt(
     )
 
 
+ActionDisposition = Literal["recorded", "induced", "unsupported"]
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionActionResolution:
+    """One authority-bound contemporary tool resolution."""
+
+    disposition: ActionDisposition
+    output: JsonValue | None
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.disposition not in {"recorded", "induced", "unsupported"}:
+            raise InteractionReceiptError(
+                f"unknown interaction action disposition {self.disposition!r}"
+            )
+        if not self.reason.strip():
+            raise InteractionReceiptError("interaction action reason must not be empty")
+        if self.disposition == "unsupported" and self.output is not None:
+            raise InteractionReceiptError("unsupported interaction action has an output")
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordedAction:
+    event: InteractionEvent
+    input: dict[str, JsonValue]
+    output: JsonValue
+
+
+class InteractionActionResolver:
+    def __init__(
+        self,
+        receipt: InteractionReceipt,
+        session: NativeSession,
+        *,
+        snapshot: SnapshotToolResolver | None = None,
+    ) -> None:
+        _verify_session_matches_receipt(receipt, session)
+        self._receipt = receipt
+        self._actions = _recorded_actions(receipt, session)
+        self._position = 0
+        self._terminated = False
+        self._snapshot = snapshot
+        if receipt.environment_mode == "snapshot" and snapshot is None:
+            raise InteractionReceiptError(
+                "snapshot interaction receipt requires a snapshot resolver"
+            )
+        if receipt.environment_mode == "recorded_tool" and snapshot is not None:
+            raise InteractionReceiptError(
+                "recorded-tool interaction receipt must not accept a snapshot"
+            )
+
+    @property
+    def position(self) -> int:
+        """Return the number of receipt-authorized actions consumed."""
+        return self._position
+
+    @property
+    def terminated(self) -> bool:
+        """Return whether an unsupported action has stopped this interaction."""
+        return self._terminated
+
+    def resolve(self, name: str, tool_input: dict[str, JsonValue]) -> InteractionActionResolution:
+        """Resolve one current action or terminate without advancing on a mismatch."""
+        if self._terminated:
+            return InteractionActionResolution(
+                "unsupported", None, "interaction already terminated"
+            )
+        if self._position == len(self._actions):
+            self._terminated = True
+            return InteractionActionResolution(
+                "unsupported", None, "interaction trace is exhausted"
+            )
+        expected = self._actions[self._position]
+        if not name.strip() or name != expected.event.tool_name:
+            self._terminated = True
+            return InteractionActionResolution(
+                "unsupported", None, "tool name differs from interaction receipt"
+            )
+        schema = expected.event.input_schema
+        if schema is None or not _matches_schema(schema.document, tool_input):
+            self._terminated = True
+            return InteractionActionResolution(
+                "unsupported", None, "tool input does not match receipt schema"
+            )
+        if self._receipt.environment_mode == "recorded_tool":
+            if _canonical_json(tool_input) != _canonical_json(expected.input):
+                self._terminated = True
+                return InteractionActionResolution(
+                    "unsupported", None, "tool call differs from exact recorded action"
+                )
+            self._position += 1
+            return InteractionActionResolution(
+                "recorded", _copy_json(expected.output), "exact recorded tool action"
+            )
+        resolution = _resolve_rooted_read(self._snapshot, name, tool_input)
+        if resolution.output is None:
+            self._terminated = True
+            return InteractionActionResolution("unsupported", None, resolution.reason)
+        disposition: ActionDisposition = (
+            "recorded"
+            if _canonical_json(tool_input) == _canonical_json(expected.input)
+            else "induced"
+        )
+        self._position += 1
+        return InteractionActionResolution(disposition, resolution.output, resolution.reason)
+
+
 def schema_for_json(value: JsonValue, depth: int = 0) -> dict[str, JsonValue]:
     """Return a closed JSON Schema document for one native JSON value shape."""
     if depth > 32:
@@ -426,6 +535,105 @@ def _authority_for(
 
 def _call_reference(call_id: str) -> str:
     return _digest({"call_id": call_id})
+
+
+def _verify_session_matches_receipt(receipt: InteractionReceipt, session: NativeSession) -> None:
+    if (
+        session.candidate_id != receipt.candidate_id
+        or session.source_sha256 != receipt.source_sha256
+    ):
+        raise InteractionReceiptError("native session does not match interaction receipt source")
+    derived = derive_interaction_receipt(
+        session,
+        epoch_digest=receipt.epoch_digest,
+        manifest_digest=receipt.manifest_digest,
+        eligibility_ledger_digest=receipt.eligibility_ledger_digest,
+        environment_ledger_digest=receipt.environment_ledger_digest,
+        audit_head_digest=receipt.audit_head_digest,
+        environment_digest=receipt.environment_digest,
+        environment_mode=receipt.environment_mode,
+    )
+    if not hmac.compare_digest(derived.digest, receipt.digest):
+        raise InteractionReceiptError("native interaction chronology does not match receipt")
+
+
+def _recorded_actions(
+    receipt: InteractionReceipt, session: NativeSession
+) -> tuple[_RecordedAction, ...]:
+    calls: dict[str, ToolCall] = {}
+    results: dict[str, ToolResult] = {}
+    for event in session.events:
+        if event.kind == "assistant":
+            calls.update({call.call_id: call for call in event.tool_calls})
+        elif event.tool_result is not None:
+            results[event.tool_result.call_id] = event.tool_result
+    receipt_calls = (event for event in receipt.events if event.kind == "tool_call")
+    actions: list[_RecordedAction] = []
+    for receipt_event in receipt_calls:
+        call_reference = cast(str, receipt_event.call_digest)
+        matching = [
+            call for call in calls.values() if _call_reference(call.call_id) == call_reference
+        ]
+        if len(matching) != 1:
+            raise InteractionReceiptError(
+                "receipt tool call does not resolve to exactly one native action"
+            )
+        call = matching[0]
+        result = results.get(call.call_id)
+        if result is None:
+            raise InteractionReceiptError("receipt tool call has no native result")
+        actions.append(_RecordedAction(receipt_event, call.input, result.output))
+    return tuple(actions)
+
+
+def _resolve_rooted_read(
+    resolver: SnapshotToolResolver | None, name: str, tool_input: dict[str, JsonValue]
+) -> InteractionActionResolution:
+    if resolver is None:
+        raise InteractionReceiptError("snapshot interaction resolver is absent")
+    resolved = resolver.resolve(name, tool_input)
+    if resolved.status == "unsupported":
+        return InteractionActionResolution("unsupported", None, resolved.reason)
+    return InteractionActionResolution("recorded", resolved.output, resolved.reason)
+
+
+def _matches_schema(schema: dict[str, JsonValue], value: JsonValue) -> bool:
+    schema_type = schema["type"]
+    if schema_type == "null":
+        return value is None
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, float)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "array":
+        items = cast(list[object], schema["items"])
+        return (
+            isinstance(value, list)
+            and len(value) == len(items)
+            and all(
+                isinstance(item_schema, dict) and _matches_schema(item_schema, item)
+                for item_schema, item in zip(items, value, strict=True)
+            )
+        )
+    if schema_type == "object":
+        properties = cast(dict[str, object], schema["properties"])
+        return (
+            isinstance(value, dict)
+            and set(value) == set(properties)
+            and all(
+                isinstance(property_schema, dict) and _matches_schema(property_schema, value[name])
+                for name, property_schema in properties.items()
+            )
+        )
+    raise InteractionReceiptError("receipt schema has unsupported type")
+
+
+def _copy_json(value: JsonValue) -> JsonValue:
+    return cast(JsonValue, json.loads(_canonical_json(value)))
 
 
 def _tool_call_digest(call: ToolCall) -> str:
