@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from laconic.k1.eligibility import EligibilityLedger, EligibilityLedgerError, verify_eligibility
-from laconic.k1.environment import SnapshotToolResolver
+from laconic.k1.environment import EnvironmentError, SnapshotEnvironment, SnapshotToolResolver
 from laconic.k1.environment_ledger import (
     EnvironmentLedger,
     EnvironmentLedgerError,
@@ -394,6 +394,53 @@ class InteractionActionResolver:
         return InteractionActionResolution(disposition, resolution.output, resolution.reason)
 
 
+@dataclass(frozen=True, slots=True)
+class RenderedUserPrompt:
+    """One private, in-memory prompt a provider renderer may deliver."""
+
+    native_index: int
+    text: str
+
+    def __post_init__(self) -> None:
+        if self.native_index < 0:
+            raise InteractionReceiptError("rendered prompt native_index must be non-negative")
+        if not self.text:
+            raise InteractionReceiptError("rendered prompt must not be empty")
+
+
+class InteractionRenderer:
+    """Expose only authenticated user prompts and resolver-authorized tool outcomes."""
+
+    def __init__(
+        self,
+        receipt: InteractionReceipt,
+        session: NativeSession,
+        snapshot: SnapshotToolResolver | None = None,
+    ) -> None:
+        self._resolver = InteractionActionResolver(receipt, session, snapshot=snapshot)
+        self._prompts = tuple(
+            RenderedUserPrompt(event.index, cast(str, event.text))
+            for event in session.events
+            if event.kind == "user_prompt"
+        )
+
+    @property
+    def prompts(self) -> tuple[RenderedUserPrompt, ...]:
+        """Return chronological user prompts without exposing assistant text."""
+        return self._prompts
+
+    @property
+    def terminated(self) -> bool:
+        """Return whether an unsupported tool action has terminated rendering."""
+        return self._resolver.terminated
+
+    def resolve_tool(
+        self, name: str, tool_input: dict[str, JsonValue]
+    ) -> InteractionActionResolution:
+        """Resolve a tool action under the receipt's exact or rooted authority."""
+        return self._resolver.resolve(name, tool_input)
+
+
 def build_interaction_receipt(
     epoch_path: Path,
     manifest_path: Path,
@@ -495,6 +542,59 @@ def verify_interaction_receipt(
         ) from error
     _verify_session_matches_receipt(receipt, session)
     return receipt
+
+
+def render_private_interaction(
+    receipt_path: Path,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+) -> InteractionRenderer:
+    """Render one admitted private workload without persisting prompt content."""
+    receipt = verify_interaction_receipt(
+        receipt_path,
+        epoch_path,
+        manifest_path,
+        eligibility_ledger_path,
+        environment_ledger_path,
+    )
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        candidate = _redesign_candidate(manifest, receipt.candidate_id)
+        record_redesign_access(
+            epoch_path,
+            manifest_path,
+            candidate.candidate_id,
+            "interaction_render",
+            timestamp=_audit_timestamp(),
+        )
+        session = extract_native(candidate)
+        validate_confirmatory_evidence(candidate, session)
+    except (EpochError, NativeEvidenceError, OSError) as error:
+        raise InteractionReceiptError(
+            f"candidate {receipt.candidate_id}: cannot render executable interaction"
+        ) from error
+    _verify_session_matches_receipt(receipt, session)
+    environment = verify_environment(
+        epoch_path, manifest_path, eligibility_ledger_path, environment_ledger_path
+    )
+    record = _environment_record(environment.records, candidate.candidate_id)
+    snapshot: SnapshotToolResolver | None = None
+    if record.mode == "snapshot":
+        if record.snapshot_root is None or record.environment_digest is None:
+            raise InteractionReceiptError(
+                f"candidate {candidate.candidate_id}: snapshot receipt is incomplete"
+            )
+        try:
+            snapshot = SnapshotToolResolver(
+                SnapshotEnvironment(Path(record.snapshot_root), record.environment_digest)
+            )
+        except EnvironmentError as error:
+            raise InteractionReceiptError(
+                f"candidate {candidate.candidate_id}: snapshot resolver is invalid"
+            ) from error
+    return InteractionRenderer(receipt, session, snapshot)
 
 
 def schema_for_json(value: JsonValue, depth: int = 0) -> dict[str, JsonValue]:
