@@ -7,12 +7,12 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from laconic.k1.eligibility import EligibilityLedgerError, verify_eligibility
 from laconic.k1.environment_ledger import (
@@ -459,24 +459,13 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
 
 def run_paired_replay(
     config: PairedReplayConfig,
-    workloads: Sequence[PairedWorkload],
     client: PairedReplayClient,
     *,
     run_id: str,
 ) -> PairedRunReceipt:
-    """Regenerate raw then codec arms for every declared workload and repeat.
-
-    The runner writes each billed response before checking the cap because a provider
-    call cannot be unbilled. It then raises immediately, preventing any later arm or
-    workload from executing under a breached frozen budget.
-    """
-    admitted_workloads = admit_paired_workloads(config)
-    if tuple(workloads) != admitted_workloads:
-        raise PairedReplayAdmissionError(
-            "workloads must exactly match the configuration's revalidated M1/M2/M3 evidence"
-        )
-    workloads = admitted_workloads
-    _ensure_private_directory(config.artifact_root)
+    """Regenerate raw then codec arms after one M2/M3 source admission."""
+    prepare_private_artifact_root(config)
+    workloads = admit_paired_workloads(config)
     _safe_path_component(run_id)
     for workload in workloads:
         candidate_id = _safe_path_component(workload.candidate.candidate_id)
@@ -552,16 +541,40 @@ def _run_arm(
     )
     request = PairedReplayRequest(run_id, workload, config, interaction, arm, repeat_index)
     response = client.respond(request)
-    if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
-        raise PairedReplayError("raw arm must not contain induced turns")
-    usage = tuple(
-        normalize_usage(turn.native_usage, config.usage_mapping) for turn in response.turns
-    )
-    cost = sum((cost_usage(turn_usage, config.pricing) for turn_usage in usage), Decimal(0))
     artifact_path = _artifact_path(
         config.artifact_root, run_id, workload.candidate.candidate_id, arm, repeat_index
     )
-    artifact_sha256 = _write_response_artifact(artifact_path, request, response, usage)
+    normalized_usage: list[BillableResponseUsage] = []
+    try:
+        for turn in response.turns:
+            normalized_usage.append(normalize_usage(turn.native_usage, config.usage_mapping))
+    except PairedReplayConfigError as error:
+        partial_usage = tuple(
+            [
+                *normalized_usage,
+                *(None for _ in response.turns[len(normalized_usage) :]),
+            ]
+        )
+        _write_response_artifact(
+            artifact_path,
+            request,
+            response,
+            partial_usage,
+            accounting_error=str(error),
+        )
+        message = (
+            "provider response usage cannot be priced; "
+            f"retained private response artifact {artifact_path}"
+        )
+        raise PairedReplayError(message) from error
+    billable_usage = tuple(normalized_usage)
+    cost = sum(
+        (cost_usage(turn_usage, config.pricing) for turn_usage in billable_usage),
+        Decimal(0),
+    )
+    artifact_sha256 = _write_response_artifact(artifact_path, request, response, billable_usage)
+    if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
+        raise PairedReplayError("raw arm must not contain induced turns")
     environment_digest = workload.environment.environment_digest
     if environment_digest is None:
         raise PairedReplayAdmissionError("admitted workload lacks environment digest")
@@ -583,7 +596,7 @@ def _run_arm(
     return PairedArmReceipt(
         provenance,
         artifact_path,
-        usage,
+        billable_usage,
         cost,
         _account_turns(response),
     )
@@ -602,7 +615,8 @@ def _write_response_artifact(
     path: Path,
     request: PairedReplayRequest,
     response: PairedReplayResponse,
-    usage: tuple[BillableResponseUsage, ...],
+    usage: tuple[BillableResponseUsage | None, ...] | None,
+    accounting_error: str | None = None,
 ) -> str:
     _ensure_private_directory(path.parent, root=request.config.artifact_root)
     document: dict[str, JsonValue] = {
@@ -614,22 +628,11 @@ def _write_response_artifact(
         "run_id": request.run_id,
         "settings_digest": request.settings_digest,
         "interaction_receipt_digest": request.interaction.receipt.digest,
-        "turns": [
-            {
-                "classification": turn.classification,
-                "response": turn.response,
-                "unsupported_reason": turn.unsupported_reason,
-                "usage": {
-                    "cache_read_tokens": normalized.cache_read_tokens,
-                    "cache_write_tokens": normalized.cache_write_tokens,
-                    "input_tokens": normalized.input_tokens,
-                    "output_tokens": normalized.output_tokens,
-                },
-            }
-            for turn, normalized in zip(response.turns, usage, strict=True)
-        ],
+        "turns": cast(JsonValue, _artifact_turns(response, usage)),
         "workload_digest": request.workload.digest,
     }
+    if accounting_error is not None:
+        document["usage_accounting_error"] = accounting_error
     try:
         encoded = json.dumps(
             document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
@@ -660,6 +663,34 @@ def _write_response_artifact(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _artifact_turns(
+    response: PairedReplayResponse,
+    usage: tuple[BillableResponseUsage | None, ...] | None,
+) -> list[dict[str, JsonValue]]:
+    if usage is None:
+        usage = tuple(None for _ in response.turns)
+    if len(usage) != len(response.turns):
+        raise PairedReplayError("response artifact usage length does not match response turns")
+    return [
+        {
+            "classification": turn.classification,
+            "response": turn.response,
+            "unsupported_reason": turn.unsupported_reason,
+            "usage": (
+                None
+                if normalized is None
+                else {
+                    "cache_read_tokens": normalized.cache_read_tokens,
+                    "cache_write_tokens": normalized.cache_write_tokens,
+                    "input_tokens": normalized.input_tokens,
+                    "output_tokens": normalized.output_tokens,
+                }
+            ),
+        }
+        for turn, normalized in zip(response.turns, usage, strict=True)
+    ]
+
+
 def _account_turns(response: PairedReplayResponse) -> PairedTurnAccounting:
     return PairedTurnAccounting(
         completed_turn_count=sum(turn.classification == "completed" for turn in response.turns),
@@ -676,6 +707,18 @@ def _safe_path_component(value: str) -> str:
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise PairedReplayError("artifact path components must be non-empty simple names")
     return value
+
+
+def prepare_private_artifact_root(config: PairedReplayConfig) -> None:
+    """Validate the sealed root before source access or provider billing."""
+    epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
+    root = config.artifact_root
+    if not any(
+        root == approved_root or root.is_relative_to(approved_root)
+        for approved_root in epoch.approved_roots
+    ):
+        raise PairedReplayError("artifact root must be within sealed approved private roots")
+    _ensure_private_directory(root)
 
 
 def _ensure_private_directory(path: Path, *, root: Path | None = None) -> None:
@@ -707,8 +750,15 @@ def _ensure_private_directory(path: Path, *, root: Path | None = None) -> None:
         missing.append(ancestor)
         ancestor = ancestor.parent
     for directory in reversed(missing):
-        directory.mkdir(mode=0o700)
-        os.chmod(directory, 0o700)
+        try:
+            directory.mkdir(mode=0o700)
+            os.chmod(directory, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise PairedReplayError(
+                f"cannot create artifact directory {directory}: {error}"
+            ) from error
     _validate_private_directory(path)
 
 

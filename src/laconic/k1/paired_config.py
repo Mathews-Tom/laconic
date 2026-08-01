@@ -413,7 +413,7 @@ def read_paired_config(path: Path) -> PairedReplayConfig:
 
 def verify_provider_contract(config: PairedReplayConfig) -> None:
     """Verify the approved provider pin without reading an M3E receipt."""
-    _validate_anthropic_contract(config)
+    _validate_openrouter_contract(config)
 
 
 def verify_execution_config(config: PairedReplayConfig) -> None:
