@@ -18,14 +18,18 @@ from laconic.k1.environment_ledger import (
     write_environment_ledger,
 )
 from laconic.k1.epoch import read_access_audit, read_epoch
+from laconic.k1.interaction import build_interaction_receipt
 from laconic.k1.manifest import Candidate, Manifest, read_manifest, source_sha256, write_manifest
 from laconic.k1.paired_config import (
+    InteractionReceiptBinding,
     PairedReplayConfig,
     PairedReplayConfigError,
     PairedRunProvenance,
     PriceTable,
+    ProviderRouting,
     UsageMapping,
     read_paired_config,
+    verify_execution_config,
     write_paired_config,
 )
 from laconic.k1.paired_report import (
@@ -58,25 +62,43 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
         eligibility_ledger_path=(private / "eligibility.json").resolve(),
         environment_ledger_path=(private / "environment.json").resolve(),
         artifact_root=(private / "artifacts").resolve(),
-        provider="anthropic",
-        endpoint="https://api.anthropic.com",
-        privacy_boundary="approved-private-provider",
-        model="claude-sonnet-4-6",
-        decoding_parameters={"max_tokens": 1024, "temperature": 0},
+        provider="openrouter",
+        endpoint="https://openrouter.ai/api/v1/chat/completions",
+        api_version="v1",
+        credential_environment="OPENROUTER_API_KEY",
+        privacy_boundary="openrouter-prompt-logging-disabled-anthropic-commercial-retention-30-days",
+        model="anthropic/claude-haiku-4.5",
+        provider_routing=ProviderRouting(
+            only=("anthropic",),
+            allow_fallbacks=False,
+            require_parameters=True,
+        ),
+        decoding_parameters={
+            "max_tokens": 4096,
+            "temperature": 0.0,
+            "top_p": 1.0,
+        },
         seed_supported=False,
         seed=None,
         repeat_count=2,
         split="redesign",
         candidate_ids=("candidate-a",),
-        pricing=PriceTable("2026-07-30", "3", "0.3", "3.75", "15"),
-        usage_mapping=UsageMapping(
-            "input_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "output_tokens",
+        interaction_receipts=(
+            InteractionReceiptBinding(
+                "candidate-a", (private / "interaction.json").resolve(), "b" * 64
+            ),
         ),
-        cost_cap_per_pair_usd="1.00",
-        cost_cap_run_usd="5.00",
+        pricing=PriceTable("2026-08-01", "1", "0.10", "1.25", "5"),
+        pricing_source="https://openrouter.ai/api/v1/models/anthropic/claude-haiku-4.5/endpoints",
+        usage_mapping=UsageMapping(
+            "usage.prompt_tokens",
+            "usage.prompt_tokens_details.cached_tokens",
+            "usage.prompt_tokens_details.cache_write_tokens",
+            "usage.completion_tokens",
+            True,
+        ),
+        cost_cap_per_pair_usd="0.20",
+        cost_cap_run_usd="0.80",
         unsupported_policy="terminate_pair",
         induced_policy="include_in_codec_cost",
     )
@@ -195,7 +217,22 @@ def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
         private / "environment.json",
         assess_environments(epoch_path, manifest_path, eligibility_path),
     )
-    config = replace(_config(tmp_path), epoch_digest=read_epoch(epoch_path).digest)
+    interaction_path = private / "interaction.json"
+    interaction = build_interaction_receipt(
+        epoch_path,
+        manifest_path,
+        eligibility_path,
+        private / "environment.json",
+        candidate.candidate_id,
+        interaction_path,
+    )
+    config = replace(
+        _config(tmp_path),
+        epoch_digest=read_epoch(epoch_path).digest,
+        interaction_receipts=(
+            InteractionReceiptBinding(candidate.candidate_id, interaction_path, interaction.digest),
+        ),
+    )
     return config, admit_paired_workloads(config)[0]
 
 
@@ -211,10 +248,10 @@ class _ReplayClient:
                 PairedResponseTurn(
                     response={"arm": request.arm, "fresh": True},
                     native_usage={
-                        "input_tokens": self.input_tokens,
-                        "cache_read_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
-                        "output_tokens": 10,
+                        "usage.prompt_tokens": self.input_tokens,
+                        "usage.prompt_tokens_details.cached_tokens": 0,
+                        "usage.prompt_tokens_details.cache_write_tokens": 0,
+                        "usage.completion_tokens": 10,
                     },
                     classification="completed",
                 ),
@@ -230,10 +267,10 @@ def _turn(
     return PairedResponseTurn(
         response={"classification": classification},
         native_usage={
-            "input_tokens": 100,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "output_tokens": 10,
+            "usage.prompt_tokens": 100,
+            "usage.prompt_tokens_details.cached_tokens": 0,
+            "usage.prompt_tokens_details.cache_write_tokens": 0,
+            "usage.completion_tokens": 10,
         },
         classification=classification,
         unsupported_reason=unsupported_reason,
@@ -263,10 +300,12 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
     assert path.stat().st_mode & 0o777 == 0o600
     assert read_paired_config(path) == config
     assert set(config.payload_without_digest()) == {
+        "api_version",
         "artifact_root",
         "candidate_ids",
         "cost_cap_per_pair_usd",
         "cost_cap_run_usd",
+        "credential_environment",
         "decoding_parameters",
         "eligibility_ledger_path",
         "endpoint",
@@ -274,11 +313,14 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "epoch_path",
         "environment_ledger_path",
         "induced_policy",
+        "interaction_receipts",
         "manifest_path",
         "model",
         "pricing",
+        "pricing_source",
         "privacy_boundary",
         "provider",
+        "provider_routing",
         "repeat_count",
         "schema_version",
         "seed",
@@ -287,7 +329,7 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "unsupported_policy",
         "usage_mapping",
     }
-    changed = replace(config, model="claude-opus-4-6")
+    changed = replace(config, model="anthropic/claude-opus-4.6")
     assert changed.digest != config.digest
     assert changed.settings_digest != config.settings_digest
 
@@ -324,6 +366,91 @@ def test_paired_config_rejects_credential_bearing_endpoints(
 ) -> None:
     with pytest.raises(PairedReplayConfigError, match=message):
         replace(_config(tmp_path), endpoint=endpoint)
+
+
+def test_execution_config_rejects_unapproved_provider_pins(tmp_path: Path) -> None:
+    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+        verify_execution_config(
+            replace(_config(tmp_path), endpoint="https://api.example.test/v1/messages")
+        )
+    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+        verify_execution_config(replace(_config(tmp_path), api_version="v2"))
+    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+        verify_execution_config(replace(_config(tmp_path), credential_environment="OTHER_API_KEY"))
+    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+        verify_execution_config(replace(_config(tmp_path), privacy_boundary="unapproved"))
+    with pytest.raises(PairedReplayConfigError, match="approved provider contract"):
+        verify_execution_config(replace(_config(tmp_path), model="anthropic/claude-opus-4.6"))
+    with pytest.raises(PairedReplayConfigError, match="does not support a seed"):
+        verify_execution_config(replace(_config(tmp_path), seed_supported=True, seed="seed"))
+    with pytest.raises(PairedReplayConfigError, match="exactly two seedless repeats"):
+        verify_execution_config(replace(_config(tmp_path), repeat_count=3))
+    with pytest.raises(PairedReplayConfigError, match="native usage mapping"):
+        verify_execution_config(
+            replace(
+                _config(tmp_path),
+                usage_mapping=UsageMapping(
+                    "usage.prompt_tokens",
+                    "usage.prompt_tokens_details.cache_write_tokens",
+                    "usage.prompt_tokens_details.cached_tokens",
+                    "usage.completion_tokens",
+                    True,
+                ),
+            )
+        )
+    with pytest.raises(PairedReplayConfigError, match="native usage mapping"):
+        verify_execution_config(
+            replace(
+                _config(tmp_path),
+                usage_mapping=UsageMapping(
+                    "usage.prompt_tokens",
+                    "usage.prompt_tokens_details.cached_tokens",
+                    "usage.prompt_tokens_details.cache_write_tokens",
+                    "usage.completion_tokens",
+                    False,
+                ),
+            )
+        )
+    with pytest.raises(PairedReplayConfigError, match="cost caps"):
+        verify_execution_config(replace(_config(tmp_path), cost_cap_per_pair_usd="0.21"))
+    with pytest.raises(PairedReplayConfigError, match="routing contract"):
+        verify_execution_config(
+            replace(
+                _config(tmp_path),
+                provider_routing=ProviderRouting(
+                    only=("anthropic",),
+                    allow_fallbacks=True,
+                    require_parameters=True,
+                ),
+            )
+        )
+    with pytest.raises(PairedReplayConfigError, match="requires the redesign split"):
+        verify_execution_config(replace(_config(tmp_path), split="holdout"))
+
+
+def test_execution_config_revalidates_each_bound_m3e_receipt(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    binding = config.interaction_receipts[0]
+
+    verify_execution_config(config)
+
+    with pytest.raises(PairedReplayConfigError, match="does not match configuration"):
+        verify_execution_config(
+            replace(
+                config,
+                interaction_receipts=(replace(binding, receipt_digest="a" * 64),),
+            )
+        )
+    with pytest.raises(PairedReplayConfigError, match="does not match configuration"):
+        verify_execution_config(
+            replace(
+                config,
+                candidate_ids=("candidate-b",),
+                interaction_receipts=(replace(binding, candidate_id="candidate-b"),),
+            )
+        )
+    with pytest.raises(PairedReplayConfigError, match="does not match configuration"):
+        verify_execution_config(replace(config, epoch_digest="a" * 64))
 
 
 def test_paired_config_freezes_parameters_and_rejects_zero_live_prices(
@@ -460,18 +587,24 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
 def test_normalize_usage_requires_every_declared_native_counter(tmp_path: Path) -> None:
     mapping = _config(tmp_path).usage_mapping
     native_usage = {
-        "input_tokens": 100,
-        "cache_read_input_tokens": 20,
-        "cache_creation_input_tokens": 10,
-        "output_tokens": 50,
+        "usage.prompt_tokens": 100,
+        "usage.prompt_tokens_details.cached_tokens": 20,
+        "usage.prompt_tokens_details.cache_write_tokens": 10,
+        "usage.completion_tokens": 50,
     }
 
-    assert normalize_usage(native_usage, mapping) == BillableResponseUsage(100, 20, 10, 50)
+    assert normalize_usage(native_usage, mapping) == BillableResponseUsage(70, 20, 10, 50)
+    assert cost_usage(normalize_usage(native_usage, mapping), _config(tmp_path).pricing) == Decimal(
+        "0.0003345"
+    )
+    negative_remainder = {**native_usage, "usage.prompt_tokens": 29}
+    with pytest.raises(PairedReplayConfigError, match="smaller than declared cache counters"):
+        normalize_usage(negative_remainder, mapping)
 
-    native_usage.pop("cache_creation_input_tokens")
+    native_usage.pop("usage.prompt_tokens_details.cache_write_tokens")
     with pytest.raises(PairedReplayConfigError, match="missing configured field"):
         normalize_usage(native_usage, mapping)
-    native_usage["cache_creation_input_tokens"] = True
+    native_usage["usage.prompt_tokens_details.cache_write_tokens"] = True
     with pytest.raises(PairedReplayConfigError, match="non-negative integer"):
         normalize_usage(native_usage, mapping)
     native_usage["new_billable_counter"] = 1
@@ -488,7 +621,7 @@ def test_decimal_pricing_uses_explicit_cache_categories(tmp_path: Path) -> None:
         output_tokens=8_000_000,
     )
 
-    assert cost_usage(usage, config.pricing) == Decimal("138.6")
+    assert cost_usage(usage, config.pricing) == Decimal("46.20")
 
 
 def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path: Path) -> None:
@@ -669,6 +802,10 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
         ("candidate-a", "eligibility_assess", "redesign"),
         ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "environment_assess", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
+        ("candidate-a", "eligibility_verify", "redesign"),
+        ("candidate-a", "environment_verify", "redesign"),
+        ("candidate-a", "interaction_build", "redesign"),
         ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "environment_verify", "redesign"),

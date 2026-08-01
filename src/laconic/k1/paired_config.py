@@ -18,13 +18,13 @@ from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from laconic.k1.evidence import JsonScalar
+from laconic.k1.interaction import InteractionReceiptError, verify_interaction_receipt
 from laconic.k1.manifest import is_sha256
 
-PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 1
+PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 5
 
 Arm = Literal["raw", "codec"]
 Split = Literal["redesign", "holdout"]
-PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 2
 
 
 class PairedReplayConfigError(ValueError):
@@ -70,6 +70,7 @@ class UsageMapping:
     cache_read_field: str
     cache_write_field: str
     output_field: str
+    input_includes_cache: bool
 
     def __post_init__(self) -> None:
         fields = (
@@ -82,14 +83,70 @@ class UsageMapping:
             raise PairedReplayConfigError("usage mapping fields must not be empty")
         if len(set(fields)) != len(fields):
             raise PairedReplayConfigError("usage mapping fields must be distinct")
+        if not isinstance(self.input_includes_cache, bool):
+            raise PairedReplayConfigError("input_includes_cache must be a boolean")
 
-    def to_payload(self) -> dict[str, str]:
+    def to_payload(self) -> dict[str, object]:
         """Return the canonical native-to-billable field mapping."""
         return {
             "cache_read_field": self.cache_read_field,
             "cache_write_field": self.cache_write_field,
             "input_field": self.input_field,
+            "input_includes_cache": self.input_includes_cache,
             "output_field": self.output_field,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRouting:
+    """The provider-routing controls bound into every replay request."""
+
+    only: tuple[str, ...]
+    allow_fallbacks: bool
+    require_parameters: bool
+
+    def __post_init__(self) -> None:
+        if not self.only or any(not provider.strip() for provider in self.only):
+            raise PairedReplayConfigError("provider routing must name at least one provider")
+        if len(set(self.only)) != len(self.only):
+            raise PairedReplayConfigError("provider routing providers must be unique")
+        if not isinstance(self.allow_fallbacks, bool) or not isinstance(
+            self.require_parameters, bool
+        ):
+            raise PairedReplayConfigError("provider routing flags must be booleans")
+
+    def to_payload(self) -> dict[str, object]:
+        """Return the canonical request-routing serialization."""
+        return {
+            "allow_fallbacks": self.allow_fallbacks,
+            "only": list(self.only),
+            "require_parameters": self.require_parameters,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionReceiptBinding:
+    """One M3E receipt that authorizes a configured redesign workload."""
+
+    candidate_id: str
+    receipt_path: Path
+    receipt_digest: str
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id.strip():
+            raise PairedReplayConfigError("interaction receipt candidate_id must not be empty")
+        if not self.receipt_path.is_absolute():
+            raise PairedReplayConfigError("interaction receipt path must be absolute")
+        object.__setattr__(self, "receipt_path", self.receipt_path.resolve(strict=False))
+        if not is_sha256(self.receipt_digest):
+            raise PairedReplayConfigError("interaction receipt digest must be 64 lowercase hex")
+
+    def to_payload(self) -> dict[str, str]:
+        """Return the digest-bound non-content receipt reference."""
+        return {
+            "candidate_id": self.candidate_id,
+            "receipt_digest": self.receipt_digest,
+            "receipt_path": str(self.receipt_path),
         }
 
 
@@ -109,15 +166,20 @@ class PairedReplayConfig:
     artifact_root: Path
     provider: str
     endpoint: str
+    api_version: str
+    credential_environment: str
     privacy_boundary: str
     model: str
+    provider_routing: ProviderRouting
     decoding_parameters: Mapping[str, JsonScalar]
     seed_supported: bool
     seed: str | None
     repeat_count: int
     split: Split
     candidate_ids: tuple[str, ...]
+    interaction_receipts: tuple[InteractionReceiptBinding, ...]
     pricing: PriceTable
+    pricing_source: str
     usage_mapping: UsageMapping
     cost_cap_per_pair_usd: str
     cost_cap_run_usd: str
@@ -128,8 +190,11 @@ class PairedReplayConfig:
         for field_name, value in (
             ("provider", self.provider),
             ("endpoint", self.endpoint),
+            ("api_version", self.api_version),
+            ("credential_environment", self.credential_environment),
             ("privacy_boundary", self.privacy_boundary),
             ("model", self.model),
+            ("pricing_source", self.pricing_source),
         ):
             if not value.strip():
                 raise PairedReplayConfigError(f"{field_name} must not be empty")
@@ -167,6 +232,12 @@ class PairedReplayConfig:
             raise PairedReplayConfigError("candidate_ids must contain non-empty identifiers")
         if len(set(self.candidate_ids)) != len(self.candidate_ids):
             raise PairedReplayConfigError("candidate_ids must be unique")
+        if {binding.candidate_id for binding in self.interaction_receipts} != set(
+            self.candidate_ids
+        ) or len(self.interaction_receipts) != len(self.candidate_ids):
+            raise PairedReplayConfigError(
+                "interaction_receipts must bind each configured candidate exactly once"
+            )
         _positive_decimal(self.cost_cap_per_pair_usd, "cost_cap_per_pair_usd")
         _positive_decimal(self.cost_cap_run_usd, "cost_cap_run_usd")
         if Decimal(self.cost_cap_per_pair_usd) > Decimal(self.cost_cap_run_usd):
@@ -198,19 +269,27 @@ class PairedReplayConfig:
             "eligibility_ledger_path": str(self.eligibility_ledger_path),
             "epoch_path": str(self.epoch_path),
             "endpoint": self.endpoint,
+            "api_version": self.api_version,
+            "credential_environment": self.credential_environment,
             "environment_ledger_path": str(self.environment_ledger_path),
             "induced_policy": self.induced_policy,
             "manifest_path": str(self.manifest_path),
             "model": self.model,
+            "provider_routing": self.provider_routing.to_payload(),
             "pricing": self.pricing.to_payload(),
             "privacy_boundary": self.privacy_boundary,
             "provider": self.provider,
             "repeat_count": self.repeat_count,
+            "interaction_receipts": [
+                binding.to_payload()
+                for binding in sorted(self.interaction_receipts, key=lambda item: item.candidate_id)
+            ],
             "schema_version": PAIRED_REPLAY_CONFIG_SCHEMA_VERSION,
             "seed": self.seed,
             "seed_supported": self.seed_supported,
             "split": self.split,
             "unsupported_policy": self.unsupported_policy,
+            "pricing_source": self.pricing_source,
             "usage_mapping": self.usage_mapping.to_payload(),
         }
 
@@ -326,14 +405,105 @@ def read_paired_config(path: Path) -> PairedReplayConfig:
     return config
 
 
+def verify_execution_config(config: PairedReplayConfig) -> None:
+    """Verify the one approved provider contract and every M3E receipt binding."""
+    _validate_openrouter_contract(config)
+    for binding in config.interaction_receipts:
+        try:
+            receipt = verify_interaction_receipt(
+                binding.receipt_path,
+                config.epoch_path,
+                config.manifest_path,
+                config.eligibility_ledger_path,
+                config.environment_ledger_path,
+            )
+        except InteractionReceiptError as error:
+            raise PairedReplayConfigError(
+                f"interaction receipt for {binding.candidate_id!r} is invalid: {error}"
+            ) from error
+        if (
+            receipt.digest != binding.receipt_digest
+            or receipt.candidate_id != binding.candidate_id
+            or receipt.epoch_digest != config.epoch_digest
+        ):
+            raise PairedReplayConfigError(
+                f"interaction receipt for {binding.candidate_id!r} does not match configuration"
+            )
+
+
+def _validate_openrouter_contract(config: PairedReplayConfig) -> None:
+    if (
+        config.provider != "openrouter"
+        or config.endpoint != "https://openrouter.ai/api/v1/chat/completions"
+        or config.api_version != "v1"
+        or config.credential_environment != "OPENROUTER_API_KEY"
+        or config.privacy_boundary
+        != "openrouter-prompt-logging-disabled-anthropic-commercial-retention-30-days"
+    ):
+        raise PairedReplayConfigError(
+            "configuration does not match the approved OpenRouter contract"
+        )
+    if config.model != "anthropic/claude-haiku-4.5":
+        raise PairedReplayConfigError(
+            "OpenRouter model does not match the approved provider contract"
+        )
+    if config.provider_routing.to_payload() != {
+        "allow_fallbacks": False,
+        "only": ["anthropic"],
+        "require_parameters": True,
+    }:
+        raise PairedReplayConfigError("OpenRouter routing contract is unapproved")
+    if config.split != "redesign":
+        raise PairedReplayConfigError("OpenRouter replay requires the redesign split")
+    if config.seed_supported or config.seed is not None:
+        raise PairedReplayConfigError("OpenRouter replay does not support a seed")
+    if config.repeat_count != 2:
+        raise PairedReplayConfigError("OpenRouter replay requires exactly two seedless repeats")
+    if config.decoding_parameters != {
+        "max_tokens": 4096,
+        "temperature": 0.0,
+        "top_p": 1.0,
+    }:
+        raise PairedReplayConfigError(
+            "OpenRouter decoding parameters do not match the approved provider contract"
+        )
+    if (
+        config.pricing.to_payload()
+        != {
+            "effective_date": "2026-08-01",
+            "input_per_mtok": "1",
+            "cache_read_per_mtok": "0.10",
+            "cache_write_per_mtok": "1.25",
+            "output_per_mtok": "5",
+        }
+        or config.pricing_source
+        != "https://openrouter.ai/api/v1/models/anthropic/claude-haiku-4.5/endpoints"
+    ):
+        raise PairedReplayConfigError("OpenRouter pricing contract is unapproved")
+    if config.usage_mapping.to_payload() != {
+        "input_field": "usage.prompt_tokens",
+        "input_includes_cache": True,
+        "cache_read_field": "usage.prompt_tokens_details.cached_tokens",
+        "cache_write_field": "usage.prompt_tokens_details.cache_write_tokens",
+        "output_field": "usage.completion_tokens",
+    }:
+        raise PairedReplayConfigError("OpenRouter native usage mapping is unapproved")
+    if Decimal(config.cost_cap_per_pair_usd) != Decimal("0.20") or Decimal(
+        config.cost_cap_run_usd
+    ) != Decimal("0.80"):
+        raise PairedReplayConfigError("OpenRouter cost caps do not match the approved contract")
+
+
 def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
     pricing = _mapping(document["pricing"], "pricing", _PRICE_FIELDS)
     usage_mapping = _mapping(document["usage_mapping"], "usage_mapping", _USAGE_MAPPING_FIELDS)
+    provider_routing = _provider_routing(document["provider_routing"])
     candidate_ids = document["candidate_ids"]
     if not isinstance(candidate_ids, list) or any(
         not isinstance(candidate_id, str) for candidate_id in candidate_ids
     ):
         raise PairedReplayConfigError("candidate_ids must be an array of strings")
+    interaction_receipts = _interaction_receipts(document["interaction_receipts"])
     decoding_parameters = document["decoding_parameters"]
     if not isinstance(decoding_parameters, dict):
         raise PairedReplayConfigError("decoding_parameters must be an object")
@@ -363,14 +533,18 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
         artifact_root=_absolute_path(document, "artifact_root"),
         provider=_required_text(document, "provider"),
         endpoint=_required_text(document, "endpoint"),
+        api_version=_required_text(document, "api_version"),
+        credential_environment=_required_text(document, "credential_environment"),
         privacy_boundary=_required_text(document, "privacy_boundary"),
         model=_required_text(document, "model"),
+        provider_routing=provider_routing,
         decoding_parameters=cast(dict[str, JsonScalar], decoding_parameters),
         seed_supported=seed_supported,
         seed=seed,
         repeat_count=repeat_count,
         split=split,
         candidate_ids=tuple(candidate_ids),
+        interaction_receipts=interaction_receipts,
         pricing=PriceTable(
             _required_text(pricing, "effective_date"),
             _required_text(pricing, "input_per_mtok"),
@@ -378,17 +552,47 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
             _required_text(pricing, "cache_write_per_mtok"),
             _required_text(pricing, "output_per_mtok"),
         ),
+        pricing_source=_required_text(document, "pricing_source"),
         usage_mapping=UsageMapping(
             _required_text(usage_mapping, "input_field"),
             _required_text(usage_mapping, "cache_read_field"),
             _required_text(usage_mapping, "cache_write_field"),
             _required_text(usage_mapping, "output_field"),
+            _required_bool(usage_mapping, "input_includes_cache"),
         ),
         cost_cap_per_pair_usd=_required_text(document, "cost_cap_per_pair_usd"),
         cost_cap_run_usd=_required_text(document, "cost_cap_run_usd"),
         unsupported_policy=unsupported_policy,
         induced_policy=induced_policy,
     )
+
+
+def _interaction_receipts(value: object) -> tuple[InteractionReceiptBinding, ...]:
+    if not isinstance(value, list):
+        raise PairedReplayConfigError("interaction_receipts must be an array")
+    bindings: list[InteractionReceiptBinding] = []
+    for item in value:
+        binding = _mapping(item, "interaction_receipt", _INTERACTION_RECEIPT_FIELDS)
+        bindings.append(
+            InteractionReceiptBinding(
+                _required_text(binding, "candidate_id"),
+                _absolute_path(binding, "receipt_path"),
+                _required_text(binding, "receipt_digest"),
+            )
+        )
+    return tuple(bindings)
+
+
+def _provider_routing(value: object) -> ProviderRouting:
+    routing = _mapping(value, "provider_routing", _PROVIDER_ROUTING_FIELDS)
+    only = routing["only"]
+    if not isinstance(only, list) or any(not isinstance(provider, str) for provider in only):
+        raise PairedReplayConfigError("provider routing only must be an array of strings")
+    allow_fallbacks = routing["allow_fallbacks"]
+    require_parameters = routing["require_parameters"]
+    if not isinstance(allow_fallbacks, bool) or not isinstance(require_parameters, bool):
+        raise PairedReplayConfigError("provider routing flags must be booleans")
+    return ProviderRouting(tuple(only), allow_fallbacks, require_parameters)
 
 
 def _non_negative_decimal(value: str, field_name: str) -> Decimal:
@@ -473,6 +677,13 @@ def _required_text(document: dict[str, object], field_name: str) -> str:
     return value
 
 
+def _required_bool(document: Mapping[str, object], field_name: str) -> bool:
+    value = document.get(field_name)
+    if not isinstance(value, bool):
+        raise PairedReplayConfigError(f"{field_name} must be a boolean")
+    return value
+
+
 def _require_private_path(path: Path) -> None:
     try:
         entry_stat = path.lstat()
@@ -537,8 +748,15 @@ _PRICE_FIELDS = frozenset(
     }
 )
 _USAGE_MAPPING_FIELDS = frozenset(
-    {"input_field", "cache_read_field", "cache_write_field", "output_field"}
+    {
+        "input_field",
+        "input_includes_cache",
+        "cache_read_field",
+        "cache_write_field",
+        "output_field",
+    }
 )
+_PROVIDER_ROUTING_FIELDS = frozenset({"allow_fallbacks", "only", "require_parameters"})
 
 
 _DOCUMENT_FIELDS = frozenset(
@@ -553,6 +771,8 @@ _DOCUMENT_FIELDS = frozenset(
         "epoch_path",
         "epoch_digest",
         "endpoint",
+        "api_version",
+        "credential_environment",
         "environment_ledger_path",
         "induced_policy",
         "manifest_path",
@@ -560,6 +780,7 @@ _DOCUMENT_FIELDS = frozenset(
         "pricing",
         "privacy_boundary",
         "provider",
+        "interaction_receipts",
         "repeat_count",
         "schema_version",
         "seed",
@@ -567,5 +788,10 @@ _DOCUMENT_FIELDS = frozenset(
         "split",
         "unsupported_policy",
         "usage_mapping",
+        "pricing_source",
+        "provider_routing",
     }
 )
+
+
+_INTERACTION_RECEIPT_FIELDS = frozenset({"candidate_id", "receipt_digest", "receipt_path"})
