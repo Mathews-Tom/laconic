@@ -5,20 +5,29 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
+from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
+from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
+from laconic.k1.environment import SnapshotEnvironment, SnapshotToolResolver, snapshot_tree_sha256
+from laconic.k1.environment_ledger import assess_environments, write_environment_ledger
+from laconic.k1.epoch import create_epoch
 from laconic.k1.evidence import NativeEvent, NativeSession, ToolCall, ToolResult
 from laconic.k1.interaction import (
+    InteractionActionResolver,
     InteractionReceipt,
     InteractionReceiptError,
     ToolInputSchema,
+    build_interaction_receipt,
     derive_interaction_receipt,
     read_interaction_receipt,
     schema_for_json,
+    verify_interaction_receipt,
     write_interaction_receipt,
 )
+from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
 
 
 def _session() -> NativeSession:
@@ -60,6 +69,156 @@ def _receipt() -> InteractionReceipt:
         environment_digest="1" * 64,
         environment_mode="recorded_tool",
     )
+
+
+def _private_receipt_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, Path]:
+    private = tmp_path / "private"
+    sources = private / "sources"
+    sources.mkdir(parents=True, mode=0o700)
+    redesign_source = sources / "redesign.jsonl"
+    redesign_source.write_text(
+        "\n".join(
+            json.dumps(record, sort_keys=True)
+            for record in (
+                {
+                    "timestamp": "2026-07-30T21:00:00Z",
+                    "type": "user",
+                    "message": {"role": "user", "content": "Inspect redesign."},
+                },
+                {
+                    "timestamp": "2026-07-30T21:00:01Z",
+                    "type": "assistant",
+                    "message": {
+                        "id": "message-redesign",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-6",
+                        "usage": {"input_tokens": 100, "output_tokens": 20},
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "call-1",
+                                "name": "Read",
+                                "input": {"path": "src/app.py"},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-30T21:00:02Z",
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "call-1",
+                                "content": {"text": "print('ok')"},
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    holdout_source = sources / "holdout.jsonl"
+    candidate_specs: tuple[tuple[str, Path, Literal["redesign", "holdout"]], ...] = (
+        ("redesign", redesign_source, "redesign"),
+        ("holdout", holdout_source, "holdout"),
+    )
+    candidates = tuple(
+        Candidate(
+            candidate_id=candidate_id,
+            source_path=source.resolve(),
+            source_sha256=source_sha256(redesign_source)
+            if candidate_id == "redesign"
+            else "a" * 64,
+            provider="claude-code",
+            model="claude-sonnet-4-6",
+            model_family="claude-4",
+            project=f"project-{candidate_id}",
+            timestamp="2026-07-30T21:00:00Z",
+            session_length=1,
+            message_count=1,
+            has_code=True,
+            tool_density=1.0,
+            time_period="2026-Q3",
+            session_size_band="small",
+            selection_stratum="claude-code|claude-4|2026-Q3|small",
+            lineage=f"lineage-{candidate_id}",
+            eligibility_disposition="confirmatory",
+            split=split,
+        )
+        for candidate_id, source, split in candidate_specs
+    )
+    manifest_path = private / "manifest.json"
+    write_manifest(manifest_path, Manifest(candidates))
+    epoch_path = private / "epoch.json"
+    create_epoch(
+        manifest_path,
+        epoch_path,
+        audit_path=private / "access-audit.json",
+        approved_roots=(private,),
+        epoch_id="k1-test-interaction",
+        created_at="2026-07-31T11:00:00Z",
+    )
+    eligibility_path = private / "eligibility.json"
+    write_eligibility_ledger(eligibility_path, assess_manifest(epoch_path, manifest_path))
+    environment_path = private / "environment.json"
+    write_environment_ledger(
+        environment_path, assess_environments(epoch_path, manifest_path, eligibility_path)
+    )
+    return (
+        epoch_path,
+        manifest_path,
+        eligibility_path,
+        environment_path,
+        private / "interaction.json",
+        holdout_source,
+    )
+
+
+def test_private_receipt_integration_revalidates_redesign_only_chain(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    epoch, manifest, eligibility, environment, receipt_path, holdout_source = (
+        _private_receipt_inputs(tmp_path)
+    )
+
+    receipt = build_interaction_receipt(
+        epoch, manifest, eligibility, environment, "redesign", receipt_path
+    )
+
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert not holdout_source.exists()
+    assert (
+        verify_interaction_receipt(receipt_path, epoch, manifest, eligibility, environment)
+        == receipt
+    )
+    assert (
+        main(
+            [
+                "k1",
+                "interaction",
+                "verify",
+                "--receipt",
+                str(receipt_path),
+                "--epoch",
+                str(epoch),
+                "--manifest",
+                str(manifest),
+                "--eligibility-ledger",
+                str(eligibility),
+                "--environment-ledger",
+                str(environment),
+                "--split",
+                "redesign",
+            ]
+        )
+        == EXIT_OK
+    )
+    assert "verified K1 interaction receipt" in capsys.readouterr().out
 
 
 def test_receipt_preserves_non_content_chronology_and_tool_linkage() -> None:
@@ -224,6 +383,80 @@ def test_receipt_links_repeated_identical_calls_by_native_identifier() -> None:
     assert len(calls) == len(results) == 2
     assert calls[0].call_digest != calls[1].call_digest
     assert [event.call_digest for event in calls] == [event.call_digest for event in results]
+
+
+def test_interaction_cli_rejects_missing_private_receipt_without_source_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing.json"
+
+    exit_code = main(
+        [
+            "k1",
+            "interaction",
+            "verify",
+            "--receipt",
+            str(missing),
+            "--epoch",
+            str(missing),
+            "--manifest",
+            str(missing),
+            "--eligibility-ledger",
+            str(missing),
+            "--environment-ledger",
+            str(missing),
+            "--split",
+            "redesign",
+        ]
+    )
+
+    assert exit_code == EXIT_K1_MANIFEST
+    assert "cannot stat interaction receipt" in capsys.readouterr().err
+
+
+def test_recorded_action_resolver_rejects_any_off_trace_call() -> None:
+    resolver = InteractionActionResolver(_receipt(), _session())
+
+    resolution = resolver.resolve("Read", {"path": "other.py"})
+
+    assert resolution.disposition == "unsupported"
+    assert resolution.output is None
+    assert resolver.position == 0
+    assert resolver.terminated
+
+
+def test_snapshot_action_resolver_marks_rooted_divergence_induced(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    source = root / "src"
+    source.mkdir(parents=True, mode=0o700)
+    (source / "a.py").write_text("a\n", encoding="utf-8")
+    (source / "b.py").write_text("b\n", encoding="utf-8")
+    for item in source.iterdir():
+        item.chmod(0o400)
+    source.chmod(0o500)
+    root.chmod(0o500)
+    session = _session()
+    receipt = derive_interaction_receipt(
+        session,
+        epoch_digest="b" * 64,
+        manifest_digest="c" * 64,
+        eligibility_ledger_digest="d" * 64,
+        environment_ledger_digest="e" * 64,
+        audit_head_digest="f" * 64,
+        environment_digest=snapshot_tree_sha256(root),
+        environment_mode="snapshot",
+    )
+    resolver = InteractionActionResolver(
+        receipt,
+        session,
+        snapshot=SnapshotToolResolver(SnapshotEnvironment(root, receipt.environment_digest)),
+    )
+
+    resolution = resolver.resolve("Read", {"path": "src/b.py"})
+
+    assert resolution.disposition == "induced"
+    assert resolution.output == "b\n"
+    assert resolver.position == 1
 
 
 def test_private_receipt_round_trip_detects_tampering(tmp_path: Path) -> None:

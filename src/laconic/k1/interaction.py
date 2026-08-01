@@ -10,11 +10,34 @@ import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-from laconic.k1.evidence import JsonValue, NativeSession, ToolCall, ToolResult
-from laconic.k1.manifest import is_sha256
+from laconic.k1.eligibility import EligibilityLedger, EligibilityLedgerError, verify_eligibility
+from laconic.k1.environment import SnapshotToolResolver
+from laconic.k1.environment_ledger import (
+    EnvironmentLedger,
+    EnvironmentLedgerError,
+    EnvironmentRecord,
+    verify_environment,
+)
+from laconic.k1.epoch import (
+    EpochError,
+    read_access_audit,
+    record_redesign_access,
+    verify_epoch_manifest,
+)
+from laconic.k1.evidence import (
+    JsonValue,
+    NativeEvidenceError,
+    NativeSession,
+    ToolCall,
+    ToolResult,
+    validate_confirmatory_evidence,
+)
+from laconic.k1.extractors import extract_native
+from laconic.k1.manifest import Candidate, Manifest, is_sha256
 
 INTERACTION_RECEIPT_SCHEMA_VERSION = 1
 
@@ -263,6 +286,217 @@ def derive_interaction_receipt(
     )
 
 
+ActionDisposition = Literal["recorded", "induced", "unsupported"]
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionActionResolution:
+    """One authority-bound contemporary tool resolution."""
+
+    disposition: ActionDisposition
+    output: JsonValue | None
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.disposition not in {"recorded", "induced", "unsupported"}:
+            raise InteractionReceiptError(
+                f"unknown interaction action disposition {self.disposition!r}"
+            )
+        if not self.reason.strip():
+            raise InteractionReceiptError("interaction action reason must not be empty")
+        if self.disposition == "unsupported" and self.output is not None:
+            raise InteractionReceiptError("unsupported interaction action has an output")
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordedAction:
+    event: InteractionEvent
+    input: dict[str, JsonValue]
+    output: JsonValue
+
+
+class InteractionActionResolver:
+    def __init__(
+        self,
+        receipt: InteractionReceipt,
+        session: NativeSession,
+        *,
+        snapshot: SnapshotToolResolver | None = None,
+    ) -> None:
+        _verify_session_matches_receipt(receipt, session)
+        self._receipt = receipt
+        self._actions = _recorded_actions(receipt, session)
+        self._position = 0
+        self._terminated = False
+        self._snapshot = snapshot
+        if receipt.environment_mode == "snapshot" and snapshot is None:
+            raise InteractionReceiptError(
+                "snapshot interaction receipt requires a snapshot resolver"
+            )
+        if receipt.environment_mode == "recorded_tool" and snapshot is not None:
+            raise InteractionReceiptError(
+                "recorded-tool interaction receipt must not accept a snapshot"
+            )
+
+    @property
+    def position(self) -> int:
+        """Return the number of receipt-authorized actions consumed."""
+        return self._position
+
+    @property
+    def terminated(self) -> bool:
+        """Return whether an unsupported action has stopped this interaction."""
+        return self._terminated
+
+    def resolve(self, name: str, tool_input: dict[str, JsonValue]) -> InteractionActionResolution:
+        """Resolve one current action or terminate without advancing on a mismatch."""
+        if self._terminated:
+            return InteractionActionResolution(
+                "unsupported", None, "interaction already terminated"
+            )
+        if self._position == len(self._actions):
+            self._terminated = True
+            return InteractionActionResolution(
+                "unsupported", None, "interaction trace is exhausted"
+            )
+        expected = self._actions[self._position]
+        if not name.strip() or name != expected.event.tool_name:
+            self._terminated = True
+            return InteractionActionResolution(
+                "unsupported", None, "tool name differs from interaction receipt"
+            )
+        schema = expected.event.input_schema
+        if schema is None or not _matches_schema(schema.document, tool_input):
+            self._terminated = True
+            return InteractionActionResolution(
+                "unsupported", None, "tool input does not match receipt schema"
+            )
+        if self._receipt.environment_mode == "recorded_tool":
+            if _canonical_json(tool_input) != _canonical_json(expected.input):
+                self._terminated = True
+                return InteractionActionResolution(
+                    "unsupported", None, "tool call differs from exact recorded action"
+                )
+            self._position += 1
+            return InteractionActionResolution(
+                "recorded", _copy_json(expected.output), "exact recorded tool action"
+            )
+        resolution = _resolve_rooted_read(self._snapshot, name, tool_input)
+        if resolution.output is None:
+            self._terminated = True
+            return InteractionActionResolution("unsupported", None, resolution.reason)
+        disposition: ActionDisposition = (
+            "recorded"
+            if _canonical_json(tool_input) == _canonical_json(expected.input)
+            else "induced"
+        )
+        self._position += 1
+        return InteractionActionResolution(disposition, resolution.output, resolution.reason)
+
+
+def build_interaction_receipt(
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+    candidate_id: str,
+    receipt_path: Path,
+) -> InteractionReceipt:
+    """Build a private receipt only after redesign M2 and M3 revalidation."""
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        eligibility = verify_eligibility(epoch_path, manifest_path, eligibility_ledger_path)
+        environment = verify_environment(
+            epoch_path, manifest_path, eligibility_ledger_path, environment_ledger_path
+        )
+    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
+        raise InteractionReceiptError(str(error)) from error
+    candidate = _redesign_candidate(manifest, candidate_id)
+    _require_admitted_candidate(candidate_id, candidate.source_sha256, eligibility, environment)
+    try:
+        record_redesign_access(
+            epoch_path,
+            manifest_path,
+            candidate_id,
+            "interaction_build",
+            timestamp=_audit_timestamp(),
+        )
+        session = extract_native(candidate)
+        validate_confirmatory_evidence(candidate, session)
+        audit = read_access_audit(epoch.audit_path)
+    except (EpochError, NativeEvidenceError, OSError) as error:
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: cannot derive executable interaction"
+        ) from error
+    record = _environment_record(environment.records, candidate_id)
+    if record.mode is None or record.environment_digest is None:
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: environment receipt is incomplete"
+        )
+    receipt = derive_interaction_receipt(
+        session,
+        epoch_digest=epoch.digest,
+        manifest_digest=manifest.digest,
+        eligibility_ledger_digest=eligibility.digest,
+        environment_ledger_digest=environment.digest,
+        audit_head_digest=audit.head_digest,
+        environment_digest=record.environment_digest,
+        environment_mode=record.mode,
+    )
+    write_interaction_receipt(receipt_path, receipt)
+    return receipt
+
+
+def verify_interaction_receipt(
+    receipt_path: Path,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+) -> InteractionReceipt:
+    """Revalidate every binding before allowing a receipt into M4E."""
+    receipt = read_interaction_receipt(receipt_path)
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        eligibility = verify_eligibility(epoch_path, manifest_path, eligibility_ledger_path)
+        environment = verify_environment(
+            epoch_path, manifest_path, eligibility_ledger_path, environment_ledger_path
+        )
+    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
+        raise InteractionReceiptError(str(error)) from error
+    candidate = _redesign_candidate(manifest, receipt.candidate_id)
+    _require_admitted_candidate(
+        receipt.candidate_id, candidate.source_sha256, eligibility, environment
+    )
+    record = _environment_record(environment.records, receipt.candidate_id)
+    if (
+        receipt.epoch_digest != epoch.digest
+        or receipt.manifest_digest != manifest.digest
+        or receipt.eligibility_ledger_digest != eligibility.digest
+        or receipt.environment_ledger_digest != environment.digest
+        or receipt.environment_digest != record.environment_digest
+        or receipt.environment_mode != record.mode
+    ):
+        raise InteractionReceiptError("interaction receipt admission binding does not match")
+    _verify_receipt_audit_head(epoch.digest, epoch.audit_path, receipt)
+    try:
+        record_redesign_access(
+            epoch_path,
+            manifest_path,
+            receipt.candidate_id,
+            "interaction_verify",
+            timestamp=_audit_timestamp(),
+        )
+        session = extract_native(candidate)
+        validate_confirmatory_evidence(candidate, session)
+    except (EpochError, NativeEvidenceError, OSError) as error:
+        raise InteractionReceiptError(
+            f"candidate {receipt.candidate_id}: cannot revalidate executable interaction"
+        ) from error
+    _verify_session_matches_receipt(receipt, session)
+    return receipt
+
+
 def schema_for_json(value: JsonValue, depth: int = 0) -> dict[str, JsonValue]:
     """Return a closed JSON Schema document for one native JSON value shape."""
     if depth > 32:
@@ -414,6 +648,76 @@ def _event_from_document(index: int, payload: object) -> InteractionEvent:
     )
 
 
+def _redesign_candidate(manifest: Manifest, candidate_id: str) -> Candidate:
+    for candidate in manifest.candidates:
+        if candidate.candidate_id == candidate_id:
+            if candidate.split != "redesign":
+                raise InteractionReceiptError(
+                    f"candidate {candidate_id!r} is sealed holdout and cannot enter M3E"
+                )
+            return candidate
+    raise InteractionReceiptError(f"candidate {candidate_id!r} is absent from sealed manifest")
+
+
+def _require_admitted_candidate(
+    candidate_id: str,
+    source_sha256: str,
+    eligibility: EligibilityLedger,
+    environment: EnvironmentLedger,
+) -> None:
+    eligibility_record = next(
+        (record for record in eligibility.records if record.candidate_id == candidate_id), None
+    )
+    if eligibility_record is None or eligibility_record.disposition != "confirmatory":
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: eligibility ledger does not admit confirmatory replay"
+        )
+    if eligibility_record.source_sha256 != source_sha256:
+        raise InteractionReceiptError(f"candidate {candidate_id}: eligibility source hash mismatch")
+    record = _environment_record(environment.records, candidate_id)
+    if (
+        record.source_sha256 != source_sha256
+        or record.status != "valid"
+        or record.mode is None
+        or record.environment_digest is None
+    ):
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: environment ledger does not admit executable replay"
+        )
+
+
+def _environment_record(
+    records: tuple[EnvironmentRecord, ...], candidate_id: str
+) -> EnvironmentRecord:
+    for record in records:
+        if record.candidate_id == candidate_id:
+            return record
+    raise InteractionReceiptError(f"candidate {candidate_id}: environment record is absent")
+
+
+def _verify_receipt_audit_head(
+    epoch_digest: str, audit_path: Path, receipt: InteractionReceipt
+) -> None:
+    try:
+        audit = read_access_audit(audit_path)
+    except EpochError as error:
+        raise InteractionReceiptError(str(error)) from error
+    if audit.epoch_digest != epoch_digest:
+        raise InteractionReceiptError("interaction receipt audit belongs to another epoch")
+    for record in audit.records:
+        if (
+            record.digest == receipt.audit_head_digest
+            and record.candidate_id == receipt.candidate_id
+            and record.operation == "interaction_build"
+        ):
+            return
+    raise InteractionReceiptError("interaction receipt audit head has no build authorization")
+
+
+def _audit_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
 def _authority_for(
     environment_mode: Literal["recorded_tool", "snapshot"], call: ToolCall
 ) -> ActionAuthority:
@@ -426,6 +730,105 @@ def _authority_for(
 
 def _call_reference(call_id: str) -> str:
     return _digest({"call_id": call_id})
+
+
+def _verify_session_matches_receipt(receipt: InteractionReceipt, session: NativeSession) -> None:
+    if (
+        session.candidate_id != receipt.candidate_id
+        or session.source_sha256 != receipt.source_sha256
+    ):
+        raise InteractionReceiptError("native session does not match interaction receipt source")
+    derived = derive_interaction_receipt(
+        session,
+        epoch_digest=receipt.epoch_digest,
+        manifest_digest=receipt.manifest_digest,
+        eligibility_ledger_digest=receipt.eligibility_ledger_digest,
+        environment_ledger_digest=receipt.environment_ledger_digest,
+        audit_head_digest=receipt.audit_head_digest,
+        environment_digest=receipt.environment_digest,
+        environment_mode=receipt.environment_mode,
+    )
+    if not hmac.compare_digest(derived.digest, receipt.digest):
+        raise InteractionReceiptError("native interaction chronology does not match receipt")
+
+
+def _recorded_actions(
+    receipt: InteractionReceipt, session: NativeSession
+) -> tuple[_RecordedAction, ...]:
+    calls: dict[str, ToolCall] = {}
+    results: dict[str, ToolResult] = {}
+    for event in session.events:
+        if event.kind == "assistant":
+            calls.update({call.call_id: call for call in event.tool_calls})
+        elif event.tool_result is not None:
+            results[event.tool_result.call_id] = event.tool_result
+    receipt_calls = (event for event in receipt.events if event.kind == "tool_call")
+    actions: list[_RecordedAction] = []
+    for receipt_event in receipt_calls:
+        call_reference = cast(str, receipt_event.call_digest)
+        matching = [
+            call for call in calls.values() if _call_reference(call.call_id) == call_reference
+        ]
+        if len(matching) != 1:
+            raise InteractionReceiptError(
+                "receipt tool call does not resolve to exactly one native action"
+            )
+        call = matching[0]
+        result = results.get(call.call_id)
+        if result is None:
+            raise InteractionReceiptError("receipt tool call has no native result")
+        actions.append(_RecordedAction(receipt_event, call.input, result.output))
+    return tuple(actions)
+
+
+def _resolve_rooted_read(
+    resolver: SnapshotToolResolver | None, name: str, tool_input: dict[str, JsonValue]
+) -> InteractionActionResolution:
+    if resolver is None:
+        raise InteractionReceiptError("snapshot interaction resolver is absent")
+    resolved = resolver.resolve(name, tool_input)
+    if resolved.status == "unsupported":
+        return InteractionActionResolution("unsupported", None, resolved.reason)
+    return InteractionActionResolution("recorded", resolved.output, resolved.reason)
+
+
+def _matches_schema(schema: dict[str, JsonValue], value: JsonValue) -> bool:
+    schema_type = schema["type"]
+    if schema_type == "null":
+        return value is None
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, float)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "array":
+        items = cast(list[object], schema["items"])
+        return (
+            isinstance(value, list)
+            and len(value) == len(items)
+            and all(
+                isinstance(item_schema, dict) and _matches_schema(item_schema, item)
+                for item_schema, item in zip(items, value, strict=True)
+            )
+        )
+    if schema_type == "object":
+        properties = cast(dict[str, object], schema["properties"])
+        return (
+            isinstance(value, dict)
+            and set(value) == set(properties)
+            and all(
+                isinstance(property_schema, dict) and _matches_schema(property_schema, value[name])
+                for name, property_schema in properties.items()
+            )
+        )
+    raise InteractionReceiptError("receipt schema has unsupported type")
+
+
+def _copy_json(value: JsonValue) -> JsonValue:
+    return cast(JsonValue, json.loads(_canonical_json(value)))
 
 
 def _tool_call_digest(call: ToolCall) -> str:
