@@ -23,8 +23,16 @@ from laconic.k1.environment_ledger import (
 from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
 from laconic.k1.evidence import JsonValue, NativeEvidenceError
 from laconic.k1.extractors import extract_native
+from laconic.k1.interaction import InteractionRenderer, render_private_interaction
 from laconic.k1.manifest import Candidate, is_sha256
-from laconic.k1.paired_config import Arm, PairedReplayConfig, PairedRunProvenance
+from laconic.k1.paired_config import (
+    Arm,
+    InteractionReceiptBinding,
+    PairedReplayConfig,
+    PairedReplayConfigError,
+    PairedRunProvenance,
+    verify_execution_config,
+)
 from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
 
@@ -49,6 +57,7 @@ class PairedWorkload:
 
     candidate: Candidate
     user_prompts: tuple[str, ...]
+    interaction_receipt: InteractionReceiptBinding
     environment: EnvironmentRecord
     manifest_digest: str
     eligibility_ledger_digest: str
@@ -67,6 +76,10 @@ class PairedWorkload:
             )
         if self.environment.status != "valid" or self.environment.environment_digest is None:
             raise PairedReplayAdmissionError("paired workload requires a valid environment receipt")
+        if self.interaction_receipt.candidate_id != self.candidate.candidate_id:
+            raise PairedReplayAdmissionError(
+                "interaction receipt candidate does not match workload"
+            )
         for field_name, value in (
             ("manifest_digest", self.manifest_digest),
             ("eligibility_ledger_digest", self.eligibility_ledger_digest),
@@ -95,6 +108,7 @@ class PairedReplayRequest:
     run_id: str
     workload: PairedWorkload
     config: PairedReplayConfig
+    interaction: InteractionRenderer
     arm: Arm
     repeat_index: int
 
@@ -110,10 +124,24 @@ class PairedReplayRequest:
         if self.workload.candidate.split != self.config.split:
             raise PairedReplayError("request workload split does not match configuration")
 
+        if self.interaction.receipt.digest != self.workload.interaction_receipt.receipt_digest:
+            raise PairedReplayError("request interaction receipt does not match workload")
+
     @property
     def settings_digest(self) -> str:
         """Return the declared model/runtime identity shared with the paired arm."""
         return self.config.settings_digest
+
+    @property
+    def condition_digest(self) -> str:
+        """Return the private arm condition identity without serializing its content."""
+        return _digest(
+            {
+                "arm": self.arm,
+                "config_digest": self.config.digest,
+                "interaction_receipt_digest": self.interaction.receipt.digest,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +367,8 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
     if config.split != "redesign":
         raise PairedReplayAdmissionError("paired replay requires the redesign split before M6")
     try:
+        verify_execution_config(config)
+        bindings = {binding.candidate_id: binding for binding in config.interaction_receipts}
         epoch, manifest = verify_epoch_manifest(config.epoch_path, config.manifest_path)
         if config.epoch_digest != epoch.digest:
             raise PairedReplayAdmissionError(
@@ -353,7 +383,12 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             config.eligibility_ledger_path,
             config.environment_ledger_path,
         )
-    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
+    except (
+        EligibilityLedgerError,
+        EnvironmentLedgerError,
+        EpochError,
+        PairedReplayConfigError,
+    ) as error:
         raise PairedReplayAdmissionError(str(error)) from error
     candidates = {candidate.candidate_id: candidate for candidate in manifest.candidates}
     eligibility_records = {record.candidate_id: record for record in eligibility.records}
@@ -392,6 +427,11 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             raise PairedReplayAdmissionError(
                 f"candidate {candidate_id!r} audit authorization failed: {error}"
             ) from error
+        binding = bindings.get(candidate_id)
+        if binding is None:
+            raise PairedReplayAdmissionError(
+                f"configured candidate {candidate_id!r} lacks an interaction receipt binding"
+            )
         try:
             session = extract_native(candidate)
         except (NativeEvidenceError, OSError) as error:
@@ -407,6 +447,7 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             PairedWorkload(
                 candidate,
                 user_prompts,
+                binding,
                 environment,
                 manifest.digest,
                 eligibility.digest,
@@ -502,7 +543,14 @@ def _run_arm(
     arm: Arm,
     repeat_index: int,
 ) -> PairedArmReceipt:
-    request = PairedReplayRequest(run_id, workload, config, arm, repeat_index)
+    interaction = render_private_interaction(
+        Path(workload.interaction_receipt.receipt_path),
+        config.epoch_path,
+        config.manifest_path,
+        config.eligibility_ledger_path,
+        config.environment_ledger_path,
+    )
+    request = PairedReplayRequest(run_id, workload, config, interaction, arm, repeat_index)
     response = client.respond(request)
     if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
         raise PairedReplayError("raw arm must not contain induced turns")
@@ -522,6 +570,8 @@ def _run_arm(
         workload.manifest_digest,
         workload.eligibility_ledger_digest,
         workload.environment_ledger_digest,
+        interaction.receipt.digest,
+        request.condition_digest,
         workload.candidate.candidate_id,
         workload.candidate.source_sha256,
         environment_digest,
@@ -558,10 +608,12 @@ def _write_response_artifact(
     document: dict[str, JsonValue] = {
         "arm": request.arm,
         "candidate_id": request.workload.candidate.candidate_id,
+        "condition_digest": request.condition_digest,
         "config_digest": request.config.digest,
         "repeat_index": request.repeat_index,
         "run_id": request.run_id,
         "settings_digest": request.settings_digest,
+        "interaction_receipt_digest": request.interaction.receipt.digest,
         "turns": [
             {
                 "classification": turn.classification,

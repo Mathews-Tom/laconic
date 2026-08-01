@@ -306,6 +306,8 @@ class PairedRunProvenance:
     manifest_digest: str
     eligibility_ledger_digest: str
     environment_ledger_digest: str
+    interaction_receipt_digest: str
+    condition_digest: str
     candidate_id: str
     source_sha256: str
     environment_digest: str
@@ -320,6 +322,8 @@ class PairedRunProvenance:
             ("manifest_digest", self.manifest_digest),
             ("eligibility_ledger_digest", self.eligibility_ledger_digest),
             ("environment_ledger_digest", self.environment_ledger_digest),
+            ("interaction_receipt_digest", self.interaction_receipt_digest),
+            ("condition_digest", self.condition_digest),
             ("source_sha256", self.source_sha256),
             ("environment_digest", self.environment_digest),
             ("response_artifact_sha256", self.response_artifact_sha256),
@@ -340,9 +344,11 @@ class PairedRunProvenance:
             "candidate_id": self.candidate_id,
             "config_digest": self.config_digest,
             "eligibility_ledger_digest": self.eligibility_ledger_digest,
+            "condition_digest": self.condition_digest,
             "environment_digest": self.environment_digest,
             "environment_ledger_digest": self.environment_ledger_digest,
             "manifest_digest": self.manifest_digest,
+            "interaction_receipt_digest": self.interaction_receipt_digest,
             "repeat_index": self.repeat_index,
             "response_artifact_sha256": self.response_artifact_sha256,
             "run_id": self.run_id,
@@ -405,9 +411,14 @@ def read_paired_config(path: Path) -> PairedReplayConfig:
     return config
 
 
+def verify_provider_contract(config: PairedReplayConfig) -> None:
+    """Verify the approved provider pin without reading an M3E receipt."""
+    _validate_anthropic_contract(config)
+
+
 def verify_execution_config(config: PairedReplayConfig) -> None:
     """Verify the one approved provider contract and every M3E receipt binding."""
-    _validate_openrouter_contract(config)
+    verify_provider_contract(config)
     for binding in config.interaction_receipts:
         try:
             receipt = verify_interaction_receipt(

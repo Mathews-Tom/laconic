@@ -12,6 +12,7 @@ from typing import Literal
 import pytest
 
 from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
+from laconic.k1.anthropic import AnthropicMessagesClient
 from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
 from laconic.k1.environment_ledger import (
     assess_environments,
@@ -144,6 +145,11 @@ def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
                     }
                 ],
             },
+        },
+        {
+            "timestamp": "2026-07-30T21:00:03Z",
+            "type": "user",
+            "message": {"role": "user", "content": "Summarize the result."},
         },
     ]
     source.write_text(
@@ -535,6 +541,8 @@ def test_paired_run_provenance_rejects_invalid_receipts() -> None:
         "manifest_digest": "a" * 64,
         "eligibility_ledger_digest": "a" * 64,
         "environment_ledger_digest": "a" * 64,
+        "interaction_receipt_digest": "a" * 64,
+        "condition_digest": "a" * 64,
         "candidate_id": "candidate-a",
         "source_sha256": "a" * 64,
         "environment_digest": "a" * 64,
@@ -560,6 +568,8 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         manifest_digest="a" * 64,
         eligibility_ledger_digest="a" * 64,
         environment_ledger_digest="a" * 64,
+        interaction_receipt_digest="a" * 64,
+        condition_digest="a" * 64,
         candidate_id="candidate-a",
         source_sha256="a" * 64,
         environment_digest="a" * 64,
@@ -574,10 +584,12 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         "candidate_id": "candidate-a",
         "config_digest": "a" * 64,
         "eligibility_ledger_digest": "a" * 64,
+        "condition_digest": "a" * 64,
         "environment_digest": "a" * 64,
         "environment_ledger_digest": "a" * 64,
         "manifest_digest": "a" * 64,
         "repeat_index": 1,
+        "interaction_receipt_digest": "a" * 64,
         "response_artifact_sha256": "b" * 64,
         "run_id": "run-1",
         "source_sha256": "a" * 64,
@@ -636,6 +648,11 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
     assert len(receipt.pairs) == config.repeat_count
     for pair in receipt.pairs:
         assert pair.raw.provenance.config_digest == pair.codec.provenance.config_digest
+        assert (
+            pair.raw.provenance.interaction_receipt_digest
+            == pair.codec.provenance.interaction_receipt_digest
+        )
+        assert pair.raw.provenance.condition_digest != pair.codec.provenance.condition_digest
         assert pair.raw.artifact_path.stat().st_mode & 0o777 == 0o600
         assert pair.codec.artifact_path.stat().st_mode & 0o777 == 0o600
         assert '"fresh":true' in pair.raw.artifact_path.read_text(encoding="utf-8")
@@ -798,29 +815,127 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
     verified = verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
     audit = read_access_audit(epoch.audit_path)
     assert verified.strata[0].completed_pair_count == config.repeat_count
-    assert [(record.candidate_id, record.operation, record.split) for record in audit.records] == [
-        ("candidate-a", "eligibility_assess", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_assess", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_verify", "redesign"),
-        ("candidate-a", "interaction_build", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_verify", "redesign"),
-        ("candidate-a", "paired_admit", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_verify", "redesign"),
-        ("candidate-a", "paired_admit", "redesign"),
+    audit_rows = [(record.candidate_id, record.operation, record.split) for record in audit.records]
+    assert all(
+        candidate_id == "candidate-a" and split == "redesign"
+        for candidate_id, _, split in audit_rows
+    )
+    assert [operation for _, operation, _ in audit_rows].count(
+        "paired_admit"
+    ) == config.repeat_count
+    assert [operation for _, operation, _ in audit_rows].count("interaction_render") == (
+        2 * config.repeat_count
+    )
+
+
+def test_anthropic_client_rejects_missing_process_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    monkeypatch.delenv(config.credential_environment, raising=False)
+
+    with pytest.raises(PairedReplayError, match="credential environment"):
+        run_paired_replay(
+            config,
+            (workload,),
+            AnthropicMessagesClient(),
+            run_id="missing-credential",
+        )
+
+
+def test_replay_cli_rejects_missing_credential_before_audit_or_source_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _ = _workload(tmp_path)
+    monkeypatch.delenv(config.credential_environment, raising=False)
+    config_path = config.epoch_path.parent / "paired-config.json"
+    report_path = config.epoch_path.parent / "paired-report.json"
+    write_paired_config(config_path, config)
+    audit_path = read_epoch(config.epoch_path).audit_path
+    audit_before = read_access_audit(audit_path).head_digest
+
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "run",
+                "--config",
+                str(config_path),
+                "--run-id",
+                "missing-credential",
+                "--report",
+                str(report_path),
+            ]
+        )
+        == EXIT_K1_MANIFEST
+    )
+
+    assert read_access_audit(audit_path).head_digest == audit_before
+    assert not config.artifact_root.exists()
+
+
+def test_anthropic_client_replays_follow_up_prompt_after_tool_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    client = AnthropicMessagesClient()
+    messages: list[list[dict[str, object]]] = []
+
+    def post(
+        request: PairedReplayRequest,
+        credential: str,
+        request_messages: list[dict[str, object]],
+    ) -> dict[str, object]:
+        assert credential == "test-credential"
+        messages.append([message.copy() for message in request_messages])
+        usage = {
+            "input_tokens": 1,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 1,
+        }
+        if len(request_messages) == 1:
+            return {
+                "model": request.config.model,
+                "usage": usage,
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "Read",
+                        "input": {"path": "src/app.py"},
+                    }
+                ],
+            }
+        return {
+            "model": request.config.model,
+            "usage": usage,
+            "content": [{"type": "text", "text": "Complete."}],
+        }
+
+    monkeypatch.setattr(client, "_post", post)
+
+    run_paired_replay(config, (workload,), client, run_id="follow-up")
+
+    follow_up_messages = [
+        request_messages[-1] for request_messages in messages if len(request_messages) == 3
     ]
+    assert len(follow_up_messages) == config.repeat_count * 2
+    assert all(
+        message["role"] == "user"
+        and isinstance(message["content"], list)
+        and message["content"][0]["type"] == "tool_result"
+        and message["content"][0]["tool_use_id"] == "tool-1"
+        and message["content"][1] == {"type": "text", "text": "Summarize the result."}
+        for message in follow_up_messages
+    )
 
 
 def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
     config, workload = _workload(tmp_path)
-    config = replace(config, cost_cap_per_pair_usd="0.0001")
-    client = _ReplayClient()
+    client = _ReplayClient(input_tokens=250_000)
 
     with pytest.raises(PairedReplayCostCapError, match="past the"):
         run_paired_replay(config, (workload,), client, run_id="run-over-cap")

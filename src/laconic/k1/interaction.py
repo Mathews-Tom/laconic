@@ -339,6 +339,11 @@ class InteractionActionResolver:
             )
 
     @property
+    def receipt(self) -> InteractionReceipt:
+        """Return the immutable interaction receipt authorizing this resolver."""
+        return self._receipt
+
+    @property
     def position(self) -> int:
         """Return the number of receipt-authorized actions consumed."""
         return self._position
@@ -428,6 +433,11 @@ class InteractionRenderer:
     def prompts(self) -> tuple[RenderedUserPrompt, ...]:
         """Return chronological user prompts without exposing assistant text."""
         return self._prompts
+
+    @property
+    def receipt(self) -> InteractionReceipt:
+        """Return the authenticated non-content interaction contract."""
+        return self._resolver.receipt
 
     @property
     def terminated(self) -> bool:

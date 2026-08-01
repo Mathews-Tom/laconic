@@ -17,6 +17,7 @@ from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_mode
 from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.runner import UnknownGateError, run_gates
+from laconic.k1.anthropic import AnthropicMessagesClient, require_process_credential
 from laconic.k1.eligibility import (
     EligibilityLedgerError,
     assess_manifest,
@@ -30,15 +31,26 @@ from laconic.k1.environment_ledger import (
     verify_environment,
     write_environment_ledger,
 )
-from laconic.k1.epoch import EpochError, create_epoch, verify_epoch
+from laconic.k1.epoch import EpochError, create_epoch, verify_epoch, verify_epoch_manifest
 from laconic.k1.interaction import InteractionReceiptError, verify_interaction_receipt
 from laconic.k1.manifest import ManifestError, verify_manifest
 from laconic.k1.paired_config import (
     PairedReplayConfigError,
     read_paired_config,
     verify_execution_config,
+    verify_provider_contract,
 )
-from laconic.k1.paired_report import PairedReportError, verify_paired_report
+from laconic.k1.paired_report import (
+    PairedReportError,
+    build_paired_report,
+    verify_paired_report,
+    write_paired_report,
+)
+from laconic.k1.paired_runner import (
+    PairedReplayError,
+    admit_paired_workloads,
+    run_paired_replay,
+)
 from laconic.k1.searchat_export import produce_manifest
 from laconic.k1.split import SplitPolicy
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
@@ -487,6 +499,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="private paired replay configuration",
     )
     k1_replay_verify_config.set_defaults(handler=_k1_replay_verify_config)
+    k1_replay_run = k1_replay_subcommands.add_parser(
+        "run",
+        help="execute the approved redesign-only paired replay through Anthropic",
+    )
+    k1_replay_run.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private paired replay configuration",
+    )
+    k1_replay_run.add_argument(
+        "--run-id", required=True, metavar="ID", help="private identifier for this execution"
+    )
+    k1_replay_run.add_argument(
+        "--report",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private M5-ready paired report output",
+    )
+    k1_replay_run.set_defaults(handler=_k1_replay_run)
     k1_replay_verify_report = k1_replay_subcommands.add_parser(
         "verify-report",
         help="verify a private M5-ready paired receipt report and response-artifact digests",
@@ -1212,6 +1246,28 @@ def _k1_replay_verify_config(args: argparse.Namespace) -> int:
     print(
         f"verified K1 paired replay config {args.config}: "
         f"provider={config.provider}, model={config.model}, digest {config.digest}"
+    )
+    return EXIT_OK
+
+
+def _k1_replay_run(args: argparse.Namespace) -> int:
+    try:
+        config = read_paired_config(args.config)
+        verify_provider_contract(config)
+        require_process_credential(config.credential_environment)
+        workloads = admit_paired_workloads(config)
+        receipt = run_paired_replay(
+            config, workloads, AnthropicMessagesClient(), run_id=args.run_id
+        )
+        epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
+        report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
+        write_paired_report(args.report, epoch, report)
+    except (PairedReplayConfigError, PairedReplayError, PairedReportError, EpochError) as error:
+        print(f"laconic k1 replay run: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(
+        f"wrote K1 paired report {args.report}: receipt={receipt.digest}, "
+        f"report={report.digest}, cost=${receipt.total_cost_usd}"
     )
     return EXIT_OK
 
