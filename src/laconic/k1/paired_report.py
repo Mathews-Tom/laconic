@@ -530,10 +530,12 @@ def _validate_receipt_arm(arm: dict[str, object]) -> None:
     if set(provenance) != {
         "arm",
         "candidate_id",
+        "condition_digest",
         "config_digest",
         "eligibility_ledger_digest",
         "environment_digest",
         "environment_ledger_digest",
+        "interaction_receipt_digest",
         "manifest_digest",
         "repeat_index",
         "response_artifact_sha256",
@@ -544,10 +546,12 @@ def _validate_receipt_arm(arm: dict[str, object]) -> None:
     if _required_text(provenance, "arm") not in {"raw", "codec"}:
         raise PairedReportError("paired receipt provenance arm is invalid")
     for field_name in (
+        "condition_digest",
         "config_digest",
         "eligibility_ledger_digest",
         "environment_digest",
         "environment_ledger_digest",
+        "interaction_receipt_digest",
         "manifest_digest",
         "response_artifact_sha256",
         "source_sha256",

@@ -7,12 +7,12 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from laconic.k1.eligibility import EligibilityLedgerError, verify_eligibility
 from laconic.k1.environment_ledger import (
@@ -23,8 +23,16 @@ from laconic.k1.environment_ledger import (
 from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
 from laconic.k1.evidence import JsonValue, NativeEvidenceError
 from laconic.k1.extractors import extract_native
+from laconic.k1.interaction import InteractionRenderer, render_private_interaction
 from laconic.k1.manifest import Candidate, is_sha256
-from laconic.k1.paired_config import Arm, PairedReplayConfig, PairedRunProvenance
+from laconic.k1.paired_config import (
+    Arm,
+    InteractionReceiptBinding,
+    PairedReplayConfig,
+    PairedReplayConfigError,
+    PairedRunProvenance,
+    verify_execution_config,
+)
 from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
 
@@ -49,6 +57,7 @@ class PairedWorkload:
 
     candidate: Candidate
     user_prompts: tuple[str, ...]
+    interaction_receipt: InteractionReceiptBinding
     environment: EnvironmentRecord
     manifest_digest: str
     eligibility_ledger_digest: str
@@ -67,6 +76,10 @@ class PairedWorkload:
             )
         if self.environment.status != "valid" or self.environment.environment_digest is None:
             raise PairedReplayAdmissionError("paired workload requires a valid environment receipt")
+        if self.interaction_receipt.candidate_id != self.candidate.candidate_id:
+            raise PairedReplayAdmissionError(
+                "interaction receipt candidate does not match workload"
+            )
         for field_name, value in (
             ("manifest_digest", self.manifest_digest),
             ("eligibility_ledger_digest", self.eligibility_ledger_digest),
@@ -95,6 +108,7 @@ class PairedReplayRequest:
     run_id: str
     workload: PairedWorkload
     config: PairedReplayConfig
+    interaction: InteractionRenderer
     arm: Arm
     repeat_index: int
 
@@ -110,10 +124,24 @@ class PairedReplayRequest:
         if self.workload.candidate.split != self.config.split:
             raise PairedReplayError("request workload split does not match configuration")
 
+        if self.interaction.receipt.digest != self.workload.interaction_receipt.receipt_digest:
+            raise PairedReplayError("request interaction receipt does not match workload")
+
     @property
     def settings_digest(self) -> str:
         """Return the declared model/runtime identity shared with the paired arm."""
         return self.config.settings_digest
+
+    @property
+    def condition_digest(self) -> str:
+        """Return the private arm condition identity without serializing its content."""
+        return _digest(
+            {
+                "arm": self.arm,
+                "config_digest": self.config.digest,
+                "interaction_receipt_digest": self.interaction.receipt.digest,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +367,8 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
     if config.split != "redesign":
         raise PairedReplayAdmissionError("paired replay requires the redesign split before M6")
     try:
+        verify_execution_config(config)
+        bindings = {binding.candidate_id: binding for binding in config.interaction_receipts}
         epoch, manifest = verify_epoch_manifest(config.epoch_path, config.manifest_path)
         if config.epoch_digest != epoch.digest:
             raise PairedReplayAdmissionError(
@@ -353,7 +383,12 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             config.eligibility_ledger_path,
             config.environment_ledger_path,
         )
-    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
+    except (
+        EligibilityLedgerError,
+        EnvironmentLedgerError,
+        EpochError,
+        PairedReplayConfigError,
+    ) as error:
         raise PairedReplayAdmissionError(str(error)) from error
     candidates = {candidate.candidate_id: candidate for candidate in manifest.candidates}
     eligibility_records = {record.candidate_id: record for record in eligibility.records}
@@ -392,6 +427,11 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             raise PairedReplayAdmissionError(
                 f"candidate {candidate_id!r} audit authorization failed: {error}"
             ) from error
+        binding = bindings.get(candidate_id)
+        if binding is None:
+            raise PairedReplayAdmissionError(
+                f"configured candidate {candidate_id!r} lacks an interaction receipt binding"
+            )
         try:
             session = extract_native(candidate)
         except (NativeEvidenceError, OSError) as error:
@@ -407,6 +447,7 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
             PairedWorkload(
                 candidate,
                 user_prompts,
+                binding,
                 environment,
                 manifest.digest,
                 eligibility.digest,
@@ -418,24 +459,13 @@ def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, 
 
 def run_paired_replay(
     config: PairedReplayConfig,
-    workloads: Sequence[PairedWorkload],
     client: PairedReplayClient,
     *,
     run_id: str,
 ) -> PairedRunReceipt:
-    """Regenerate raw then codec arms for every declared workload and repeat.
-
-    The runner writes each billed response before checking the cap because a provider
-    call cannot be unbilled. It then raises immediately, preventing any later arm or
-    workload from executing under a breached frozen budget.
-    """
-    admitted_workloads = admit_paired_workloads(config)
-    if tuple(workloads) != admitted_workloads:
-        raise PairedReplayAdmissionError(
-            "workloads must exactly match the configuration's revalidated M1/M2/M3 evidence"
-        )
-    workloads = admitted_workloads
-    _ensure_private_directory(config.artifact_root)
+    """Regenerate raw then codec arms after one M2/M3 source admission."""
+    prepare_private_artifact_root(config)
+    workloads = admit_paired_workloads(config)
     _safe_path_component(run_id)
     for workload in workloads:
         candidate_id = _safe_path_component(workload.candidate.candidate_id)
@@ -502,18 +532,49 @@ def _run_arm(
     arm: Arm,
     repeat_index: int,
 ) -> PairedArmReceipt:
-    request = PairedReplayRequest(run_id, workload, config, arm, repeat_index)
-    response = client.respond(request)
-    if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
-        raise PairedReplayError("raw arm must not contain induced turns")
-    usage = tuple(
-        normalize_usage(turn.native_usage, config.usage_mapping) for turn in response.turns
+    interaction = render_private_interaction(
+        Path(workload.interaction_receipt.receipt_path),
+        config.epoch_path,
+        config.manifest_path,
+        config.eligibility_ledger_path,
+        config.environment_ledger_path,
     )
-    cost = sum((cost_usage(turn_usage, config.pricing) for turn_usage in usage), Decimal(0))
+    request = PairedReplayRequest(run_id, workload, config, interaction, arm, repeat_index)
+    response = client.respond(request)
     artifact_path = _artifact_path(
         config.artifact_root, run_id, workload.candidate.candidate_id, arm, repeat_index
     )
-    artifact_sha256 = _write_response_artifact(artifact_path, request, response, usage)
+    normalized_usage: list[BillableResponseUsage] = []
+    try:
+        for turn in response.turns:
+            normalized_usage.append(normalize_usage(turn.native_usage, config.usage_mapping))
+    except PairedReplayConfigError as error:
+        partial_usage = tuple(
+            [
+                *normalized_usage,
+                *(None for _ in response.turns[len(normalized_usage) :]),
+            ]
+        )
+        _write_response_artifact(
+            artifact_path,
+            request,
+            response,
+            partial_usage,
+            accounting_error=str(error),
+        )
+        message = (
+            "provider response usage cannot be priced; "
+            f"retained private response artifact {artifact_path}"
+        )
+        raise PairedReplayError(message) from error
+    billable_usage = tuple(normalized_usage)
+    cost = sum(
+        (cost_usage(turn_usage, config.pricing) for turn_usage in billable_usage),
+        Decimal(0),
+    )
+    artifact_sha256 = _write_response_artifact(artifact_path, request, response, billable_usage)
+    if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
+        raise PairedReplayError("raw arm must not contain induced turns")
     environment_digest = workload.environment.environment_digest
     if environment_digest is None:
         raise PairedReplayAdmissionError("admitted workload lacks environment digest")
@@ -522,6 +583,8 @@ def _run_arm(
         workload.manifest_digest,
         workload.eligibility_ledger_digest,
         workload.environment_ledger_digest,
+        interaction.receipt.digest,
+        request.condition_digest,
         workload.candidate.candidate_id,
         workload.candidate.source_sha256,
         environment_digest,
@@ -533,7 +596,7 @@ def _run_arm(
     return PairedArmReceipt(
         provenance,
         artifact_path,
-        usage,
+        billable_usage,
         cost,
         _account_turns(response),
     )
@@ -552,32 +615,24 @@ def _write_response_artifact(
     path: Path,
     request: PairedReplayRequest,
     response: PairedReplayResponse,
-    usage: tuple[BillableResponseUsage, ...],
+    usage: tuple[BillableResponseUsage | None, ...] | None,
+    accounting_error: str | None = None,
 ) -> str:
     _ensure_private_directory(path.parent, root=request.config.artifact_root)
     document: dict[str, JsonValue] = {
         "arm": request.arm,
         "candidate_id": request.workload.candidate.candidate_id,
+        "condition_digest": request.condition_digest,
         "config_digest": request.config.digest,
         "repeat_index": request.repeat_index,
         "run_id": request.run_id,
         "settings_digest": request.settings_digest,
-        "turns": [
-            {
-                "classification": turn.classification,
-                "response": turn.response,
-                "unsupported_reason": turn.unsupported_reason,
-                "usage": {
-                    "cache_read_tokens": normalized.cache_read_tokens,
-                    "cache_write_tokens": normalized.cache_write_tokens,
-                    "input_tokens": normalized.input_tokens,
-                    "output_tokens": normalized.output_tokens,
-                },
-            }
-            for turn, normalized in zip(response.turns, usage, strict=True)
-        ],
+        "interaction_receipt_digest": request.interaction.receipt.digest,
+        "turns": cast(JsonValue, _artifact_turns(response, usage)),
         "workload_digest": request.workload.digest,
     }
+    if accounting_error is not None:
+        document["usage_accounting_error"] = accounting_error
     try:
         encoded = json.dumps(
             document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
@@ -608,6 +663,34 @@ def _write_response_artifact(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _artifact_turns(
+    response: PairedReplayResponse,
+    usage: tuple[BillableResponseUsage | None, ...] | None,
+) -> list[dict[str, JsonValue]]:
+    if usage is None:
+        usage = tuple(None for _ in response.turns)
+    if len(usage) != len(response.turns):
+        raise PairedReplayError("response artifact usage length does not match response turns")
+    return [
+        {
+            "classification": turn.classification,
+            "response": turn.response,
+            "unsupported_reason": turn.unsupported_reason,
+            "usage": (
+                None
+                if normalized is None
+                else {
+                    "cache_read_tokens": normalized.cache_read_tokens,
+                    "cache_write_tokens": normalized.cache_write_tokens,
+                    "input_tokens": normalized.input_tokens,
+                    "output_tokens": normalized.output_tokens,
+                }
+            ),
+        }
+        for turn, normalized in zip(response.turns, usage, strict=True)
+    ]
+
+
 def _account_turns(response: PairedReplayResponse) -> PairedTurnAccounting:
     return PairedTurnAccounting(
         completed_turn_count=sum(turn.classification == "completed" for turn in response.turns),
@@ -624,6 +707,18 @@ def _safe_path_component(value: str) -> str:
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise PairedReplayError("artifact path components must be non-empty simple names")
     return value
+
+
+def prepare_private_artifact_root(config: PairedReplayConfig) -> None:
+    """Validate the sealed root before source access or provider billing."""
+    epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
+    root = config.artifact_root
+    if not any(
+        root == approved_root or root.is_relative_to(approved_root)
+        for approved_root in epoch.approved_roots
+    ):
+        raise PairedReplayError("artifact root must be within sealed approved private roots")
+    _ensure_private_directory(root)
 
 
 def _ensure_private_directory(path: Path, *, root: Path | None = None) -> None:
@@ -655,8 +750,15 @@ def _ensure_private_directory(path: Path, *, root: Path | None = None) -> None:
         missing.append(ancestor)
         ancestor = ancestor.parent
     for directory in reversed(missing):
-        directory.mkdir(mode=0o700)
-        os.chmod(directory, 0o700)
+        try:
+            directory.mkdir(mode=0o700)
+            os.chmod(directory, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise PairedReplayError(
+                f"cannot create artifact directory {directory}: {error}"
+            ) from error
     _validate_private_directory(path)
 
 

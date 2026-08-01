@@ -11,15 +11,18 @@ from typing import Literal
 
 import pytest
 
+from laconic import cli
 from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
+from laconic.k1 import openrouter
 from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
 from laconic.k1.environment_ledger import (
     assess_environments,
     write_environment_ledger,
 )
 from laconic.k1.epoch import read_access_audit, read_epoch
-from laconic.k1.interaction import build_interaction_receipt
+from laconic.k1.interaction import InteractionReceiptError, build_interaction_receipt
 from laconic.k1.manifest import Candidate, Manifest, read_manifest, source_sha256, write_manifest
+from laconic.k1.openrouter import OpenRouterChatCompletionsClient
 from laconic.k1.paired_config import (
     InteractionReceiptBinding,
     PairedReplayConfig,
@@ -144,6 +147,11 @@ def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
                     }
                 ],
             },
+        },
+        {
+            "timestamp": "2026-07-30T21:00:03Z",
+            "type": "user",
+            "message": {"role": "user", "content": "Summarize the result."},
         },
     ]
     source.write_text(
@@ -329,6 +337,11 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "unsupported_policy",
         "usage_mapping",
     }
+    cache_semantics_changed = replace(
+        config,
+        usage_mapping=replace(config.usage_mapping, input_includes_cache=False),
+    )
+    assert cache_semantics_changed.digest != config.digest
     changed = replace(config, model="anthropic/claude-opus-4.6")
     assert changed.digest != config.digest
     assert changed.settings_digest != config.settings_digest
@@ -535,6 +548,8 @@ def test_paired_run_provenance_rejects_invalid_receipts() -> None:
         "manifest_digest": "a" * 64,
         "eligibility_ledger_digest": "a" * 64,
         "environment_ledger_digest": "a" * 64,
+        "interaction_receipt_digest": "a" * 64,
+        "condition_digest": "a" * 64,
         "candidate_id": "candidate-a",
         "source_sha256": "a" * 64,
         "environment_digest": "a" * 64,
@@ -560,6 +575,8 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         manifest_digest="a" * 64,
         eligibility_ledger_digest="a" * 64,
         environment_ledger_digest="a" * 64,
+        interaction_receipt_digest="a" * 64,
+        condition_digest="a" * 64,
         candidate_id="candidate-a",
         source_sha256="a" * 64,
         environment_digest="a" * 64,
@@ -574,10 +591,12 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         "candidate_id": "candidate-a",
         "config_digest": "a" * 64,
         "eligibility_ledger_digest": "a" * 64,
+        "condition_digest": "a" * 64,
         "environment_digest": "a" * 64,
         "environment_ledger_digest": "a" * 64,
         "manifest_digest": "a" * 64,
         "repeat_index": 1,
+        "interaction_receipt_digest": "a" * 64,
         "response_artifact_sha256": "b" * 64,
         "run_id": "run-1",
         "source_sha256": "a" * 64,
@@ -628,7 +647,7 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
     config, workload = _workload(tmp_path)
     client = _ReplayClient()
 
-    receipt = run_paired_replay(config, (workload,), client, run_id="run-1")
+    receipt = run_paired_replay(config, client, run_id="run-1")
 
     assert [request.arm for request in client.requests] == ["raw", "codec", "raw", "codec"]
     assert {request.settings_digest for request in client.requests} == {config.settings_digest}
@@ -636,6 +655,11 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
     assert len(receipt.pairs) == config.repeat_count
     for pair in receipt.pairs:
         assert pair.raw.provenance.config_digest == pair.codec.provenance.config_digest
+        assert (
+            pair.raw.provenance.interaction_receipt_digest
+            == pair.codec.provenance.interaction_receipt_digest
+        )
+        assert pair.raw.provenance.condition_digest != pair.codec.provenance.condition_digest
         assert pair.raw.artifact_path.stat().st_mode & 0o777 == 0o600
         assert pair.codec.artifact_path.stat().st_mode & 0o777 == 0o600
         assert '"fresh":true' in pair.raw.artifact_path.read_text(encoding="utf-8")
@@ -646,7 +670,7 @@ def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config, workload = _workload(tmp_path)
-    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    receipt = run_paired_replay(config, _ReplayClient(), run_id="run-report")
     epoch = read_epoch(config.epoch_path)
     report_path = config.epoch_path.parent / "paired-report.json"
     report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
@@ -706,7 +730,7 @@ def test_paired_report_reports_response_artifact_permission_failure(
     tmp_path: Path,
 ) -> None:
     config, workload = _workload(tmp_path)
-    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    receipt = run_paired_replay(config, _ReplayClient(), run_id="run-report")
     epoch = read_epoch(config.epoch_path)
     report_path = config.epoch_path.parent / "paired-report.json"
     report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
@@ -721,7 +745,7 @@ def test_paired_report_rejects_nonprivate_response_artifact_directory(
     tmp_path: Path,
 ) -> None:
     config, workload = _workload(tmp_path)
-    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    receipt = run_paired_replay(config, _ReplayClient(), run_id="run-report")
     epoch = read_epoch(config.epoch_path)
     report_path = config.epoch_path.parent / "paired-report.json"
     report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
@@ -734,7 +758,7 @@ def test_paired_report_rejects_nonprivate_response_artifact_directory(
 
 def test_paired_report_rejects_recomputed_tampered_aggregate(tmp_path: Path) -> None:
     config, workload = _workload(tmp_path)
-    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    receipt = run_paired_replay(config, _ReplayClient(), run_id="run-report")
     epoch = read_epoch(config.epoch_path)
     report_path = config.epoch_path.parent / "paired-report.json"
     report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
@@ -755,7 +779,7 @@ def test_paired_report_rejects_recomputed_tampered_aggregate(tmp_path: Path) -> 
 
 def test_paired_report_rejects_nonprivate_parent_directory(tmp_path: Path) -> None:
     config, workload = _workload(tmp_path)
-    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-report")
+    receipt = run_paired_replay(config, _ReplayClient(), run_id="run-report")
     epoch = read_epoch(config.epoch_path)
     report_path = config.epoch_path.parent / "paired-report.json"
     report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
@@ -774,7 +798,11 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
         if candidate.split == "holdout"
     )
     assert not holdout.source_path.exists()
-    receipt = run_paired_replay(config, (workload,), _ReplayClient(), run_id="run-m5-ready")
+    admissions_before = sum(
+        record.operation == "paired_admit"
+        for record in read_access_audit(read_epoch(config.epoch_path).audit_path).records
+    )
+    receipt = run_paired_replay(config, _ReplayClient(), run_id="run-m5-ready")
     epoch = read_epoch(config.epoch_path)
     report_path = config.epoch_path.parent / "m5-ready-report.json"
     report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
@@ -798,35 +826,414 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
     verified = verify_paired_report(report_path, config.epoch_path, config.manifest_path, config)
     audit = read_access_audit(epoch.audit_path)
     assert verified.strata[0].completed_pair_count == config.repeat_count
-    assert [(record.candidate_id, record.operation, record.split) for record in audit.records] == [
-        ("candidate-a", "eligibility_assess", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_assess", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_verify", "redesign"),
-        ("candidate-a", "interaction_build", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_verify", "redesign"),
-        ("candidate-a", "paired_admit", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "eligibility_verify", "redesign"),
-        ("candidate-a", "environment_verify", "redesign"),
-        ("candidate-a", "paired_admit", "redesign"),
+    audit_rows = [(record.candidate_id, record.operation, record.split) for record in audit.records]
+    assert all(
+        candidate_id == "candidate-a" and split == "redesign"
+        for candidate_id, _, split in audit_rows
+    )
+    assert (
+        sum(operation == "paired_admit" for _, operation, _ in audit_rows) == admissions_before + 1
+    )
+    assert [operation for _, operation, _ in audit_rows].count("interaction_render") == (
+        2 * config.repeat_count
+    )
+
+
+def test_paired_runner_rejects_nonprivate_artifact_root_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config, workload = _workload(tmp_path)
+    config.artifact_root.mkdir(mode=0o755)
+    config.artifact_root.chmod(0o755)
+    audit_path = read_epoch(config.epoch_path).audit_path
+    audit_before = read_access_audit(audit_path).head_digest
+
+    with pytest.raises(PairedReplayError, match="artifact directory must have mode 0700"):
+        run_paired_replay(config, _ReplayClient(), run_id="unsafe-root")
+
+    assert read_access_audit(audit_path).head_digest == audit_before
+
+
+def test_openrouter_client_rejects_missing_process_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    monkeypatch.delenv(config.credential_environment, raising=False)
+
+    with pytest.raises(PairedReplayError, match="credential environment"):
+        run_paired_replay(
+            config,
+            OpenRouterChatCompletionsClient(),
+            run_id="missing-credential",
+        )
+
+
+def test_replay_cli_rejects_missing_credential_before_audit_or_source_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _ = _workload(tmp_path)
+    monkeypatch.delenv(config.credential_environment, raising=False)
+    config_path = config.epoch_path.parent / "paired-config.json"
+    report_path = config.epoch_path.parent / "paired-report.json"
+    write_paired_config(config_path, config)
+    audit_path = read_epoch(config.epoch_path).audit_path
+    audit_before = read_access_audit(audit_path).head_digest
+
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "run",
+                "--config",
+                str(config_path),
+                "--run-id",
+                "missing-credential",
+                "--report",
+                str(report_path),
+            ]
+        )
+        == EXIT_K1_MANIFEST
+    )
+
+    assert read_access_audit(audit_path).head_digest == audit_before
+    assert not config.artifact_root.exists()
+
+
+def test_replay_cli_returns_manifest_exit_for_interaction_render_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, _ = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    config_path = config.epoch_path.parent / "paired-config.json"
+    write_paired_config(config_path, config)
+    monkeypatch.setattr(
+        cli,
+        "run_paired_replay",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            InteractionReceiptError("tampered receipt")
+        ),
+    )
+
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "run",
+                "--config",
+                str(config_path),
+                "--run-id",
+                "render-failure",
+            ]
+        )
+        == EXIT_K1_MANIFEST
+    )
+    assert "tampered receipt" in capsys.readouterr().err
+
+
+def test_replay_cli_writes_default_private_report_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _ = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    config_path = config.epoch_path.parent / "paired-config.json"
+    write_paired_config(config_path, config)
+    monkeypatch.setattr(cli, "OpenRouterChatCompletionsClient", _ReplayClient)
+
+    assert (
+        main(
+            [
+                "k1",
+                "replay",
+                "run",
+                "--config",
+                str(config_path),
+                "--run-id",
+                "default-report",
+            ]
+        )
+        == EXIT_OK
+    )
+    assert (config.artifact_root / "default-report" / "paired-report.json").is_file()
+
+
+def test_openrouter_client_replays_follow_up_prompt_after_tool_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    client = OpenRouterChatCompletionsClient()
+    messages: list[list[dict[str, object]]] = []
+
+    def post(
+        request: PairedReplayRequest,
+        credential: str,
+        request_messages: list[dict[str, object]],
+    ) -> dict[str, object]:
+        assert credential == "test-credential"
+        messages.append([message.copy() for message in request_messages])
+        usage = {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+        }
+        if len(request_messages) == 1:
+            return {
+                "model": request.config.model,
+                "usage": usage,
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "arguments": '{"path":"src/app.py"}',
+                                        "name": "Read",
+                                    },
+                                    "id": "tool-1",
+                                    "type": "function",
+                                }
+                            ],
+                        }
+                    }
+                ],
+            }
+        return {
+            "model": request.config.model,
+            "usage": usage,
+            "choices": [{"message": {"content": "Complete.", "role": "assistant"}}],
+        }
+
+    monkeypatch.setattr(client, "_post", post)
+
+    run_paired_replay(config, client, run_id="follow-up")
+
+    follow_up_messages = [
+        request_messages[-2:] for request_messages in messages if len(request_messages) == 4
     ]
+    assert len(follow_up_messages) == config.repeat_count * 2
+    assert all(
+        tool_message["role"] == "tool"
+        and tool_message["tool_call_id"] == "tool-1"
+        and isinstance(tool_message["content"], str)
+        and user_message == {"role": "user", "content": "Summarize the result."}
+        for tool_message, user_message in follow_up_messages
+    )
+
+
+def test_openrouter_client_posts_pinned_route_and_projects_native_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    captured_requests: list[object] = []
+    response_document = json.dumps(
+        {
+            "choices": [{"message": {"content": "Complete.", "role": "assistant"}}],
+            "model": config.model,
+            "usage": {
+                "completion_tokens": 1,
+                "prompt_tokens": 1,
+                "prompt_tokens_details": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                },
+            },
+        }
+    ).encode()
+
+    class ProviderResponse:
+        def __enter__(self) -> ProviderResponse:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return response_document
+
+    class RecordingOpener:
+        def open(self, request: object, *, timeout: int) -> ProviderResponse:
+            assert timeout == 30
+            captured_requests.append(request)
+            return ProviderResponse()
+
+    opener = RecordingOpener()
+    monkeypatch.setattr(openrouter, "build_opener", lambda *_: opener)
+
+    receipt = run_paired_replay(
+        config,
+        OpenRouterChatCompletionsClient(),
+        run_id="openrouter-payload",
+    )
+
+    assert len(captured_requests) == config.repeat_count * 2
+    request = captured_requests[0]
+    assert isinstance(request, openrouter.Request)
+    assert request.full_url == config.endpoint
+    assert request.get_header("Authorization") == "Bearer test-credential"
+    assert json.loads(request.data) == {
+        "max_tokens": 4096,
+        "messages": [{"role": "user", "content": "Inspect."}],
+        "model": config.model,
+        "provider": {
+            "allow_fallbacks": False,
+            "only": ["anthropic"],
+            "require_parameters": True,
+        },
+        "temperature": 0.0,
+        "tools": [
+            {
+                "function": {
+                    "description": "Replay-authorized native tool",
+                    "name": "Read",
+                    "parameters": {
+                        "additionalProperties": False,
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "type": "object",
+                    },
+                },
+                "type": "function",
+            }
+        ],
+        "top_p": 1.0,
+    }
+    assert receipt.total_cost_usd == Decimal("0.000024")
+
+
+def test_openrouter_client_retains_priced_turn_before_unpriceable_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    client = OpenRouterChatCompletionsClient()
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+    }
+    call_sizes: list[int] = []
+
+    def post(
+        _: PairedReplayRequest, __: str, messages: list[dict[str, object]]
+    ) -> dict[str, object]:
+        call_sizes.append(len(messages))
+        if len(messages) == 1:
+            return {
+                "model": config.model,
+                "usage": usage,
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "arguments": '{"path":"src/app.py"}',
+                                        "name": "Read",
+                                    },
+                                    "id": "tool-1",
+                                    "type": "function",
+                                }
+                            ],
+                        }
+                    }
+                ],
+            }
+        return {
+            "choices": [{"message": {"content": "Complete.", "role": "assistant"}}],
+            "model": config.model,
+            "usage": {},
+        }
+
+    monkeypatch.setattr(client, "_post", post)
+
+    with pytest.raises(PairedReplayError, match="retained private response artifact"):
+        run_paired_replay(config, client, run_id="unpriceable")
+    assert call_sizes == [1, 4]
+
+    artifact = config.artifact_root / "unpriceable" / "candidate-a" / "0000-raw.json"
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    assert document["turns"][0]["response"]["usage"] == usage
+    assert document["turns"][0]["usage"] == {
+        "cache_read_tokens": 20,
+        "cache_write_tokens": 10,
+        "input_tokens": 70,
+        "output_tokens": 50,
+    }
+    assert document["turns"][1]["usage"] is None
+    assert "usage_accounting_error" in document
 
 
 def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
-    config, workload = _workload(tmp_path)
-    config = replace(config, cost_cap_per_pair_usd="0.0001")
-    client = _ReplayClient()
+    config, _ = _workload(tmp_path)
+    client = _ReplayClient(input_tokens=250_000)
 
     with pytest.raises(PairedReplayCostCapError, match="past the"):
-        run_paired_replay(config, (workload,), client, run_id="run-over-cap")
+        run_paired_replay(config, client, run_id="run-over-cap")
 
     assert [request.arm for request in client.requests] == ["raw"]
     assert (config.artifact_root / "run-over-cap" / "candidate-a" / "0000-raw.json").is_file()
+
+
+def test_openrouter_client_retains_prior_billing_for_terminal_response_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _ = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    client = OpenRouterChatCompletionsClient()
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+    }
+
+    def post(
+        _: PairedReplayRequest, __: str, messages: list[dict[str, object]]
+    ) -> dict[str, object]:
+        if len(messages) == 1:
+            return {
+                "model": config.model,
+                "usage": usage,
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "arguments": '{"path":"src/app.py"}',
+                                        "name": "Read",
+                                    },
+                                    "id": "tool-1",
+                                    "type": "function",
+                                }
+                            ],
+                        }
+                    }
+                ],
+            }
+        return {
+            "choices": [{"message": {"content": None, "role": "assistant"}}],
+            "model": config.model,
+            "usage": usage,
+        }
+
+    monkeypatch.setattr(client, "_post", post)
+
+    receipt = run_paired_replay(config, client, run_id="terminal-response-error")
+
+    artifact = config.artifact_root / "terminal-response-error" / "candidate-a" / "0000-raw.json"
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    assert document["turns"][0]["usage"]["input_tokens"] == 70
+    assert document["turns"][1]["classification"] == "unsupported"
+    assert len(receipt.terminated_pairs) == config.repeat_count
 
 
 def test_paired_runner_accounts_for_induced_codec_turns(tmp_path: Path) -> None:
@@ -836,7 +1243,7 @@ def test_paired_runner_accounts_for_induced_codec_turns(tmp_path: Path) -> None:
         (_turn(), _turn("induced")),
     )
 
-    receipt = run_paired_replay(config, (workload,), client, run_id="run-induced")
+    receipt = run_paired_replay(config, client, run_id="run-induced")
 
     assert all(
         pair.raw.turn_accounting.completed_turn_count == 1
@@ -860,7 +1267,7 @@ def test_unsupported_turn_terminates_only_its_pair_and_preserves_artifacts(
         (_turn(),),
     )
 
-    receipt = run_paired_replay(config, (workload,), client, run_id="run-unsupported")
+    receipt = run_paired_replay(config, client, run_id="run-unsupported")
 
     assert [request.arm for request in client.requests] == ["raw", "raw"]
     assert receipt.pairs == ()
@@ -882,7 +1289,7 @@ def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(
     config, workload = _workload(tmp_path)
     client = _OutcomeClient((_turn("induced"),), (_turn(),))
     with pytest.raises(PairedReplayError, match="raw arm must not"):
-        run_paired_replay(config, (workload,), client, run_id="run-invalid")
+        run_paired_replay(config, client, run_id="run-invalid")
     assert [request.arm for request in client.requests] == ["raw"]
 
 
@@ -908,25 +1315,38 @@ def test_paired_config_cli_and_artifact_root_hygiene(
     bad_root.artifact_root.chmod(0o755)
     client = _ReplayClient()
     with pytest.raises(PairedReplayError, match="mode 0700"):
-        run_paired_replay(bad_root, (workload,), client, run_id="run-private")
+        run_paired_replay(bad_root, client, run_id="run-private")
     assert client.requests == []
 
 
 def test_runner_rejects_unsafe_or_symlinked_artifact_paths_before_request(
     tmp_path: Path,
 ) -> None:
-    config, workload = _workload(tmp_path)
+    config, _ = _workload(tmp_path)
     client = _ReplayClient()
 
     with pytest.raises(PairedReplayError, match="simple names"):
-        run_paired_replay(config, (workload,), client, run_id="../escape")
+        run_paired_replay(config, client, run_id="../escape")
     assert client.requests == []
 
     target = tmp_path / "private" / "outside"
     target.mkdir(mode=0o700)
     (config.artifact_root / "run-link").symlink_to(target, target_is_directory=True)
     with pytest.raises(PairedReplayError, match="non-symlink directory"):
-        run_paired_replay(config, (workload,), client, run_id="run-link")
+        run_paired_replay(config, client, run_id="run-link")
+    assert client.requests == []
+
+
+def test_paired_runner_rejects_artifact_root_outside_sealed_epoch(
+    tmp_path: Path,
+) -> None:
+    config, _ = _workload(tmp_path)
+    outside = replace(config, artifact_root=tmp_path / "outside-private-root")
+    client = _ReplayClient()
+
+    with pytest.raises(PairedReplayError, match="sealed approved private roots"):
+        run_paired_replay(outside, client, run_id="outside-root")
+
     assert client.requests == []
 
 
