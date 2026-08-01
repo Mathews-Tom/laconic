@@ -33,7 +33,11 @@ from laconic.k1.environment_ledger import (
 from laconic.k1.epoch import EpochError, create_epoch, verify_epoch
 from laconic.k1.interaction import InteractionReceiptError, verify_interaction_receipt
 from laconic.k1.manifest import ManifestError, verify_manifest
-from laconic.k1.paired_config import PairedReplayConfigError, read_paired_config
+from laconic.k1.paired_config import (
+    PairedReplayConfigError,
+    read_paired_config,
+    verify_execution_config,
+)
 from laconic.k1.paired_report import PairedReportError, verify_paired_report
 from laconic.k1.searchat_export import produce_manifest
 from laconic.k1.split import SplitPolicy
@@ -1201,6 +1205,7 @@ def _k1_interaction_verify(args: argparse.Namespace) -> int:
 def _k1_replay_verify_config(args: argparse.Namespace) -> int:
     try:
         config = read_paired_config(args.config)
+        verify_execution_config(config)
     except PairedReplayConfigError as error:
         print(f"laconic k1 replay verify-config: {error}", file=sys.stderr)
         return EXIT_K1_MANIFEST
