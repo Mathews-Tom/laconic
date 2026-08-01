@@ -10,12 +10,34 @@ import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from laconic.k1.eligibility import EligibilityLedger, EligibilityLedgerError, verify_eligibility
 from laconic.k1.environment import SnapshotToolResolver
-from laconic.k1.evidence import JsonValue, NativeSession, ToolCall, ToolResult
-from laconic.k1.manifest import is_sha256
+from laconic.k1.environment_ledger import (
+    EnvironmentLedger,
+    EnvironmentLedgerError,
+    EnvironmentRecord,
+    verify_environment,
+)
+from laconic.k1.epoch import (
+    EpochError,
+    read_access_audit,
+    record_redesign_access,
+    verify_epoch_manifest,
+)
+from laconic.k1.evidence import (
+    JsonValue,
+    NativeEvidenceError,
+    NativeSession,
+    ToolCall,
+    ToolResult,
+    validate_confirmatory_evidence,
+)
+from laconic.k1.extractors import extract_native
+from laconic.k1.manifest import Candidate, Manifest, is_sha256
 
 INTERACTION_RECEIPT_SCHEMA_VERSION = 1
 
@@ -372,6 +394,109 @@ class InteractionActionResolver:
         return InteractionActionResolution(disposition, resolution.output, resolution.reason)
 
 
+def build_interaction_receipt(
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+    candidate_id: str,
+    receipt_path: Path,
+) -> InteractionReceipt:
+    """Build a private receipt only after redesign M2 and M3 revalidation."""
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        eligibility = verify_eligibility(epoch_path, manifest_path, eligibility_ledger_path)
+        environment = verify_environment(
+            epoch_path, manifest_path, eligibility_ledger_path, environment_ledger_path
+        )
+    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
+        raise InteractionReceiptError(str(error)) from error
+    candidate = _redesign_candidate(manifest, candidate_id)
+    _require_admitted_candidate(candidate_id, candidate.source_sha256, eligibility, environment)
+    try:
+        record_redesign_access(
+            epoch_path,
+            manifest_path,
+            candidate_id,
+            "interaction_build",
+            timestamp=_audit_timestamp(),
+        )
+        session = extract_native(candidate)
+        validate_confirmatory_evidence(candidate, session)
+        audit = read_access_audit(epoch.audit_path)
+    except (EpochError, NativeEvidenceError, OSError) as error:
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: cannot derive executable interaction"
+        ) from error
+    record = _environment_record(environment.records, candidate_id)
+    if record.mode is None or record.environment_digest is None:
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: environment receipt is incomplete"
+        )
+    receipt = derive_interaction_receipt(
+        session,
+        epoch_digest=epoch.digest,
+        manifest_digest=manifest.digest,
+        eligibility_ledger_digest=eligibility.digest,
+        environment_ledger_digest=environment.digest,
+        audit_head_digest=audit.head_digest,
+        environment_digest=record.environment_digest,
+        environment_mode=record.mode,
+    )
+    write_interaction_receipt(receipt_path, receipt)
+    return receipt
+
+
+def verify_interaction_receipt(
+    receipt_path: Path,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+) -> InteractionReceipt:
+    """Revalidate every binding before allowing a receipt into M4E."""
+    receipt = read_interaction_receipt(receipt_path)
+    try:
+        epoch, manifest = verify_epoch_manifest(epoch_path, manifest_path)
+        eligibility = verify_eligibility(epoch_path, manifest_path, eligibility_ledger_path)
+        environment = verify_environment(
+            epoch_path, manifest_path, eligibility_ledger_path, environment_ledger_path
+        )
+    except (EligibilityLedgerError, EnvironmentLedgerError, EpochError) as error:
+        raise InteractionReceiptError(str(error)) from error
+    candidate = _redesign_candidate(manifest, receipt.candidate_id)
+    _require_admitted_candidate(
+        receipt.candidate_id, candidate.source_sha256, eligibility, environment
+    )
+    record = _environment_record(environment.records, receipt.candidate_id)
+    if (
+        receipt.epoch_digest != epoch.digest
+        or receipt.manifest_digest != manifest.digest
+        or receipt.eligibility_ledger_digest != eligibility.digest
+        or receipt.environment_ledger_digest != environment.digest
+        or receipt.environment_digest != record.environment_digest
+        or receipt.environment_mode != record.mode
+    ):
+        raise InteractionReceiptError("interaction receipt admission binding does not match")
+    _verify_receipt_audit_head(epoch.digest, epoch.audit_path, receipt)
+    try:
+        record_redesign_access(
+            epoch_path,
+            manifest_path,
+            receipt.candidate_id,
+            "interaction_verify",
+            timestamp=_audit_timestamp(),
+        )
+        session = extract_native(candidate)
+        validate_confirmatory_evidence(candidate, session)
+    except (EpochError, NativeEvidenceError, OSError) as error:
+        raise InteractionReceiptError(
+            f"candidate {receipt.candidate_id}: cannot revalidate executable interaction"
+        ) from error
+    _verify_session_matches_receipt(receipt, session)
+    return receipt
+
+
 def schema_for_json(value: JsonValue, depth: int = 0) -> dict[str, JsonValue]:
     """Return a closed JSON Schema document for one native JSON value shape."""
     if depth > 32:
@@ -521,6 +646,76 @@ def _event_from_document(index: int, payload: object) -> InteractionEvent:
         schema,
         cast(ActionAuthority | None, _optional_text(payload, "authority")),
     )
+
+
+def _redesign_candidate(manifest: Manifest, candidate_id: str) -> Candidate:
+    for candidate in manifest.candidates:
+        if candidate.candidate_id == candidate_id:
+            if candidate.split != "redesign":
+                raise InteractionReceiptError(
+                    f"candidate {candidate_id!r} is sealed holdout and cannot enter M3E"
+                )
+            return candidate
+    raise InteractionReceiptError(f"candidate {candidate_id!r} is absent from sealed manifest")
+
+
+def _require_admitted_candidate(
+    candidate_id: str,
+    source_sha256: str,
+    eligibility: EligibilityLedger,
+    environment: EnvironmentLedger,
+) -> None:
+    eligibility_record = next(
+        (record for record in eligibility.records if record.candidate_id == candidate_id), None
+    )
+    if eligibility_record is None or eligibility_record.disposition != "confirmatory":
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: eligibility ledger does not admit confirmatory replay"
+        )
+    if eligibility_record.source_sha256 != source_sha256:
+        raise InteractionReceiptError(f"candidate {candidate_id}: eligibility source hash mismatch")
+    record = _environment_record(environment.records, candidate_id)
+    if (
+        record.source_sha256 != source_sha256
+        or record.status != "valid"
+        or record.mode is None
+        or record.environment_digest is None
+    ):
+        raise InteractionReceiptError(
+            f"candidate {candidate_id}: environment ledger does not admit executable replay"
+        )
+
+
+def _environment_record(
+    records: tuple[EnvironmentRecord, ...], candidate_id: str
+) -> EnvironmentRecord:
+    for record in records:
+        if record.candidate_id == candidate_id:
+            return record
+    raise InteractionReceiptError(f"candidate {candidate_id}: environment record is absent")
+
+
+def _verify_receipt_audit_head(
+    epoch_digest: str, audit_path: Path, receipt: InteractionReceipt
+) -> None:
+    try:
+        audit = read_access_audit(audit_path)
+    except EpochError as error:
+        raise InteractionReceiptError(str(error)) from error
+    if audit.epoch_digest != epoch_digest:
+        raise InteractionReceiptError("interaction receipt audit belongs to another epoch")
+    for record in audit.records:
+        if (
+            record.digest == receipt.audit_head_digest
+            and record.candidate_id == receipt.candidate_id
+            and record.operation == "interaction_build"
+        ):
+            return
+    raise InteractionReceiptError("interaction receipt audit head has no build authorization")
+
+
+def _audit_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _authority_for(

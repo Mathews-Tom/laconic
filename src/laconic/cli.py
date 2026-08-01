@@ -31,6 +31,7 @@ from laconic.k1.environment_ledger import (
     write_environment_ledger,
 )
 from laconic.k1.epoch import EpochError, create_epoch, verify_epoch
+from laconic.k1.interaction import InteractionReceiptError, verify_interaction_receipt
 from laconic.k1.manifest import ManifestError, verify_manifest
 from laconic.k1.paired_config import PairedReplayConfigError, read_paired_config
 from laconic.k1.paired_report import PairedReportError, verify_paired_report
@@ -424,6 +425,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
     )
     k1_epoch_verify.set_defaults(handler=_k1_epoch_verify)
+
+    k1_interaction = k1_subcommands.add_parser(
+        "interaction",
+        help="verify a private M3E chronological interaction receipt",
+    )
+    k1_interaction_subcommands = k1_interaction.add_subparsers(dest="k1_interaction_command")
+    k1_interaction_verify = k1_interaction_subcommands.add_parser(
+        "verify",
+        help="verify receipt chronology, M2/M3 bindings, and redesign-only audit provenance",
+    )
+    k1_interaction_verify.add_argument(
+        "--receipt", type=Path, required=True, metavar="FILE", help="private interaction receipt"
+    )
+    k1_interaction_verify.add_argument(
+        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
+    )
+    k1_interaction_verify.add_argument(
+        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
+    )
+    k1_interaction_verify.add_argument(
+        "--eligibility-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private M2 eligibility ledger",
+    )
+    k1_interaction_verify.add_argument(
+        "--environment-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private M3 environment ledger",
+    )
+    k1_interaction_verify.add_argument(
+        "--split",
+        choices=["redesign"],
+        required=True,
+        help="receipt split; only redesign is admitted before M6",
+    )
+    k1_interaction_verify.set_defaults(handler=_k1_interaction_verify)
 
     k1_replay = k1_subcommands.add_parser(
         "replay",
@@ -1134,6 +1175,25 @@ def _k1_environment_verify(args: argparse.Namespace) -> int:
         f"verified K1 environment ledger {args.ledger}: {len(ledger.records)} candidate(s), "
         f"valid={counts['valid']}, unsupported={counts['unsupported']}, "
         f"unavailable={counts['unavailable']}"
+    )
+    return EXIT_OK
+
+
+def _k1_interaction_verify(args: argparse.Namespace) -> int:
+    try:
+        receipt = verify_interaction_receipt(
+            args.receipt,
+            args.epoch,
+            args.manifest,
+            args.eligibility_ledger,
+            args.environment_ledger,
+        )
+    except InteractionReceiptError as error:
+        print(f"laconic k1 interaction verify: {error}", file=sys.stderr)
+        return EXIT_K1_MANIFEST
+    print(
+        f"verified K1 interaction receipt {args.receipt}: "
+        f"candidate={receipt.candidate_id}, digest {receipt.digest}"
     )
     return EXIT_OK
 
