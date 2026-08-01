@@ -20,11 +20,14 @@ from urllib.parse import urlsplit
 from laconic.k1.evidence import JsonScalar
 from laconic.k1.manifest import is_sha256
 
-PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 1
+PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 2
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
 
 Arm = Literal["raw", "codec"]
 Split = Literal["redesign", "holdout"]
-PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 2
 
 
 class PairedReplayConfigError(ValueError):
@@ -125,15 +128,19 @@ class PairedReplayConfig:
     induced_policy: Literal["include_in_codec_cost"]
 
     def __post_init__(self) -> None:
-        for field_name, value in (
-            ("provider", self.provider),
-            ("endpoint", self.endpoint),
-            ("privacy_boundary", self.privacy_boundary),
-            ("model", self.model),
-        ):
-            if not value.strip():
-                raise PairedReplayConfigError(f"{field_name} must not be empty")
         _validate_endpoint(self.endpoint)
+        if self.provider != ANTHROPIC_PROVIDER:
+            raise PairedReplayConfigError(
+                f"provider must be the approved {ANTHROPIC_PROVIDER!r} provider"
+            )
+        if self.endpoint != ANTHROPIC_ENDPOINT:
+            raise PairedReplayConfigError(
+                f"endpoint must be the approved {ANTHROPIC_ENDPOINT!r} endpoint"
+            )
+        if self.model != ANTHROPIC_MODEL:
+            raise PairedReplayConfigError(f"model must be the approved {ANTHROPIC_MODEL!r} model")
+        if not self.privacy_boundary.strip():
+            raise PairedReplayConfigError("privacy_boundary must not be empty")
         for field_name, path in (
             ("epoch_path", self.epoch_path),
             ("manifest_path", self.manifest_path),
@@ -234,6 +241,7 @@ class PairedRunProvenance:
     arm: Arm
     repeat_index: int
     response_artifact_sha256: str
+    condition_digest: str
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -244,6 +252,7 @@ class PairedRunProvenance:
             ("source_sha256", self.source_sha256),
             ("environment_digest", self.environment_digest),
             ("response_artifact_sha256", self.response_artifact_sha256),
+            ("condition_digest", self.condition_digest),
         ):
             if not is_sha256(value):
                 raise PairedReplayConfigError(f"{field_name} must be 64 lowercase hex")
@@ -265,6 +274,7 @@ class PairedRunProvenance:
             "environment_ledger_digest": self.environment_ledger_digest,
             "manifest_digest": self.manifest_digest,
             "repeat_index": self.repeat_index,
+            "condition_digest": self.condition_digest,
             "response_artifact_sha256": self.response_artifact_sha256,
             "run_id": self.run_id,
             "source_sha256": self.source_sha256,

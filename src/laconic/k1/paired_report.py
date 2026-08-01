@@ -451,7 +451,9 @@ def _verify_receipt_document(
     receipt_digest = receipt.get("digest")
     if not isinstance(receipt_digest, str) or not is_sha256(receipt_digest):
         raise PairedReportError("paired receipt digest must be 64 lowercase hex")
-    if receipt.get("schema_version") != 1:
+    if receipt.get("schema_version") == 1:
+        raise PairedReportError("paired receipt schema 1 predates condition binding")
+    if receipt.get("schema_version") != 2:
         raise PairedReportError("paired receipt schema_version is unsupported")
     if receipt.get("epoch_digest") != report.epoch_digest:
         raise PairedReportError("paired receipt epoch_digest does not match report")
@@ -480,7 +482,14 @@ def _verify_receipt_document(
         environment_digests.add(_required_digest(provenance, "environment_ledger_digest"))
         artifact_path = _required_text(arm, "artifact_path")
         artifact_digest = _required_digest(provenance, "response_artifact_sha256")
-        _verify_response_artifact(Path(artifact_path), config.artifact_root, artifact_digest)
+        condition_digest = _required_digest(provenance, "condition_digest")
+        _verify_response_artifact(
+            Path(artifact_path),
+            config.artifact_root,
+            artifact_digest,
+            condition_digest,
+            candidate.source_sha256,
+        )
     if eligibility_digests != {report.eligibility_ledger_digest}:
         raise PairedReportError("paired receipt eligibility ledger digest does not match report")
     if environment_digests != {report.environment_ledger_digest}:
@@ -530,6 +539,7 @@ def _validate_receipt_arm(arm: dict[str, object]) -> None:
     if set(provenance) != {
         "arm",
         "candidate_id",
+        "condition_digest",
         "config_digest",
         "eligibility_ledger_digest",
         "environment_digest",
@@ -544,6 +554,7 @@ def _validate_receipt_arm(arm: dict[str, object]) -> None:
     if _required_text(provenance, "arm") not in {"raw", "codec"}:
         raise PairedReportError("paired receipt provenance arm is invalid")
     for field_name in (
+        "condition_digest",
         "config_digest",
         "eligibility_ledger_digest",
         "environment_digest",
@@ -581,7 +592,13 @@ def _validate_receipt_arm(arm: dict[str, object]) -> None:
             _required_count(usage_entry, field_name)
 
 
-def _verify_response_artifact(path: Path, root: Path, expected_digest: str) -> None:
+def _verify_response_artifact(
+    path: Path,
+    root: Path,
+    expected_digest: str,
+    expected_condition_digest: str,
+    expected_source_sha256: str,
+) -> None:
     try:
         resolved_path = path.resolve(strict=True)
         resolved_root = root.resolve(strict=True)
@@ -599,11 +616,28 @@ def _verify_response_artifact(path: Path, root: Path, expected_digest: str) -> N
     if mode != 0o600:
         raise PairedReportError(f"response artifact must have mode 0600, found {mode:04o}")
     try:
-        actual_digest = hashlib.sha256(resolved_path.read_bytes()).hexdigest()
+        encoded = resolved_path.read_bytes()
+        actual_digest = hashlib.sha256(encoded).hexdigest()
     except OSError as error:
         raise PairedReportError(f"cannot verify response artifact {path}: {error}") from error
     if not hmac.compare_digest(expected_digest, actual_digest):
         raise PairedReportError("response artifact digest mismatch")
+    try:
+        document = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PairedReportError(f"cannot verify response artifact {path}: {error}") from error
+    if not isinstance(document, dict):
+        raise PairedReportError("response artifact must be an object")
+    condition = document.get("condition")
+    condition_digest = document.get("condition_digest")
+    if not isinstance(condition, dict) or not isinstance(condition_digest, str):
+        raise PairedReportError("response artifact lacks a condition payload")
+    if not hmac.compare_digest(condition_digest, expected_condition_digest):
+        raise PairedReportError("response artifact condition digest does not match receipt")
+    if not hmac.compare_digest(_digest(condition), expected_condition_digest):
+        raise PairedReportError("response artifact condition payload digest mismatch")
+    if condition.get("source_sha256") != expected_source_sha256:
+        raise PairedReportError("response artifact condition source hash does not match receipt")
 
 
 def _stratum_from_document(raw: object) -> StratumPairedReport:

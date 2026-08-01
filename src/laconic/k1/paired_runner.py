@@ -14,6 +14,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol
 
+from laconic.k1.conditions import (
+    ObservationCondition,
+    ObservationConditionError,
+    build_observation_condition,
+)
 from laconic.k1.eligibility import EligibilityLedgerError, verify_eligibility
 from laconic.k1.environment_ledger import (
     EnvironmentLedgerError,
@@ -95,6 +100,7 @@ class PairedReplayRequest:
     run_id: str
     workload: PairedWorkload
     config: PairedReplayConfig
+    condition: ObservationCondition
     arm: Arm
     repeat_index: int
 
@@ -103,12 +109,35 @@ class PairedReplayRequest:
             raise PairedReplayError("run_id must not be empty")
         if self.arm not in {"raw", "codec"}:
             raise PairedReplayError(f"unknown replay arm {self.arm!r}")
-        if not 0 <= self.repeat_index < self.config.repeat_count:
-            raise PairedReplayError("repeat_index is outside configured repeat_count")
+        if self.condition.arm != self.arm:
+            raise PairedReplayError("request condition arm does not match request arm")
+        if self.condition.candidate_id != self.workload.candidate.candidate_id:
+            raise PairedReplayError("request condition candidate does not match workload")
+        if self.condition.source_sha256 != self.workload.candidate.source_sha256:
+            raise PairedReplayError("request condition source hash does not match workload")
+        if self.condition.user_prompts != self.workload.user_prompts:
+            raise PairedReplayError("request condition prompts do not match workload")
         if self.workload.candidate.candidate_id not in self.config.candidate_ids:
             raise PairedReplayError("request workload is not declared in configuration")
         if self.workload.candidate.split != self.config.split:
             raise PairedReplayError("request workload split does not match configuration")
+        if not 0 <= self.repeat_index < self.config.repeat_count:
+            raise PairedReplayError("repeat_index is outside configured repeat_count")
+
+    @property
+    def condition_digest(self) -> str:
+        """Return the digest binding the arm-specific observation condition."""
+        return self.condition.digest
+
+    @property
+    def user_prompts(self) -> tuple[str, ...]:
+        """Return the frozen native prompts for this arm."""
+        return self.condition.user_prompts
+
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        """Return tool names in their recorded order."""
+        return tuple(observation.name for observation in self.condition.observations)
 
     @property
     def settings_digest(self) -> str:
@@ -144,10 +173,18 @@ class PairedReplayResponse:
     """The complete contemporaneous outcome of one arm request."""
 
     turns: tuple[PairedResponseTurn, ...]
+    condition_digest: str
+    resolved_tool_call_count: int
 
     def __post_init__(self) -> None:
         if not self.turns:
             raise PairedReplayError("paired replay response must contain at least one turn")
+        if not is_sha256(self.condition_digest):
+            raise PairedReplayError(
+                "paired replay response condition_digest must be 64 lowercase hex"
+            )
+        if self.resolved_tool_call_count < 0:
+            raise PairedReplayError("resolved_tool_call_count must be non-negative")
         unsupported = [
             index for index, turn in enumerate(self.turns) if turn.classification == "unsupported"
         ]
@@ -319,7 +356,7 @@ class PairedRunReceipt:
             "config_digest": self.config_digest,
             "epoch_digest": self.epoch_digest,
             "pairs": [pair.to_payload() for pair in self.pairs],
-            "schema_version": 1,
+            "schema_version": 2,
             "terminated_pairs": [pair.to_payload() for pair in self.terminated_pairs],
             "total_cost_usd": str(self.total_cost_usd),
         }
@@ -443,12 +480,21 @@ def run_paired_replay(
             config.artifact_root / run_id / candidate_id,
             root=config.artifact_root,
         )
+    conditions = _prepare_conditions(config, workloads)
     total_cost = Decimal(0)
     pairs: list[PairedPairReceipt] = []
     terminated_pairs: list[PairedTerminatedPairReceipt] = []
     for workload in workloads:
         for repeat_index in range(config.repeat_count):
-            raw = _run_arm(config, workload, client, run_id, "raw", repeat_index)
+            raw = _run_arm(
+                config,
+                workload,
+                conditions[(workload.candidate.candidate_id, "raw")],
+                client,
+                run_id,
+                "raw",
+                repeat_index,
+            )
             if raw.cost_usd > Decimal(config.cost_cap_per_pair_usd):
                 raise PairedReplayCostCapError(
                     f"raw arm for {workload.candidate.candidate_id!r} spent ${raw.cost_usd}, "
@@ -465,7 +511,15 @@ def run_paired_replay(
                 terminated_pairs.append(PairedTerminatedPairReceipt(raw, None))
                 total_cost += raw.cost_usd
                 continue
-            codec = _run_arm(config, workload, client, run_id, "codec", repeat_index)
+            codec = _run_arm(
+                config,
+                workload,
+                conditions[(workload.candidate.candidate_id, "codec")],
+                client,
+                run_id,
+                "codec",
+                repeat_index,
+            )
             pair = PairedPairReceipt(raw, codec)
             if pair.cost_usd > Decimal(config.cost_cap_per_pair_usd):
                 raise PairedReplayCostCapError(
@@ -494,18 +548,74 @@ def run_paired_replay(
     )
 
 
+def _prepare_conditions(
+    config: PairedReplayConfig, workloads: Sequence[PairedWorkload]
+) -> dict[tuple[str, Arm], ObservationCondition]:
+    conditions: dict[tuple[str, Arm], ObservationCondition] = {}
+    with tempfile.TemporaryDirectory(prefix=".laconic-k1-conditions-") as temporary_directory:
+        root = Path(temporary_directory)
+        for workload in workloads:
+            try:
+                record_redesign_access(
+                    config.epoch_path,
+                    config.manifest_path,
+                    workload.candidate.candidate_id,
+                    "paired_condition_build",
+                    timestamp=_audit_timestamp(),
+                )
+                session = extract_native(workload.candidate)
+                prompts = tuple(
+                    event.text
+                    for event in session.events
+                    if event.kind == "user_prompt" and event.text is not None
+                )
+                if prompts != workload.user_prompts:
+                    raise ObservationConditionError(
+                        "condition prompts do not match admitted workload"
+                    )
+                for arm in ("raw", "codec"):
+                    condition = build_observation_condition(
+                        session,
+                        arm,
+                        ledger_path=root / f"{workload.candidate.candidate_id}-{arm}.sqlite",
+                        ledger_session_id=f"{workload.candidate.candidate_id}-{arm}",
+                    )
+                    if condition.source_sha256 != workload.candidate.source_sha256:
+                        raise ObservationConditionError(
+                            "condition source hash does not match admitted workload"
+                        )
+                    conditions[(workload.candidate.candidate_id, arm)] = condition
+            except (EpochError, NativeEvidenceError, ObservationConditionError, OSError) as error:
+                raise PairedReplayAdmissionError(
+                    "candidate "
+                    f"{workload.candidate.candidate_id!r} cannot form replay conditions: {error}"
+                ) from error
+    return conditions
+
+
 def _run_arm(
     config: PairedReplayConfig,
     workload: PairedWorkload,
+    condition: ObservationCondition,
     client: PairedReplayClient,
     run_id: str,
     arm: Arm,
     repeat_index: int,
 ) -> PairedArmReceipt:
-    request = PairedReplayRequest(run_id, workload, config, arm, repeat_index)
+    if condition.arm != arm or condition.candidate_id != workload.candidate.candidate_id:
+        raise PairedReplayError("arm condition does not match admitted workload")
+    request = PairedReplayRequest(run_id, workload, config, condition, arm, repeat_index)
     response = client.respond(request)
+    if response.condition_digest != condition.digest:
+        raise PairedReplayError("provider response condition digest does not match request")
+    unsupported = any(turn.classification == "unsupported" for turn in response.turns)
     if arm == "raw" and any(turn.classification == "induced" for turn in response.turns):
         raise PairedReplayError("raw arm must not contain induced turns")
+    if unsupported:
+        if response.resolved_tool_call_count > len(condition.observations):
+            raise PairedReplayError("unsupported response resolved too many condition tool calls")
+    elif response.resolved_tool_call_count != len(condition.observations):
+        raise PairedReplayError("provider response did not resolve every condition tool call")
     usage = tuple(
         normalize_usage(turn.native_usage, config.usage_mapping) for turn in response.turns
     )
@@ -513,7 +623,7 @@ def _run_arm(
     artifact_path = _artifact_path(
         config.artifact_root, run_id, workload.candidate.candidate_id, arm, repeat_index
     )
-    artifact_sha256 = _write_response_artifact(artifact_path, request, response, usage)
+    artifact_sha256 = _write_response_artifact(artifact_path, request, condition, response, usage)
     environment_digest = workload.environment.environment_digest
     if environment_digest is None:
         raise PairedReplayAdmissionError("admitted workload lacks environment digest")
@@ -529,6 +639,7 @@ def _run_arm(
         arm,
         repeat_index,
         artifact_sha256,
+        condition.digest,
     )
     return PairedArmReceipt(
         provenance,
@@ -551,6 +662,7 @@ def _artifact_path(root: Path, run_id: str, candidate_id: str, arm: Arm, repeat_
 def _write_response_artifact(
     path: Path,
     request: PairedReplayRequest,
+    condition: ObservationCondition,
     response: PairedReplayResponse,
     usage: tuple[BillableResponseUsage, ...],
 ) -> str:
@@ -558,6 +670,8 @@ def _write_response_artifact(
     document: dict[str, JsonValue] = {
         "arm": request.arm,
         "candidate_id": request.workload.candidate.candidate_id,
+        "condition": condition.to_payload(),
+        "condition_digest": condition.digest,
         "config_digest": request.config.digest,
         "repeat_index": request.repeat_index,
         "run_id": request.run_id,

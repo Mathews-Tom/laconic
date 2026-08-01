@@ -59,9 +59,9 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
         environment_ledger_path=(private / "environment.json").resolve(),
         artifact_root=(private / "artifacts").resolve(),
         provider="anthropic",
-        endpoint="https://api.anthropic.com",
-        privacy_boundary="approved-private-provider",
-        model="claude-sonnet-4-6",
+        endpoint="https://api.anthropic.com/v1/messages",
+        privacy_boundary="commercial-api-default-retention-30-days",
+        model="claude-haiku-4-5-20251001",
         decoding_parameters={"max_tokens": 1024, "temperature": 0},
         seed_supported=False,
         seed=None,
@@ -218,7 +218,9 @@ class _ReplayClient:
                     },
                     classification="completed",
                 ),
-            )
+            ),
+            request.condition.digest,
+            len(request.condition.observations),
         )
 
 
@@ -251,7 +253,12 @@ class _OutcomeClient:
     def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
         self.requests.append(request)
         turns = self.raw_turns if request.arm == "raw" else self.codec_turns
-        return PairedReplayResponse(turns)
+        resolved_tool_call_count = (
+            len(request.condition.observations)
+            if not any(turn.classification == "unsupported" for turn in turns)
+            else 0
+        )
+        return PairedReplayResponse(turns, request.condition.digest, resolved_tool_call_count)
 
 
 def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_path: Path) -> None:
@@ -287,7 +294,7 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "unsupported_policy",
         "usage_mapping",
     }
-    changed = replace(config, model="claude-opus-4-6")
+    changed = replace(config, privacy_boundary="other-approved-private-boundary")
     assert changed.digest != config.digest
     assert changed.settings_digest != config.settings_digest
 
@@ -324,6 +331,13 @@ def test_paired_config_rejects_credential_bearing_endpoints(
 ) -> None:
     with pytest.raises(PairedReplayConfigError, match=message):
         replace(_config(tmp_path), endpoint=endpoint)
+
+
+def test_paired_config_rejects_provider_or_model_drift(tmp_path: Path) -> None:
+    with pytest.raises(PairedReplayConfigError, match="approved 'anthropic'"):
+        replace(_config(tmp_path), provider="other")
+    with pytest.raises(PairedReplayConfigError, match="approved 'claude-haiku-4-5-20251001'"):
+        replace(_config(tmp_path), model="other")
 
 
 def test_paired_config_freezes_parameters_and_rejects_zero_live_prices(
@@ -415,6 +429,7 @@ def test_paired_run_provenance_rejects_invalid_receipts() -> None:
         "arm": "raw",
         "repeat_index": 0,
         "response_artifact_sha256": "b" * 64,
+        "condition_digest": "c" * 64,
     }
 
     with pytest.raises(PairedReplayConfigError, match="config_digest"):
@@ -440,6 +455,7 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         arm="codec",
         repeat_index=1,
         response_artifact_sha256="b" * 64,
+        condition_digest="c" * 64,
     )
 
     assert receipt.to_payload() == {
@@ -451,6 +467,7 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
         "environment_ledger_digest": "a" * 64,
         "manifest_digest": "a" * 64,
         "repeat_index": 1,
+        "condition_digest": "c" * 64,
         "response_artifact_sha256": "b" * 64,
         "run_id": "run-1",
         "source_sha256": "a" * 64,
@@ -497,16 +514,26 @@ def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path:
 
     receipt = run_paired_replay(config, (workload,), client, run_id="run-1")
 
-    assert [request.arm for request in client.requests] == ["raw", "codec", "raw", "codec"]
-    assert {request.settings_digest for request in client.requests} == {config.settings_digest}
-    assert receipt.config_digest == config.digest
-    assert len(receipt.pairs) == config.repeat_count
-    for pair in receipt.pairs:
-        assert pair.raw.provenance.config_digest == pair.codec.provenance.config_digest
+    assert all(request.condition.arm == request.arm for request in client.requests)
+    assert {
+        request.condition.digest for request in client.requests if request.arm == "raw"
+    }.isdisjoint(
+        {request.condition.digest for request in client.requests if request.arm == "codec"}
+    )
+    for pair, raw_request, codec_request in zip(
+        receipt.pairs, client.requests[::2], client.requests[1::2], strict=True
+    ):
+        assert pair.raw.provenance.condition_digest == raw_request.condition.digest
+        assert pair.codec.provenance.condition_digest == codec_request.condition.digest
         assert pair.raw.artifact_path.stat().st_mode & 0o777 == 0o600
         assert pair.codec.artifact_path.stat().st_mode & 0o777 == 0o600
         assert '"fresh":true' in pair.raw.artifact_path.read_text(encoding="utf-8")
-    assert all(not hasattr(request.workload, "session") for request in client.requests)
+    assert all(request.condition.arm == request.arm for request in client.requests)
+    assert {
+        request.condition.digest for request in client.requests if request.arm == "raw"
+    }.isdisjoint(
+        {request.condition.digest for request in client.requests if request.arm == "codec"}
+    )
 
 
 def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
@@ -677,6 +704,7 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
         ("candidate-a", "eligibility_verify", "redesign"),
         ("candidate-a", "environment_verify", "redesign"),
         ("candidate-a", "paired_admit", "redesign"),
+        ("candidate-a", "paired_condition_build", "redesign"),
     ]
 
 
@@ -740,7 +768,11 @@ def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(PairedReplayError, match="must terminate"):
-        PairedReplayResponse((_turn("unsupported", unsupported_reason="unsupported"), _turn()))
+        PairedReplayResponse(
+            (_turn("unsupported", unsupported_reason="unsupported"), _turn()),
+            "a" * 64,
+            0,
+        )
 
     config, workload = _workload(tmp_path)
     client = _OutcomeClient((_turn("induced"),), (_turn(),))
@@ -751,9 +783,26 @@ def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(
 
 def test_paired_admission_rejects_holdout_config_before_native_read(tmp_path: Path) -> None:
     config, _ = _workload(tmp_path)
-
     with pytest.raises(PairedReplayAdmissionError, match="requires the redesign split"):
         admit_paired_workloads(replace(config, split="holdout"))
+
+
+def test_runner_rejects_unbound_or_unconsumed_condition(tmp_path: Path) -> None:
+    config, workload = _workload(tmp_path)
+
+    class _UnboundClient:
+        def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
+            return PairedReplayResponse((_turn(),), "a" * 64, 0)
+
+    with pytest.raises(PairedReplayError, match="condition digest does not match"):
+        run_paired_replay(config, (workload,), _UnboundClient(), run_id="run-unbound")
+
+    class _UnconsumedClient:
+        def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
+            return PairedReplayResponse((_turn(),), request.condition.digest, 0)
+
+    with pytest.raises(PairedReplayError, match="did not resolve every condition"):
+        run_paired_replay(config, (workload,), _UnconsumedClient(), run_id="run-unconsumed")
 
 
 def test_paired_config_cli_and_artifact_root_hygiene(
