@@ -8,16 +8,20 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+from urllib.request import Request
 
 import pytest
 
 from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
+from laconic.k1.anthropic import AnthropicReplayClient, AnthropicReplayError
+from laconic.k1.conditions import build_observation_condition
 from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
 from laconic.k1.environment_ledger import (
     assess_environments,
     write_environment_ledger,
 )
 from laconic.k1.epoch import read_access_audit, read_epoch
+from laconic.k1.extractors import extract_native
 from laconic.k1.manifest import Candidate, Manifest, read_manifest, source_sha256, write_manifest
 from laconic.k1.paired_config import (
     PairedReplayConfig,
@@ -62,7 +66,12 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
         endpoint="https://api.anthropic.com/v1/messages",
         privacy_boundary="commercial-api-default-retention-30-days",
         model="claude-haiku-4-5-20251001",
-        decoding_parameters={"max_tokens": 1024, "temperature": 0},
+        decoding_parameters={
+            "extended_thinking": False,
+            "max_tokens": 1024,
+            "temperature": 0.0,
+            "top_p": 1.0,
+        },
         seed_supported=False,
         seed=None,
         repeat_count=2,
@@ -222,6 +231,154 @@ class _ReplayClient:
             request.condition.digest,
             len(request.condition.observations),
         )
+
+
+class _ProviderStream:
+    def __init__(self, document: dict[str, object]) -> None:
+        self.status = 200
+        self._payload = json.dumps(document).encode("utf-8")
+
+    def __enter__(self) -> _ProviderStream:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def _provider_response(
+    model: str,
+    content: list[dict[str, object]],
+    stop_reason: str,
+) -> dict[str, object]:
+    return {
+        "content": content,
+        "model": model,
+        "stop_reason": stop_reason,
+        "usage": {
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "input_tokens": 100,
+            "output_tokens": 10,
+        },
+    }
+
+
+def test_anthropic_client_replays_only_condition_resolved_tool_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    request = PairedReplayRequest(
+        "run-provider",
+        workload,
+        config,
+        build_observation_condition(
+            extract_native(workload.candidate),
+            "raw",
+            ledger_path=tmp_path / "private" / "condition.sqlite",
+            ledger_session_id="provider-condition",
+        ),
+        "raw",
+        0,
+    )
+    responses = iter(
+        [
+            _provider_response(
+                config.model,
+                [
+                    {
+                        "id": "live-call-1",
+                        "input": {"path": "src/app.py"},
+                        "name": "Read",
+                        "type": "tool_use",
+                    }
+                ],
+                "tool_use",
+            ),
+            _provider_response(config.model, [{"text": "done", "type": "text"}], "end_turn"),
+        ]
+    )
+    provider_requests: list[Request] = []
+
+    def fake_urlopen(provider_request: Request, *, timeout: int) -> _ProviderStream:
+        assert timeout == 60
+        provider_requests.append(provider_request)
+        return _ProviderStream(next(responses))
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "private-test-key")
+    monkeypatch.setattr("laconic.k1.anthropic.urlopen", fake_urlopen)
+
+    response = AnthropicReplayClient(config).respond(request)
+
+    assert response.condition_digest == request.condition.digest
+    assert response.resolved_tool_call_count == 1
+    assert len(response.turns) == 2
+    assert all(turn.classification == "completed" for turn in response.turns)
+    assert [provider_request.full_url for provider_request in provider_requests] == [
+        config.endpoint
+    ] * 2
+    first_body = json.loads(provider_requests[0].data or b"{}")
+    assert first_body["messages"] == [{"content": "Inspect.", "role": "user"}]
+    second_body = json.loads(provider_requests[1].data or b"{}")
+    assert second_body["messages"][-1] == {
+        "content": [
+            {
+                "content": '{"text":"print(\'ok\')"}',
+                "tool_use_id": "live-call-1",
+                "type": "tool_result",
+            }
+        ],
+        "role": "user",
+    }
+    assert "private-test-key" not in json.dumps(first_body)
+
+
+def test_anthropic_client_rejects_missing_credentials_and_tool_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, workload = _workload(tmp_path)
+    request = PairedReplayRequest(
+        "run-provider",
+        workload,
+        config,
+        build_observation_condition(
+            extract_native(workload.candidate),
+            "codec",
+            ledger_path=tmp_path / "private" / "codec-condition.sqlite",
+            ledger_session_id="provider-codec-condition",
+        ),
+        "codec",
+        0,
+    )
+    client = AnthropicReplayClient(config)
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(AnthropicReplayError, match="ANTHROPIC_API_KEY"):
+        client.respond(request)
+
+    def fake_urlopen(provider_request: Request, *, timeout: int) -> _ProviderStream:
+        return _ProviderStream(
+            _provider_response(
+                config.model,
+                [{"id": "live-call-1", "input": {}, "name": "Bash", "type": "tool_use"}],
+                "tool_use",
+            )
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "private-test-key")
+    monkeypatch.setattr("laconic.k1.anthropic.urlopen", fake_urlopen)
+
+    response = client.respond(request)
+
+    assert response.turns[-1].classification == "unsupported"
+    assert response.resolved_tool_call_count == 0
 
 
 def _turn(
