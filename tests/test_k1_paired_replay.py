@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import replace
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
+from urllib.error import HTTPError
 
 import pytest
 
@@ -1225,6 +1228,39 @@ def test_openrouter_client_retains_priced_turn_before_unpriceable_response(
         "output_tokens": 50,
     }
     assert document["turns"][1]["usage"] is None
+    assert "usage_accounting_error" in document
+
+
+def test_openrouter_client_retains_http_error_body_in_private_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _ = _workload(tmp_path)
+    monkeypatch.setenv(config.credential_environment, "test-credential")
+    error_body = b'{"error":{"message":"unsupported schema"}}'
+
+    class FailingOpener:
+        def open(self, request: object, *, timeout: int) -> object:
+            assert isinstance(request, openrouter.Request)
+            raise HTTPError(request.full_url, 400, "Bad Request", None, BytesIO(error_body))
+
+    monkeypatch.setattr(openrouter, "build_opener", lambda *_: FailingOpener())
+
+    with pytest.raises(PairedReplayError, match="provider response usage cannot be priced"):
+        run_paired_replay(config, OpenRouterChatCompletionsClient(), run_id="http-error-private")
+
+    artifact = config.artifact_root / "http-error-private" / "candidate-a" / "0000-raw.json"
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    assert document["turns"] == [
+        {
+            "classification": "unsupported",
+            "response": {
+                "body_base64": base64.b64encode(error_body).decode("ascii"),
+                "http_status": 400,
+            },
+            "unsupported_reason": "OpenRouter Chat Completions request failed: HTTP 400",
+            "usage": None,
+        }
+    ]
     assert "usage_accounting_error" in document
 
 
