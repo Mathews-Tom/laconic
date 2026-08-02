@@ -1079,7 +1079,10 @@ def test_openrouter_tool_definition_unions_receipt_schema_variants() -> None:
             "function": {
                 "description": "Replay-authorized native tool",
                 "name": "read",
-                "parameters": {"oneOf": [path_schema.to_document(), query_schema.to_document()]},
+                "parameters": {
+                    "oneOf": [path_schema.to_document(), query_schema.to_document()],
+                    "type": "object",
+                },
             },
         }
     ]
