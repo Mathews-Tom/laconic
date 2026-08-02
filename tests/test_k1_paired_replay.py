@@ -7,7 +7,8 @@ import json
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from types import SimpleNamespace
+from typing import Literal, cast
 
 import pytest
 
@@ -20,7 +21,12 @@ from laconic.k1.environment_ledger import (
     write_environment_ledger,
 )
 from laconic.k1.epoch import read_access_audit, read_epoch
-from laconic.k1.interaction import InteractionReceiptError, build_interaction_receipt
+from laconic.k1.interaction import (
+    InteractionEvent,
+    InteractionReceiptError,
+    ToolInputSchema,
+    build_interaction_receipt,
+)
 from laconic.k1.manifest import Candidate, Manifest, read_manifest, source_sha256, write_manifest
 from laconic.k1.openrouter import OpenRouterChatCompletionsClient
 from laconic.k1.paired_config import (
@@ -1022,6 +1028,58 @@ def test_openrouter_client_replays_follow_up_prompt_after_tool_result(
         and user_message == {"role": "user", "content": "Summarize the result."}
         for tool_message, user_message in follow_up_messages
     )
+
+
+def test_openrouter_tool_definition_unions_receipt_schema_variants() -> None:
+    path_schema = ToolInputSchema(
+        {
+            "additionalProperties": False,
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "type": "object",
+        }
+    )
+    query_schema = ToolInputSchema(
+        {
+            "additionalProperties": False,
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "type": "object",
+        }
+    )
+    event = InteractionEvent(
+        native_index=1,
+        kind="tool_call",
+        payload_digest="a" * 64,
+        call_digest="b" * 64,
+        tool_name="read",
+        input_schema=path_schema,
+        authority="recorded_exact",
+    )
+    variant = replace(
+        event,
+        native_index=2,
+        payload_digest="c" * 64,
+        call_digest="d" * 64,
+        input_schema=query_schema,
+    )
+    request = cast(
+        PairedReplayRequest,
+        SimpleNamespace(
+            interaction=SimpleNamespace(receipt=SimpleNamespace(events=(event, variant)))
+        ),
+    )
+
+    assert openrouter._tools(request) == [
+        {
+            "type": "function",
+            "function": {
+                "description": "Replay-authorized native tool",
+                "name": "read",
+                "parameters": {"oneOf": [path_schema.to_document(), query_schema.to_document()]},
+            },
+        }
+    ]
 
 
 def test_openrouter_client_posts_pinned_route_and_projects_native_usage(
