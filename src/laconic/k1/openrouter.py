@@ -292,9 +292,11 @@ def _tools(request: PairedReplayRequest) -> list[dict[str, object]]:
             continue
         if event.tool_name is None or event.input_schema is None:
             raise PairedReplayError("interaction receipt has incomplete tool definition")
-        schema = event.input_schema.to_document()
-        canonical_schema = json.dumps(schema, separators=(",", ":"), sort_keys=True)
-        definitions.setdefault(event.tool_name, {})[canonical_schema] = schema
+        converted = _draft2020_schema(event.input_schema.to_document())
+        if not isinstance(converted, dict):
+            raise PairedReplayError("receipt tool schema must be an object")
+        canonical_schema = json.dumps(converted, separators=(",", ":"), sort_keys=True)
+        definitions.setdefault(event.tool_name, {})[canonical_schema] = converted
     return [
         {
             "type": "function",
@@ -346,6 +348,21 @@ def _tool_parameters(
     if all_closed and all(names == property_sets[0] for names in property_sets):
         projected["additionalProperties"] = False
     return projected
+
+
+def _draft2020_schema(value: JsonValue) -> JsonValue:
+    if isinstance(value, list):
+        return [_draft2020_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    converted: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if key == "items" and isinstance(item, list):
+            converted["prefixItems"] = _draft2020_schema(item)
+            converted["items"] = False
+        else:
+            converted[key] = _draft2020_schema(item)
+    return converted
 
 
 def _validate_response_model(document: Mapping[str, object], expected_model: str) -> None:
