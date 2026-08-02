@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -40,6 +41,15 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class _OpenRouterHTTPError(PairedReplayError):
+    """A provider error whose exact response body must remain private evidence."""
+
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(f"OpenRouter Chat Completions request failed: HTTP {status}")
+
+
 class OpenRouterChatCompletionsClient:
     """Execute one frozen K1 arm through the OpenRouter Chat Completions endpoint."""
 
@@ -63,6 +73,19 @@ class OpenRouterChatCompletionsClient:
                 while True:
                     try:
                         response = self._post(request, credential, messages)
+                    except _OpenRouterHTTPError as error:
+                        response_turns.append(
+                            PairedResponseTurn(
+                                {
+                                    "body_base64": base64.b64encode(error.body).decode("ascii"),
+                                    "http_status": error.status,
+                                },
+                                {},
+                                "unsupported",
+                                str(error),
+                            )
+                        )
+                        return PairedReplayResponse(tuple(response_turns))
                     except PairedReplayError as error:
                         if not response_turns:
                             raise
@@ -209,9 +232,7 @@ class OpenRouterChatCompletionsClient:
             with opener.open(provider_request, timeout=30) as response:
                 document = json.loads(response.read().decode())
         except HTTPError as error:
-            raise PairedReplayError(
-                f"OpenRouter Chat Completions request failed: HTTP {error.code}"
-            ) from error
+            raise _OpenRouterHTTPError(error.code, error.read()) from error
         except (OSError, URLError, json.JSONDecodeError) as error:
             raise PairedReplayError(
                 f"OpenRouter Chat Completions request failed: {error}"
