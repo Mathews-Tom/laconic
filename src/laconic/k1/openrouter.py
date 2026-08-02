@@ -265,29 +265,34 @@ def _prompt_schedule(
 
 
 def _tools(request: PairedReplayRequest) -> list[dict[str, object]]:
-    definitions: dict[str, dict[str, JsonValue]] = {}
+    definitions: dict[str, dict[str, dict[str, JsonValue]]] = {}
     for event in request.interaction.receipt.events:
         if event.kind != "tool_call":
             continue
         if event.tool_name is None or event.input_schema is None:
             raise PairedReplayError("interaction receipt has incomplete tool definition")
         schema = event.input_schema.to_document()
-        prior = definitions.setdefault(event.tool_name, schema)
-        if prior != schema:
-            raise PairedReplayError(
-                "interaction receipt reuses a tool name with conflicting schemas"
-            )
+        canonical_schema = json.dumps(schema, separators=(",", ":"), sort_keys=True)
+        definitions.setdefault(event.tool_name, {})[canonical_schema] = schema
     return [
         {
             "type": "function",
             "function": {
                 "description": "Replay-authorized native tool",
                 "name": name,
-                "parameters": schema,
+                "parameters": _tool_parameters(schemas),
             },
         }
-        for name, schema in sorted(definitions.items())
+        for name, schemas in sorted(definitions.items())
     ]
+
+
+def _tool_parameters(
+    schemas: dict[str, dict[str, JsonValue]],
+) -> dict[str, JsonValue]:
+    if len(schemas) == 1:
+        return next(iter(schemas.values()))
+    return {"oneOf": [schema for _, schema in sorted(schemas.items())]}
 
 
 def _validate_response_model(document: Mapping[str, object], expected_model: str) -> None:
