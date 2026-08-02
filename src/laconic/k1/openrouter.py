@@ -313,7 +313,7 @@ def _tool_parameters(
 ) -> dict[str, JsonValue]:
     if len(schemas) == 1:
         return next(iter(schemas.values()))
-    return {"oneOf": [schema for _, schema in sorted(schemas.items())]}
+    return {"oneOf": [schema for _, schema in sorted(schemas.items())], "type": "object"}
 
 
 def _validate_response_model(document: Mapping[str, object], expected_model: str) -> None:
