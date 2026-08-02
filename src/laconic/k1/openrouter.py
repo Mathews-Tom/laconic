@@ -292,9 +292,11 @@ def _tools(request: PairedReplayRequest) -> list[dict[str, object]]:
             continue
         if event.tool_name is None or event.input_schema is None:
             raise PairedReplayError("interaction receipt has incomplete tool definition")
-        schema = event.input_schema.to_document()
-        canonical_schema = json.dumps(schema, separators=(",", ":"), sort_keys=True)
-        definitions.setdefault(event.tool_name, {})[canonical_schema] = schema
+        converted = _draft2020_schema(event.input_schema.to_document())
+        if not isinstance(converted, dict):
+            raise PairedReplayError("receipt tool schema must be an object")
+        canonical_schema = json.dumps(converted, separators=(",", ":"), sort_keys=True)
+        definitions.setdefault(event.tool_name, {})[canonical_schema] = converted
     return [
         {
             "type": "function",
@@ -313,7 +315,54 @@ def _tool_parameters(
 ) -> dict[str, JsonValue]:
     if len(schemas) == 1:
         return next(iter(schemas.values()))
-    return {"oneOf": [schema for _, schema in sorted(schemas.items())], "type": "object"}
+
+    property_sets: list[set[str]] = []
+    required_sets: list[set[str]] = []
+    properties: dict[str, JsonValue] = {}
+    all_closed = True
+    for schema in schemas.values():
+        raw_properties = schema.get("properties")
+        if not isinstance(raw_properties, dict):
+            raise PairedReplayError("receipt tool schema properties must be an object")
+        names = set(raw_properties)
+        property_sets.append(names)
+        all_closed = all_closed and schema.get("additionalProperties") is False
+        raw_required = schema.get("required", [])
+        if not isinstance(raw_required, list):
+            raise PairedReplayError("receipt tool schema required must be an array of strings")
+        required_names = [name for name in raw_required if isinstance(name, str)]
+        if len(required_names) != len(raw_required):
+            raise PairedReplayError("receipt tool schema required must be an array of strings")
+        required_sets.append(set(required_names))
+        for name, definition in raw_properties.items():
+            prior = properties.get(name)
+            if prior is None:
+                properties[name] = definition
+            elif prior != definition:
+                properties[name] = {}
+
+    projected: dict[str, JsonValue] = {"properties": properties, "type": "object"}
+    common_required = set.intersection(*required_sets)
+    if common_required:
+        projected["required"] = cast(JsonValue, sorted(common_required))
+    if all_closed and all(names == property_sets[0] for names in property_sets):
+        projected["additionalProperties"] = False
+    return projected
+
+
+def _draft2020_schema(value: JsonValue) -> JsonValue:
+    if isinstance(value, list):
+        return [_draft2020_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    converted: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if key == "items" and isinstance(item, list):
+            converted["prefixItems"] = _draft2020_schema(item)
+            converted["items"] = False
+        else:
+            converted[key] = _draft2020_schema(item)
+    return converted
 
 
 def _validate_response_model(document: Mapping[str, object], expected_model: str) -> None:

@@ -1033,7 +1033,7 @@ def test_openrouter_client_replays_follow_up_prompt_after_tool_result(
     )
 
 
-def test_openrouter_tool_definition_unions_receipt_schema_variants() -> None:
+def test_openrouter_tool_definition_projects_receipt_schema_variants() -> None:
     path_schema = ToolInputSchema(
         {
             "additionalProperties": False,
@@ -1080,7 +1080,10 @@ def test_openrouter_tool_definition_unions_receipt_schema_variants() -> None:
                 "description": "Replay-authorized native tool",
                 "name": "read",
                 "parameters": {
-                    "oneOf": [path_schema.to_document(), query_schema.to_document()],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "query": {"type": "string"},
+                    },
                     "type": "object",
                 },
             },
