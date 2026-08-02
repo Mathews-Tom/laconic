@@ -313,7 +313,39 @@ def _tool_parameters(
 ) -> dict[str, JsonValue]:
     if len(schemas) == 1:
         return next(iter(schemas.values()))
-    return {"oneOf": [schema for _, schema in sorted(schemas.items())], "type": "object"}
+
+    property_sets: list[set[str]] = []
+    required_sets: list[set[str]] = []
+    properties: dict[str, JsonValue] = {}
+    all_closed = True
+    for schema in schemas.values():
+        raw_properties = schema.get("properties")
+        if not isinstance(raw_properties, dict):
+            raise PairedReplayError("receipt tool schema properties must be an object")
+        names = set(raw_properties)
+        property_sets.append(names)
+        all_closed = all_closed and schema.get("additionalProperties") is False
+        raw_required = schema.get("required", [])
+        if not isinstance(raw_required, list):
+            raise PairedReplayError("receipt tool schema required must be an array of strings")
+        required_names = [name for name in raw_required if isinstance(name, str)]
+        if len(required_names) != len(raw_required):
+            raise PairedReplayError("receipt tool schema required must be an array of strings")
+        required_sets.append(set(required_names))
+        for name, definition in raw_properties.items():
+            prior = properties.get(name)
+            if prior is None:
+                properties[name] = definition
+            elif prior != definition:
+                properties[name] = {}
+
+    projected: dict[str, JsonValue] = {"properties": properties, "type": "object"}
+    common_required = set.intersection(*required_sets)
+    if common_required:
+        projected["required"] = cast(JsonValue, sorted(common_required))
+    if all_closed and all(names == property_sets[0] for names in property_sets):
+        projected["additionalProperties"] = False
+    return projected
 
 
 def _validate_response_model(document: Mapping[str, object], expected_model: str) -> None:
