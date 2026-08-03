@@ -643,6 +643,71 @@ def test_execution_config_rejects_unapproved_paths_before_receipt_access(
     assert read_access_audit(audit_path).head_digest == audit_before
 
 
+def test_replay_cli_creates_verified_private_config(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    config_path = config.epoch_path.parent / "generated-config.json"
+    artifact_root = config.epoch_path.parent / "generated-artifacts"
+
+    assert (
+        main(
+            [
+                "replay",
+                "create-config",
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+                "--eligibility-ledger",
+                str(config.eligibility_ledger_path),
+                "--environment-ledger",
+                str(config.environment_ledger_path),
+                "--interaction-receipt",
+                str(config.interaction_receipts[0].receipt_path),
+                "--artifact-root",
+                str(artifact_root),
+                "--config",
+                str(config_path),
+            ]
+        )
+        == EXIT_OK
+    )
+
+    created = read_paired_config(config_path)
+    assert created.artifact_root == artifact_root
+    assert main(["replay", "verify-config", "--config", str(config_path)]) == EXIT_OK
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_replay_cli_rejects_config_outside_epoch_roots(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    config_path = tmp_path / "outside-config.json"
+
+    assert (
+        main(
+            [
+                "replay",
+                "create-config",
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+                "--eligibility-ledger",
+                str(config.eligibility_ledger_path),
+                "--environment-ledger",
+                str(config.environment_ledger_path),
+                "--interaction-receipt",
+                str(config.interaction_receipts[0].receipt_path),
+                "--artifact-root",
+                str(config.artifact_root),
+                "--config",
+                str(config_path),
+            ]
+        )
+        == EXIT_PRIVATE_ARTIFACT
+    )
+    assert not config_path.exists()
+
+
 def test_paired_config_freezes_parameters_and_rejects_zero_live_prices(
     tmp_path: Path,
 ) -> None:
