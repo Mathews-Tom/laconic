@@ -25,6 +25,8 @@ from tools.paired_replay.config import (
     PriceTable,
     ProviderRouting,
     UsageMapping,
+    build_execution_config,
+    create_execution_config,
     read_paired_config,
     verify_execution_config,
     write_paired_config,
@@ -477,6 +479,233 @@ def test_execution_config_revalidates_each_bound_m3e_receipt(tmp_path: Path) -> 
         )
     with pytest.raises(PairedReplayConfigError, match="does not match configuration"):
         verify_execution_config(replace(config, epoch_digest="a" * 64))
+
+
+def test_execution_config_builder_requires_verified_receipts(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    binding = config.interaction_receipts[0]
+
+    private_entries_before = tuple(sorted(config.epoch_path.parent.iterdir()))
+    created = build_execution_config(
+        epoch_path=config.epoch_path,
+        manifest_path=config.manifest_path,
+        eligibility_ledger_path=config.eligibility_ledger_path,
+        environment_ledger_path=config.environment_ledger_path,
+        artifact_root=config.artifact_root,
+        interaction_receipt_paths=(binding.receipt_path,),
+    )
+
+    assert created.epoch_digest == config.epoch_digest
+    assert created.candidate_ids == (binding.candidate_id,)
+    assert created.interaction_receipts == (binding,)
+    assert tuple(sorted(config.epoch_path.parent.iterdir())) == private_entries_before
+    verify_execution_config(created)
+
+    audit_path = read_epoch(config.epoch_path).audit_path
+    audit_before = read_access_audit(audit_path).head_digest
+    with pytest.raises(PairedReplayConfigError, match="interaction receipt paths must be unique"):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(binding.receipt_path, binding.receipt_path),
+        )
+    assert read_access_audit(audit_path).head_digest == audit_before
+
+    binding.receipt_path.chmod(0o644)
+    with pytest.raises(PairedReplayConfigError, match="interaction receipt .* is invalid"):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(binding.receipt_path,),
+        )
+    assert tuple(sorted(config.epoch_path.parent.iterdir())) == private_entries_before
+    with pytest.raises(PairedReplayConfigError, match="at least one interaction receipt"):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(),
+        )
+
+
+def test_execution_config_rejects_config_over_sealed_evidence(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    binding = config.interaction_receipts[0]
+    audit_path = read_epoch(config.epoch_path).audit_path
+    audit_before = read_access_audit(audit_path).head_digest
+    sealed_paths = (
+        config.epoch_path,
+        config.manifest_path,
+        config.eligibility_ledger_path,
+        config.environment_ledger_path,
+        audit_path,
+        binding.receipt_path,
+    )
+
+    for config_path in sealed_paths:
+        with pytest.raises(
+            PairedReplayConfigError,
+            match="config_output_path must not overwrite sealed private evidence",
+        ):
+            create_execution_config(
+                epoch_path=config.epoch_path,
+                manifest_path=config.manifest_path,
+                eligibility_ledger_path=config.eligibility_ledger_path,
+                environment_ledger_path=config.environment_ledger_path,
+                artifact_root=config.artifact_root,
+                interaction_receipt_paths=(binding.receipt_path,),
+                config_path=config_path,
+            )
+
+    assert read_access_audit(audit_path).head_digest == audit_before
+
+
+def test_execution_config_rejects_unapproved_paths_before_receipt_access(
+    tmp_path: Path,
+) -> None:
+    config, _ = _workload(tmp_path)
+    binding = config.interaction_receipts[0]
+    audit_path = read_epoch(config.epoch_path).audit_path
+    audit_before = read_access_audit(audit_path).head_digest
+
+    outside_path = tmp_path.resolve()
+    with pytest.raises(PairedReplayConfigError, match="eligibility_ledger_path must be within"):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=outside_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(binding.receipt_path,),
+        )
+    with pytest.raises(PairedReplayConfigError, match="environment_ledger_path must be within"):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=outside_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(binding.receipt_path,),
+        )
+    with pytest.raises(
+        PairedReplayConfigError, match=r"interaction_receipt_path\[0\] must be within"
+    ):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(outside_path / "interaction.json",),
+        )
+    with pytest.raises(PairedReplayConfigError, match="artifact_root must be within"):
+        build_execution_config(
+            epoch_path=config.epoch_path,
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=outside_path,
+            interaction_receipt_paths=(binding.receipt_path,),
+        )
+    with pytest.raises(PairedReplayConfigError, match="epoch_path must be absolute"):
+        build_execution_config(
+            epoch_path=Path("epoch.json"),
+            manifest_path=config.manifest_path,
+            eligibility_ledger_path=config.eligibility_ledger_path,
+            environment_ledger_path=config.environment_ledger_path,
+            artifact_root=config.artifact_root,
+            interaction_receipt_paths=(binding.receipt_path,),
+        )
+    with pytest.raises(PairedReplayConfigError, match="eligibility_ledger_path must be within"):
+        verify_execution_config(replace(config, eligibility_ledger_path=outside_path))
+    with pytest.raises(PairedReplayConfigError, match="environment_ledger_path must be within"):
+        verify_execution_config(replace(config, environment_ledger_path=outside_path))
+    with pytest.raises(
+        PairedReplayConfigError, match=r"interaction_receipt_path\[0\] must be within"
+    ):
+        verify_execution_config(
+            replace(
+                config,
+                interaction_receipts=(replace(binding, receipt_path=outside_path),),
+            )
+        )
+    with pytest.raises(PairedReplayConfigError, match="artifact_root must be within"):
+        verify_execution_config(replace(config, artifact_root=outside_path))
+
+    assert read_access_audit(audit_path).head_digest == audit_before
+
+
+def test_replay_cli_creates_verified_private_config(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    config_path = config.epoch_path.parent / "generated-config.json"
+    artifact_root = config.epoch_path.parent / "generated-artifacts"
+
+    assert (
+        main(
+            [
+                "replay",
+                "create-config",
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+                "--eligibility-ledger",
+                str(config.eligibility_ledger_path),
+                "--environment-ledger",
+                str(config.environment_ledger_path),
+                "--interaction-receipt",
+                str(config.interaction_receipts[0].receipt_path),
+                "--artifact-root",
+                str(artifact_root),
+                "--config",
+                str(config_path),
+            ]
+        )
+        == EXIT_OK
+    )
+
+    created = read_paired_config(config_path)
+    assert created.artifact_root == artifact_root
+    assert main(["replay", "verify-config", "--config", str(config_path)]) == EXIT_OK
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_replay_cli_rejects_config_outside_epoch_roots(tmp_path: Path) -> None:
+    config, _ = _workload(tmp_path)
+    config_path = tmp_path / "outside-config.json"
+
+    assert (
+        main(
+            [
+                "replay",
+                "create-config",
+                "--epoch",
+                str(config.epoch_path),
+                "--manifest",
+                str(config.manifest_path),
+                "--eligibility-ledger",
+                str(config.eligibility_ledger_path),
+                "--environment-ledger",
+                str(config.environment_ledger_path),
+                "--interaction-receipt",
+                str(config.interaction_receipts[0].receipt_path),
+                "--artifact-root",
+                str(config.artifact_root),
+                "--config",
+                str(config_path),
+            ]
+        )
+        == EXIT_PRIVATE_ARTIFACT
+    )
+    assert not config_path.exists()
 
 
 def test_paired_config_freezes_parameters_and_rejects_zero_live_prices(

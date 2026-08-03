@@ -9,6 +9,7 @@ from pathlib import Path
 
 from tools.paired_replay.config import (
     PairedReplayConfigError,
+    create_execution_config,
     read_paired_config,
     verify_execution_config,
     verify_provider_contract,
@@ -332,6 +333,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate private configuration for a contemporary paired replay",
     )
     private_replay_subcommands = private_replay.add_subparsers(dest="private_replay_command")
+    private_replay_create_config = private_replay_subcommands.add_parser(
+        "create-config",
+        help="write an approved private paired replay configuration from receipts",
+    )
+    private_replay_create_config.add_argument(
+        "--epoch",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private sealed paired replay epoch",
+    )
+    private_replay_create_config.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private frozen paired replay manifest",
+    )
+    private_replay_create_config.add_argument(
+        "--eligibility-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private verified eligibility ledger",
+    )
+    private_replay_create_config.add_argument(
+        "--environment-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private verified environment ledger",
+    )
+    private_replay_create_config.add_argument(
+        "--interaction-receipt",
+        type=Path,
+        action="append",
+        required=True,
+        metavar="FILE",
+        help="private verified redesign interaction receipt; repeat per candidate",
+    )
+    private_replay_create_config.add_argument(
+        "--artifact-root",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="private root for response and report artifacts",
+    )
+    private_replay_create_config.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private output configuration",
+    )
+    private_replay_create_config.set_defaults(handler=_private_replay_create_config)
     private_replay_verify_config = private_replay_subcommands.add_parser(
         "verify-config",
         help="verify a private, integrity-checked paired replay configuration",
@@ -529,6 +585,27 @@ def _private_interaction_verify(args: argparse.Namespace) -> int:
     print(
         f"verified paired replay interaction receipt {args.receipt}: "
         f"candidate={receipt.candidate_id}, digest {receipt.digest}"
+    )
+    return EXIT_OK
+
+
+def _private_replay_create_config(args: argparse.Namespace) -> int:
+    try:
+        config = create_execution_config(
+            epoch_path=args.epoch,
+            manifest_path=args.manifest,
+            eligibility_ledger_path=args.eligibility_ledger,
+            environment_ledger_path=args.environment_ledger,
+            artifact_root=args.artifact_root,
+            interaction_receipt_paths=args.interaction_receipt,
+            config_path=args.config,
+        )
+    except PairedReplayConfigError as error:
+        print(f"paired-replay replay create-config: {error}", file=sys.stderr)
+        return EXIT_PRIVATE_ARTIFACT
+    print(
+        f"wrote paired replay config {args.config}: "
+        f"candidates={len(config.candidate_ids)}, digest {config.digest}"
     )
     return EXIT_OK
 
