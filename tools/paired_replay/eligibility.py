@@ -1,4 +1,4 @@
-"""Private, source-linked eligibility ledgers for K1 native evidence."""
+"""Private, source-linked eligibility ledgers for paired replay native evidence."""
 
 from __future__ import annotations
 
@@ -12,15 +12,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
-from laconic.k1.evidence import (
+from tools.paired_replay.epoch import EpochError, record_redesign_access, verify_epoch_manifest
+from tools.paired_replay.evidence import (
     EvidenceFailureCause,
     NativeEvidenceError,
     NativeSession,
     validate_confirmatory_evidence,
 )
-from laconic.k1.extractors import extract_native
-from laconic.k1.manifest import Candidate, Split, is_sha256
+from tools.paired_replay.extractors import extract_native
+from tools.paired_replay.manifest import Candidate, Split, is_sha256
 
 LEDGER_SCHEMA_VERSION = 3
 
@@ -28,7 +28,7 @@ LedgerDisposition = Literal["confirmatory", "diagnostic_only", "excluded"]
 
 
 class EligibilityLedgerError(ValueError):
-    """Raised when a private K1 eligibility ledger is malformed or incomplete."""
+    """Raised when a private paired replay eligibility ledger is malformed or incomplete."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +310,7 @@ def _assess_candidate(candidate: Candidate) -> EligibilityRecord:
         candidate.candidate_id,
         candidate.source_sha256,
         "confirmatory",
-        "native evidence satisfies K1 confirmatory contract",
+        "native evidence satisfies paired replay confirmatory contract",
         session.parser,
         session.model,
         len(session.events),

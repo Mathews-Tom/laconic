@@ -1,4 +1,4 @@
-"""Contemporary raw/codec paired replay over M2/M3-admitted private workloads."""
+"""Contemporary raw/codec paired replay over eligibility/environment-admitted private workloads."""
 
 from __future__ import annotations
 
@@ -14,18 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from laconic.k1.eligibility import EligibilityLedgerError, verify_eligibility
-from laconic.k1.environment_ledger import (
-    EnvironmentLedgerError,
-    EnvironmentRecord,
-    verify_environment,
-)
-from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
-from laconic.k1.evidence import JsonValue, NativeEvidenceError
-from laconic.k1.extractors import extract_native
-from laconic.k1.interaction import InteractionRenderer, render_private_interaction
-from laconic.k1.manifest import Candidate, is_sha256
-from laconic.k1.paired_config import (
+from tools.paired_replay.config import (
     Arm,
     InteractionReceiptBinding,
     PairedReplayConfig,
@@ -33,15 +22,26 @@ from laconic.k1.paired_config import (
     PairedRunProvenance,
     verify_execution_config,
 )
-from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
+from tools.paired_replay.eligibility import EligibilityLedgerError, verify_eligibility
+from tools.paired_replay.environment_ledger import (
+    EnvironmentLedgerError,
+    EnvironmentRecord,
+    verify_environment,
+)
+from tools.paired_replay.epoch import EpochError, record_redesign_access, verify_epoch_manifest
+from tools.paired_replay.evidence import JsonValue, NativeEvidenceError
+from tools.paired_replay.extractors import extract_native
+from tools.paired_replay.interaction import InteractionRenderer, render_private_interaction
+from tools.paired_replay.manifest import Candidate, is_sha256
+from tools.paired_replay.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
 
 class PairedReplayError(RuntimeError):
-    """Base class for K1 paired replay admission and execution failures."""
+    """Base class for paired replay admission and execution failures."""
 
 
 class PairedReplayAdmissionError(PairedReplayError):
-    """Raised when M2/M3 receipts cannot admit a declared paired workload."""
+    """Raised when eligibility/environment receipts cannot admit a declared paired workload."""
 
 
 class PairedReplayCostCapError(PairedReplayError):
@@ -363,9 +363,11 @@ class PairedRunReceipt:
 
 
 def admit_paired_workloads(config: PairedReplayConfig) -> tuple[PairedWorkload, ...]:
-    """Revalidate redesign-only M2/M3 evidence before any contemporary call."""
+    """Revalidate redesign-only eligibility/environment evidence before any contemporary call."""
     if config.split != "redesign":
-        raise PairedReplayAdmissionError("paired replay requires the redesign split before M6")
+        raise PairedReplayAdmissionError(
+            "paired replay requires the redesign split before release approval"
+        )
     try:
         verify_execution_config(config)
         bindings = {binding.candidate_id: binding for binding in config.interaction_receipts}
@@ -463,7 +465,7 @@ def run_paired_replay(
     *,
     run_id: str,
 ) -> PairedRunReceipt:
-    """Regenerate raw then codec arms after one M2/M3 source admission."""
+    """Regenerate raw then codec arms after one eligibility/environment source admission."""
     prepare_private_artifact_root(config)
     workloads = admit_paired_workloads(config)
     _safe_path_component(run_id)

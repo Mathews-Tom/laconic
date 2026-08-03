@@ -1,4 +1,4 @@
-"""Metadata-only, content-addressed candidate manifests for K1."""
+"""Metadata-only, content-addressed candidate manifests for paired replay."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ Split = Literal["unassigned", "redesign", "holdout"]
 
 
 class ManifestError(ValueError):
-    """Raised when a K1 manifest is malformed or no longer matches its sources."""
+    """Raised when a paired replay manifest is malformed or no longer matches its sources."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +119,7 @@ class Candidate:
 
 @dataclass(frozen=True, slots=True)
 class Manifest:
-    """A versioned, canonical collection of K1 candidate metadata."""
+    """A versioned, canonical collection of paired replay candidate metadata."""
 
     candidates: tuple[Candidate, ...]
 
@@ -252,7 +252,7 @@ def verify_manifest(path: Path, *, require_frozen_split: bool = True) -> Manifes
             "manifest has unassigned candidates; freeze its split before verification"
         )
     if require_frozen_split:
-        from laconic.k1.split import validate_frozen_split
+        from tools.paired_replay.split import validate_frozen_split
 
         validate_frozen_split(manifest)
     for candidate in manifest.candidates:

@@ -1,4 +1,4 @@
-"""Concrete OpenRouter Chat Completions client for authorized K1 replay."""
+"""Concrete OpenRouter Chat Completions client for authorized paired replay replay."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from laconic.codec.observe import ObservationCodec, subject_for
-from laconic.k1.evidence import JsonValue
-from laconic.k1.paired_runner import (
+from laconic.ledger import Ledger
+from tools.paired_replay.evidence import JsonValue
+from tools.paired_replay.runner import (
     PairedReplayError,
     PairedReplayRequest,
     PairedReplayResponse,
     PairedResponseTurn,
 )
-from laconic.ledger import Ledger
 
 
 def require_process_credential(credential_environment: str) -> str:
@@ -51,7 +51,7 @@ class _OpenRouterHTTPError(PairedReplayError):
 
 
 class OpenRouterChatCompletionsClient:
-    """Execute one frozen K1 arm through the OpenRouter Chat Completions endpoint."""
+    """Execute one frozen paired replay arm through the OpenRouter Chat Completions endpoint."""
 
     def respond(self, request: PairedReplayRequest) -> PairedReplayResponse:
         """Run an authenticated arm and retain provider bodies only in its artifact."""

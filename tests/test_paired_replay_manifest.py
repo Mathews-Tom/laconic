@@ -1,4 +1,4 @@
-"""Contract tests for K1's metadata-only manifest boundary."""
+"""Contract tests for paired replay's metadata-only manifest boundary."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1.manifest import (
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.manifest import (
     Candidate,
     Manifest,
     ManifestError,
@@ -20,7 +20,7 @@ from laconic.k1.manifest import (
     verify_manifest,
     write_manifest,
 )
-from laconic.k1.split import SplitError, SplitPolicy, freeze_split, validate_frozen_split
+from tools.paired_replay.split import SplitError, SplitPolicy, freeze_split, validate_frozen_split
 
 
 def _candidate(
@@ -128,14 +128,14 @@ def test_cli_verifies_and_rejects_tampered_manifest(
     manifest_path = tmp_path / "manifest.json"
     write_manifest(manifest_path, Manifest(_frozen_pair(tmp_path)))
 
-    assert main(["k1", "manifest", "verify", "--manifest", str(manifest_path)]) == EXIT_OK
-    assert "verified K1 manifest" in capsys.readouterr().out
+    assert main(["manifest", "verify", "--manifest", str(manifest_path)]) == EXIT_OK
+    assert "verified paired replay manifest" in capsys.readouterr().out
 
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
     document["candidates"][0]["session_length"] = 13
     manifest_path.write_text(json.dumps(document), encoding="utf-8")
 
-    assert main(["k1", "manifest", "verify", "--manifest", str(manifest_path)]) == EXIT_K1_MANIFEST
+    assert main(["manifest", "verify", "--manifest", str(manifest_path)]) == EXIT_PRIVATE_ARTIFACT
     assert "digest mismatch" in capsys.readouterr().err
 
 
@@ -164,7 +164,7 @@ def test_reader_rejects_tool_density_outside_float_range(
     document["candidates"][0]["tool_density"] = 10**400
     manifest_path.write_text(json.dumps(document), encoding="utf-8")
 
-    assert main(["k1", "manifest", "verify", "--manifest", str(manifest_path)]) == EXIT_K1_MANIFEST
+    assert main(["manifest", "verify", "--manifest", str(manifest_path)]) == EXIT_PRIVATE_ARTIFACT
     assert "outside the float range" in capsys.readouterr().err
 
 

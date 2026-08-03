@@ -1,4 +1,4 @@
-"""Tests for private K1 eligibility ledger validation."""
+"""Tests for private paired replay eligibility ledger validation."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1.eligibility import (
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.eligibility import (
     EligibilityLedger,
     EligibilityLedgerError,
     EligibilityRecord,
     read_eligibility_ledger,
     write_eligibility_ledger,
 )
-from laconic.k1.epoch import create_epoch, read_access_audit
-from laconic.k1.manifest import Candidate, Manifest, Split, source_sha256, write_manifest
+from tools.paired_replay.epoch import create_epoch, read_access_audit
+from tools.paired_replay.manifest import Candidate, Manifest, Split, source_sha256, write_manifest
 
 _DIGEST = "a" * 64
 
@@ -32,7 +32,7 @@ def _ledger() -> EligibilityLedger:
                 "session-a",
                 "b" * 64,
                 "confirmatory",
-                "native evidence satisfies K1 confirmatory contract",
+                "native evidence satisfies paired replay confirmatory contract",
                 "claude-code-jsonl-v1",
                 "claude-sonnet-4-6",
                 3,
@@ -105,7 +105,6 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
         created_at="2026-07-31T11:00:00Z",
     )
     build_args = [
-        "k1",
         "eligibility",
         "build",
         "--epoch",
@@ -116,7 +115,6 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
         str(ledger_path),
     ]
     verify_args = [
-        "k1",
         "eligibility",
         "verify",
         "--epoch",
@@ -135,7 +133,7 @@ def test_eligibility_cli_builds_and_rechecks_confirmatory_sources(
 
     candidates[0].source_path.write_text('{"changed":true}\n', encoding="utf-8")
 
-    assert main(verify_args) == EXIT_K1_MANIFEST
+    assert main(verify_args) == EXIT_PRIVATE_ARTIFACT
     assert "confirmatory evidence no longer extracts" in capsys.readouterr().err
 
 

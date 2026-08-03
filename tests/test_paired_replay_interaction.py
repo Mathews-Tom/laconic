@@ -1,4 +1,4 @@
-"""Tests for K1's executable native interaction receipt contract."""
+"""Tests for paired replay's executable native interaction receipt contract."""
 
 from __future__ import annotations
 
@@ -9,13 +9,17 @@ from typing import Literal, cast
 
 import pytest
 
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
-from laconic.k1.environment import SnapshotEnvironment, SnapshotToolResolver, snapshot_tree_sha256
-from laconic.k1.environment_ledger import assess_environments, write_environment_ledger
-from laconic.k1.epoch import create_epoch
-from laconic.k1.evidence import NativeEvent, NativeSession, ToolCall, ToolResult
-from laconic.k1.interaction import (
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.eligibility import assess_manifest, write_eligibility_ledger
+from tools.paired_replay.environment import (
+    SnapshotEnvironment,
+    SnapshotToolResolver,
+    snapshot_tree_sha256,
+)
+from tools.paired_replay.environment_ledger import assess_environments, write_environment_ledger
+from tools.paired_replay.epoch import create_epoch
+from tools.paired_replay.evidence import NativeEvent, NativeSession, ToolCall, ToolResult
+from tools.paired_replay.interaction import (
     InteractionActionResolver,
     InteractionReceipt,
     InteractionReceiptError,
@@ -28,7 +32,7 @@ from laconic.k1.interaction import (
     verify_interaction_receipt,
     write_interaction_receipt,
 )
-from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
+from tools.paired_replay.manifest import Candidate, Manifest, source_sha256, write_manifest
 
 
 def _session() -> NativeSession:
@@ -200,7 +204,6 @@ def test_private_receipt_integration_revalidates_redesign_only_chain(
     assert (
         main(
             [
-                "k1",
                 "interaction",
                 "verify",
                 "--receipt",
@@ -219,7 +222,7 @@ def test_private_receipt_integration_revalidates_redesign_only_chain(
         )
         == EXIT_OK
     )
-    assert "verified K1 interaction receipt" in capsys.readouterr().out
+    assert "verified paired replay interaction receipt" in capsys.readouterr().out
 
 
 def test_private_renderer_exposes_only_authenticated_prompts_and_tool_authority(
@@ -409,7 +412,6 @@ def test_interaction_cli_rejects_missing_private_receipt_without_source_read(
 
     exit_code = main(
         [
-            "k1",
             "interaction",
             "verify",
             "--receipt",
@@ -427,7 +429,7 @@ def test_interaction_cli_rejects_missing_private_receipt_without_source_read(
         ]
     )
 
-    assert exit_code == EXIT_K1_MANIFEST
+    assert exit_code == EXIT_PRIVATE_ARTIFACT
     assert "cannot stat interaction receipt" in capsys.readouterr().err
 
 

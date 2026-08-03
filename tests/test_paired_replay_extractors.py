@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from laconic.k1.evidence import (
+from tools.paired_replay.evidence import (
     BillableUsage,
     NativeEvent,
     NativeEvidenceError,
@@ -16,8 +16,8 @@ from laconic.k1.evidence import (
     ToolResult,
     validate_confirmatory_evidence,
 )
-from laconic.k1.extractors import extract_claude_code, extract_native, extract_omp
-from laconic.k1.manifest import Candidate, source_sha256
+from tools.paired_replay.extractors import extract_claude_code, extract_native, extract_omp
+from tools.paired_replay.manifest import Candidate, source_sha256
 
 
 def _candidate(

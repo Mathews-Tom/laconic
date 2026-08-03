@@ -1,4 +1,4 @@
-"""Fail-closed environment contracts for K1 contemporary replay."""
+"""Fail-closed environment contracts for paired replay contemporary replay."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
-from laconic.k1.evidence import JsonValue
-from laconic.k1.manifest import is_sha256
+from tools.paired_replay.evidence import JsonValue
+from tools.paired_replay.manifest import is_sha256
 
 _MAX_SNAPSHOT_READ_BYTES: Final = 1024 * 1024
 
@@ -21,7 +21,7 @@ _SNAPSHOT_CHUNK_BYTES: Final = 1024 * 1024
 
 
 class EnvironmentError(ValueError):
-    """Raised when a K1 tool environment is unsafe or cannot be reproduced."""
+    """Raised when a paired replay tool environment is unsafe or cannot be reproduced."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,4 @@
-"""Private, content-sealed K1 evidence epochs and access audits."""
+"""Private, content-sealed paired replay evidence epochs and access audits."""
 
 from __future__ import annotations
 
@@ -12,24 +12,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final, cast
 
-from laconic.k1.manifest import Candidate, Manifest, ManifestError, Split, is_sha256, read_manifest
-from laconic.k1.split import SplitError, validate_frozen_split
+from tools.paired_replay.manifest import (
+    Candidate,
+    Manifest,
+    ManifestError,
+    Split,
+    is_sha256,
+    read_manifest,
+)
+from tools.paired_replay.split import SplitError, validate_frozen_split
 
 EPOCH_SCHEMA_VERSION: Final = 1
 AUDIT_SCHEMA_VERSION: Final = 2
 
 
 class EpochError(ValueError):
-    """Raised when a sealed K1 evidence epoch is malformed or invalid."""
+    """Raised when a sealed paired replay evidence epoch is malformed or invalid."""
 
 
 class HoldoutAccessDenied(EpochError):
-    """Raised before any pre-M6 holdout source path can be opened."""
+    """Raised before any pre-release approval holdout source path can be opened."""
 
 
 @dataclass(frozen=True, slots=True)
 class SealedEpoch:
-    """The non-content receipt that starts one fresh K1 evidence epoch."""
+    """The non-content receipt that starts one fresh paired replay evidence epoch."""
 
     epoch_id: str
     created_at: str
@@ -122,7 +129,7 @@ class AccessAuditRecord:
 
 @dataclass(frozen=True, slots=True)
 class AccessAudit:
-    """A hash-chained record of allowed K1 source access for one epoch."""
+    """A hash-chained record of allowed paired replay source access for one epoch."""
 
     epoch_digest: str
     records: tuple[AccessAuditRecord, ...]
@@ -308,7 +315,8 @@ def record_redesign_access(
     candidate = _candidate_by_id(manifest, candidate_id)
     if candidate.split == "holdout":
         raise HoldoutAccessDenied(
-            f"candidate {candidate_id!r} is sealed holdout; M6 unlock is required before path open"
+            f"candidate {candidate_id!r} is sealed holdout; release approval is required "
+            "before opening its source path"
         )
     audit = read_access_audit(epoch.audit_path)
     record = AccessAuditRecord(

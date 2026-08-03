@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1.manifest import source_sha256, verify_manifest
-from laconic.k1.searchat_export import SearchatExportError, produce_manifest
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.manifest import source_sha256, verify_manifest
+from tools.paired_replay.searchat_export import SearchatExportError, produce_manifest
 
 
 def _record(
@@ -95,7 +95,6 @@ def test_cli_writes_frozen_manifest_from_searchat_export(
 
     exit_code = main(
         [
-            "k1",
             "manifest",
             "from-searchat",
             "--input",
@@ -110,7 +109,7 @@ def test_cli_writes_frozen_manifest_from_searchat_export(
     )
 
     assert exit_code == EXIT_OK
-    assert "wrote K1 manifest" in capsys.readouterr().out
+    assert "wrote paired replay manifest" in capsys.readouterr().out
     assert verify_manifest(manifest_path).candidates
 
 
@@ -124,7 +123,6 @@ def test_cli_rejects_invalid_searchat_export(
 
     exit_code = main(
         [
-            "k1",
             "manifest",
             "from-searchat",
             "--input",
@@ -134,7 +132,7 @@ def test_cli_rejects_invalid_searchat_export(
         ]
     )
 
-    assert exit_code == EXIT_K1_MANIFEST
+    assert exit_code == EXIT_PRIVATE_ARTIFACT
     assert "unexpected body" in capsys.readouterr().err
 
 
@@ -149,7 +147,6 @@ def test_cli_rejects_non_ascii_catalog_hash(
     assert (
         main(
             [
-                "k1",
                 "manifest",
                 "from-searchat",
                 "--input",
@@ -158,7 +155,7 @@ def test_cli_rejects_non_ascii_catalog_hash(
                 str(tmp_path / "manifest.json"),
             ]
         )
-        == EXIT_K1_MANIFEST
+        == EXIT_PRIVATE_ARTIFACT
     )
     assert "file_hash must be 64 lowercase hex" in capsys.readouterr().err
 
@@ -174,7 +171,6 @@ def test_cli_rejects_tool_density_outside_float_range(
     assert (
         main(
             [
-                "k1",
                 "manifest",
                 "from-searchat",
                 "--input",
@@ -183,7 +179,7 @@ def test_cli_rejects_tool_density_outside_float_range(
                 str(tmp_path / "manifest.json"),
             ]
         )
-        == EXIT_K1_MANIFEST
+        == EXIT_PRIVATE_ARTIFACT
     )
     assert "outside the float range" in capsys.readouterr().err
 

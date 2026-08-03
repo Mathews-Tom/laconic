@@ -1,4 +1,4 @@
-"""Private, non-content admission receipts for K1 tool environments."""
+"""Private, non-content admission receipts for paired replay tool environments."""
 
 from __future__ import annotations
 
@@ -13,20 +13,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-from laconic.k1.eligibility import (
+from tools.paired_replay.eligibility import (
     EligibilityLedgerError,
     verify_eligibility,
 )
-from laconic.k1.environment import EnvironmentError, SnapshotEnvironment, validate_snapshot
-from laconic.k1.epoch import EpochError, record_redesign_access, verify_epoch_manifest
-from laconic.k1.evidence import (
+from tools.paired_replay.environment import EnvironmentError, SnapshotEnvironment, validate_snapshot
+from tools.paired_replay.epoch import EpochError, record_redesign_access, verify_epoch_manifest
+from tools.paired_replay.evidence import (
     JsonValue,
     NativeEvidenceError,
     ToolCall,
     validate_confirmatory_evidence,
 )
-from laconic.k1.extractors import extract_native
-from laconic.k1.manifest import Candidate, Split, is_sha256
+from tools.paired_replay.extractors import extract_native
+from tools.paired_replay.manifest import Candidate, Split, is_sha256
 
 ENVIRONMENT_LEDGER_SCHEMA_VERSION = 4
 
@@ -41,7 +41,7 @@ EnvironmentReason = Literal[
 
 
 class EnvironmentLedgerError(ValueError):
-    """Raised when a private K1 environment ledger is malformed or incomplete."""
+    """Raised when a private paired replay environment ledger is malformed or incomplete."""
 
 
 @dataclass(frozen=True, slots=True)

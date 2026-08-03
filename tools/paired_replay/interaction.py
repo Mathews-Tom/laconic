@@ -1,4 +1,4 @@
-"""Fail-closed executable-interaction receipts for K1 contemporary replay."""
+"""Fail-closed executable-interaction receipts for paired replay contemporary replay."""
 
 from __future__ import annotations
 
@@ -14,21 +14,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-from laconic.k1.eligibility import EligibilityLedger, EligibilityLedgerError, verify_eligibility
-from laconic.k1.environment import EnvironmentError, SnapshotEnvironment, SnapshotToolResolver
-from laconic.k1.environment_ledger import (
+from tools.paired_replay.eligibility import (
+    EligibilityLedger,
+    EligibilityLedgerError,
+    verify_eligibility,
+)
+from tools.paired_replay.environment import (
+    EnvironmentError,
+    SnapshotEnvironment,
+    SnapshotToolResolver,
+)
+from tools.paired_replay.environment_ledger import (
     EnvironmentLedger,
     EnvironmentLedgerError,
     EnvironmentRecord,
     verify_environment,
 )
-from laconic.k1.epoch import (
+from tools.paired_replay.epoch import (
     EpochError,
     read_access_audit,
     record_redesign_access,
     verify_epoch_manifest,
 )
-from laconic.k1.evidence import (
+from tools.paired_replay.evidence import (
     JsonValue,
     NativeEvidenceError,
     NativeSession,
@@ -36,8 +44,8 @@ from laconic.k1.evidence import (
     ToolResult,
     validate_confirmatory_evidence,
 )
-from laconic.k1.extractors import extract_native
-from laconic.k1.manifest import Candidate, Manifest, is_sha256
+from tools.paired_replay.extractors import extract_native
+from tools.paired_replay.manifest import Candidate, Manifest, is_sha256
 
 INTERACTION_RECEIPT_SCHEMA_VERSION = 1
 
@@ -46,7 +54,7 @@ ActionAuthority = Literal["recorded_exact", "rooted_read"]
 
 
 class InteractionReceiptError(ValueError):
-    """Raised when a K1 interaction receipt is incomplete or cannot be verified."""
+    """Raised when a paired replay interaction receipt is incomplete or cannot be verified."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,7 +771,7 @@ def _redesign_candidate(manifest: Manifest, candidate_id: str) -> Candidate:
         if candidate.candidate_id == candidate_id:
             if candidate.split != "redesign":
                 raise InteractionReceiptError(
-                    f"candidate {candidate_id!r} is sealed holdout and cannot enter M3E"
+                    f"candidate {candidate_id!r} is sealed holdout and cannot enter chronological"
                 )
             return candidate
     raise InteractionReceiptError(f"candidate {candidate_id!r} is absent from sealed manifest")

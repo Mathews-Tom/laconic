@@ -1,4 +1,4 @@
-"""Optional adapter from a metadata-only Searchat export to a K1 manifest.
+"""Optional adapter from a metadata-only Searchat export to a paired replay manifest.
 
 The adapter accepts a deliberate, allowlisted export file. It never imports Searchat,
 opens its database, or reads transcript content; callers create the export outside Laconic.
@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 from typing import cast
 
-from laconic.k1.manifest import (
+from tools.paired_replay.manifest import (
     Candidate,
     EligibilityDisposition,
     Manifest,
@@ -22,14 +22,14 @@ from laconic.k1.manifest import (
     stratum_from_metadata,
     write_manifest,
 )
-from laconic.k1.split import SplitPolicy, freeze_split
+from tools.paired_replay.split import SplitPolicy, freeze_split
 
 _EXPORT_SCHEMA_VERSION = 1
 _DISPOSITIONS = frozenset({"unreviewed", "diagnostic_only", "confirmatory", "excluded"})
 
 
 class SearchatExportError(ManifestError):
-    """Raised when an external Searchat metadata export is unsuitable for K1."""
+    """Raised when an external Searchat metadata export is unsuitable for paired replay."""
 
 
 def produce_manifest(

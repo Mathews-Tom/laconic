@@ -1,4 +1,4 @@
-"""Canonical native-transcript evidence contract for K1 eligibility."""
+"""Canonical native-transcript evidence contract for paired replay eligibility."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from laconic.k1.manifest import Candidate, source_sha256
+from tools.paired_replay.manifest import Candidate, source_sha256
 
 type EvidenceFailureCause = Literal["integrity", "missing_evidence"]
 
 
 class NativeEvidenceError(ValueError):
-    """Raised when native evidence cannot satisfy K1's replay contract."""
+    """Raised when native evidence cannot satisfy paired replay's replay contract."""
 
     def __init__(self, message: str, *, cause: EvidenceFailureCause = "integrity") -> None:
         super().__init__(message)
@@ -157,7 +157,7 @@ class NativeSession:
 
 
 def validate_confirmatory_evidence(candidate: Candidate, session: NativeSession) -> None:
-    """Fail closed unless native evidence can drive a confirmatory K1 replay."""
+    """Fail closed unless native evidence can drive a confirmatory paired replay replay."""
     if session.candidate_id != candidate.candidate_id:
         raise NativeEvidenceError("candidate_id does not match manifest")
     if session.provider != candidate.provider:

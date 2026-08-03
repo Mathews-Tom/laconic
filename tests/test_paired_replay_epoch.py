@@ -1,4 +1,4 @@
-"""Contract tests for sealed K1 evidence epochs and access audits."""
+"""Contract tests for sealed paired replay evidence epochs and access audits."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1 import epoch as epoch_module
-from laconic.k1.epoch import (
+from tools.paired_replay import epoch as epoch_module
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.epoch import (
     EpochError,
     HoldoutAccessDenied,
     create_epoch,
@@ -20,7 +20,7 @@ from laconic.k1.epoch import (
     record_redesign_access,
     verify_epoch,
 )
-from laconic.k1.manifest import Candidate, Manifest, Split, source_sha256, write_manifest
+from tools.paired_replay.manifest import Candidate, Manifest, Split, source_sha256, write_manifest
 
 
 def _candidate(private: Path, candidate_id: str, *, split: Split) -> Candidate:
@@ -142,7 +142,6 @@ def test_epoch_cli_verifies_sealed_epoch_and_rejects_tampered_audit(
 ) -> None:
     _, manifest_path, epoch_path, redesign, _ = _create_epoch(tmp_path)
     verify_args = [
-        "k1",
         "epoch",
         "verify",
         "--epoch",
@@ -152,7 +151,7 @@ def test_epoch_cli_verifies_sealed_epoch_and_rejects_tampered_audit(
     ]
 
     assert main(verify_args) == EXIT_OK
-    assert "verified K1 epoch" in capsys.readouterr().out
+    assert "verified paired replay epoch" in capsys.readouterr().out
     record_redesign_access(
         epoch_path,
         manifest_path,
@@ -165,7 +164,7 @@ def test_epoch_cli_verifies_sealed_epoch_and_rejects_tampered_audit(
     document["records"][0]["operation"] = "tampered"
     audit_path.write_text(json.dumps(document), encoding="utf-8")
 
-    assert main(verify_args) == EXIT_K1_MANIFEST
+    assert main(verify_args) == EXIT_PRIVATE_ARTIFACT
     assert "record digest mismatch" in capsys.readouterr().err
 
 
@@ -173,7 +172,7 @@ def test_holdout_request_is_rejected_without_audit_record(tmp_path: Path) -> Non
     _, manifest_path, epoch_path, _, holdout = _create_epoch(tmp_path)
     holdout.source_path.unlink()
 
-    with pytest.raises(HoldoutAccessDenied, match="before path open"):
+    with pytest.raises(HoldoutAccessDenied, match="before opening its source path"):
         record_redesign_access(
             epoch_path,
             manifest_path,
