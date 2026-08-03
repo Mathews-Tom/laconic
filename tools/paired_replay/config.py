@@ -8,7 +8,7 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -17,8 +17,13 @@ from types import MappingProxyType
 from typing import Literal, cast
 from urllib.parse import urlsplit
 
+from tools.paired_replay.epoch import EpochError, SealedEpoch, verify_epoch_manifest
 from tools.paired_replay.evidence import JsonScalar
-from tools.paired_replay.interaction import InteractionReceiptError, verify_interaction_receipt
+from tools.paired_replay.interaction import (
+    InteractionReceiptError,
+    read_interaction_receipt,
+    verify_interaction_receipt,
+)
 from tools.paired_replay.manifest import is_sha256
 
 PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 5
@@ -411,6 +416,172 @@ def read_paired_config(path: Path) -> PairedReplayConfig:
     return config
 
 
+def build_execution_config(
+    *,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+    artifact_root: Path,
+    interaction_receipt_paths: Sequence[Path],
+) -> PairedReplayConfig:
+    """Build the approved provider configuration from verified private receipts."""
+    return _build_execution_config(
+        epoch_path=epoch_path,
+        manifest_path=manifest_path,
+        eligibility_ledger_path=eligibility_ledger_path,
+        environment_ledger_path=environment_ledger_path,
+        artifact_root=artifact_root,
+        interaction_receipt_paths=interaction_receipt_paths,
+        config_output_path=None,
+    )
+
+
+def _build_execution_config(
+    *,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+    artifact_root: Path,
+    interaction_receipt_paths: Sequence[Path],
+    config_output_path: Path | None,
+) -> PairedReplayConfig:
+    """Build the one approved provider configuration from verified private receipts."""
+    if not interaction_receipt_paths:
+        raise PairedReplayConfigError("at least one interaction receipt is required")
+    epoch_path = _normalized_absolute_path(epoch_path, "epoch_path")
+    manifest_path = _normalized_absolute_path(manifest_path, "manifest_path")
+    eligibility_ledger_path = _normalized_absolute_path(
+        eligibility_ledger_path, "eligibility_ledger_path"
+    )
+    environment_ledger_path = _normalized_absolute_path(
+        environment_ledger_path, "environment_ledger_path"
+    )
+    artifact_root = _normalized_absolute_path(artifact_root, "artifact_root")
+    interaction_receipt_paths = tuple(
+        _normalized_absolute_path(path, "interaction_receipt_path")
+        for path in interaction_receipt_paths
+    )
+    if config_output_path is not None:
+        config_output_path = _normalized_absolute_path(config_output_path, "config_output_path")
+    try:
+        epoch, _ = verify_epoch_manifest(epoch_path, manifest_path)
+    except EpochError as error:
+        raise PairedReplayConfigError(str(error)) from error
+    _require_approved_private_path(eligibility_ledger_path, epoch, "eligibility_ledger_path")
+    _require_approved_private_path(environment_ledger_path, epoch, "environment_ledger_path")
+    _require_approved_private_path(artifact_root, epoch, "artifact_root")
+    for index, receipt_path in enumerate(interaction_receipt_paths):
+        _require_approved_private_path(receipt_path, epoch, f"interaction_receipt_path[{index}]")
+    if len(set(interaction_receipt_paths)) != len(interaction_receipt_paths):
+        raise PairedReplayConfigError("interaction receipt paths must be unique")
+    if config_output_path is not None:
+        _require_approved_private_path(config_output_path, epoch, "config_output_path")
+        _require_distinct_config_output_path(
+            config_output_path,
+            epoch_path,
+            manifest_path,
+            eligibility_ledger_path,
+            environment_ledger_path,
+            epoch.audit_path,
+            interaction_receipt_paths,
+        )
+    receipt_headers = _read_unique_receipt_headers(interaction_receipt_paths)
+    bindings: list[InteractionReceiptBinding] = []
+    for receipt_path, header in zip(interaction_receipt_paths, receipt_headers, strict=True):
+        try:
+            receipt = verify_interaction_receipt(
+                receipt_path,
+                epoch_path,
+                manifest_path,
+                eligibility_ledger_path,
+                environment_ledger_path,
+            )
+        except InteractionReceiptError as error:
+            raise PairedReplayConfigError(
+                f"interaction receipt {receipt_path} is invalid: {error}"
+            ) from error
+        if receipt.digest != header[1] or receipt.candidate_id != header[0]:
+            raise PairedReplayConfigError(
+                f"interaction receipt {receipt_path} changed during verification"
+            )
+        bindings.append(
+            InteractionReceiptBinding(
+                receipt.candidate_id,
+                receipt_path,
+                receipt.digest,
+            )
+        )
+    bindings.sort(key=lambda binding: binding.candidate_id)
+    return PairedReplayConfig(
+        epoch_digest=epoch.digest,
+        epoch_path=epoch_path,
+        manifest_path=manifest_path,
+        eligibility_ledger_path=eligibility_ledger_path,
+        environment_ledger_path=environment_ledger_path,
+        artifact_root=artifact_root,
+        provider="openrouter",
+        endpoint="https://openrouter.ai/api/v1/chat/completions",
+        api_version="v1",
+        credential_environment="OPENROUTER_API_KEY",
+        privacy_boundary=(
+            "openrouter-prompt-logging-disabled-anthropic-commercial-retention-30-days"
+        ),
+        model="anthropic/claude-haiku-4.5",
+        provider_routing=ProviderRouting(
+            only=("anthropic",),
+            allow_fallbacks=False,
+            require_parameters=True,
+        ),
+        decoding_parameters={"max_tokens": 4096, "temperature": 0.0, "top_p": 1.0},
+        seed_supported=False,
+        seed=None,
+        repeat_count=2,
+        split="redesign",
+        candidate_ids=tuple(binding.candidate_id for binding in bindings),
+        interaction_receipts=tuple(bindings),
+        pricing=PriceTable("2026-08-01", "1", "0.10", "1.25", "5"),
+        pricing_source=("https://openrouter.ai/api/v1/models/anthropic/claude-haiku-4.5/endpoints"),
+        usage_mapping=UsageMapping(
+            input_field="usage.prompt_tokens",
+            cache_read_field="usage.prompt_tokens_details.cached_tokens",
+            cache_write_field="usage.prompt_tokens_details.cache_write_tokens",
+            output_field="usage.completion_tokens",
+            input_includes_cache=True,
+        ),
+        cost_cap_per_pair_usd="0.20",
+        cost_cap_run_usd="0.80",
+        unsupported_policy="terminate_pair",
+        induced_policy="include_in_codec_cost",
+    )
+
+
+def create_execution_config(
+    *,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+    artifact_root: Path,
+    interaction_receipt_paths: Sequence[Path],
+    config_path: Path,
+) -> PairedReplayConfig:
+    """Create a mode-0600 approved configuration from verified private receipts."""
+    config_path = _normalized_absolute_path(config_path, "config_path")
+    config = _build_execution_config(
+        epoch_path=epoch_path,
+        manifest_path=manifest_path,
+        eligibility_ledger_path=eligibility_ledger_path,
+        environment_ledger_path=environment_ledger_path,
+        artifact_root=artifact_root,
+        interaction_receipt_paths=interaction_receipt_paths,
+        config_output_path=config_path,
+    )
+    write_paired_config(config_path, config)
+    return config
+
+
 def verify_provider_contract(config: PairedReplayConfig) -> None:
     """Verify the approved provider pin without reading an chronological receipt."""
     _validate_openrouter_contract(config)
@@ -419,6 +590,17 @@ def verify_provider_contract(config: PairedReplayConfig) -> None:
 def verify_execution_config(config: PairedReplayConfig) -> None:
     """Verify the one approved provider contract and every chronological receipt binding."""
     verify_provider_contract(config)
+    try:
+        epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
+    except EpochError as error:
+        raise PairedReplayConfigError(str(error)) from error
+    _require_approved_private_path(config.eligibility_ledger_path, epoch, "eligibility_ledger_path")
+    _require_approved_private_path(config.environment_ledger_path, epoch, "environment_ledger_path")
+    _require_approved_private_path(config.artifact_root, epoch, "artifact_root")
+    for index, binding in enumerate(config.interaction_receipts):
+        _require_approved_private_path(
+            binding.receipt_path, epoch, f"interaction_receipt_path[{index}]"
+        )
     for binding in config.interaction_receipts:
         try:
             receipt = verify_interaction_receipt(
@@ -576,6 +758,59 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
         unsupported_policy=unsupported_policy,
         induced_policy=induced_policy,
     )
+
+
+def _normalized_absolute_path(path: Path, field_name: str) -> Path:
+    if not path.is_absolute():
+        raise PairedReplayConfigError(f"{field_name} must be absolute")
+    return path.resolve(strict=False)
+
+
+def _require_approved_private_path(path: Path, epoch: SealedEpoch, field_name: str) -> None:
+    if not any(path.is_relative_to(approved_root) for approved_root in epoch.approved_roots):
+        raise PairedReplayConfigError(f"{field_name} must be within sealed approved private roots")
+
+
+def _require_distinct_config_output_path(
+    config_path: Path,
+    epoch_path: Path,
+    manifest_path: Path,
+    eligibility_ledger_path: Path,
+    environment_ledger_path: Path,
+    audit_path: Path,
+    interaction_receipt_paths: Sequence[Path],
+) -> None:
+    sealed_paths = (
+        epoch_path,
+        manifest_path,
+        eligibility_ledger_path,
+        environment_ledger_path,
+        audit_path,
+        *interaction_receipt_paths,
+    )
+    if config_path in sealed_paths:
+        raise PairedReplayConfigError(
+            "config_output_path must not overwrite sealed private evidence"
+        )
+
+
+def _read_unique_receipt_headers(
+    receipt_paths: Sequence[Path],
+) -> tuple[tuple[str, str], ...]:
+    headers: list[tuple[str, str]] = []
+    candidate_ids: set[str] = set()
+    for receipt_path in receipt_paths:
+        try:
+            receipt = read_interaction_receipt(receipt_path)
+        except InteractionReceiptError as error:
+            raise PairedReplayConfigError(
+                f"interaction receipt {receipt_path} is invalid: {error}"
+            ) from error
+        if receipt.candidate_id in candidate_ids:
+            raise PairedReplayConfigError("interaction receipt candidate_ids must be unique")
+        candidate_ids.add(receipt.candidate_id)
+        headers.append((receipt.candidate_id, receipt.digest))
+    return tuple(headers)
 
 
 def _interaction_receipts(value: object) -> tuple[InteractionReceiptBinding, ...]:
