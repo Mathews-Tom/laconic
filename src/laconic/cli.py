@@ -14,41 +14,9 @@ from laconic import __version__
 from laconic.codec.encoders.file import FileEncoder
 from laconic.codec.observe import ObservationCodec, subject_for
 from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_models
-from laconic.gates.k5 import K5FixtureError
 from laconic.gates.protocol import GateSuiteResult
+from laconic.gates.reasoning_accuracy import ReasoningAccuracyFixtureError
 from laconic.gates.runner import UnknownGateError, run_gates
-from laconic.k1.eligibility import (
-    EligibilityLedgerError,
-    assess_manifest,
-    verify_eligibility,
-    write_eligibility_ledger,
-)
-from laconic.k1.environment_ledger import (
-    EnvironmentLedgerError,
-    assess_environments,
-    environment_counts,
-    verify_environment,
-    write_environment_ledger,
-)
-from laconic.k1.epoch import EpochError, create_epoch, verify_epoch, verify_epoch_manifest
-from laconic.k1.interaction import InteractionReceiptError, verify_interaction_receipt
-from laconic.k1.manifest import ManifestError, verify_manifest
-from laconic.k1.openrouter import OpenRouterChatCompletionsClient, require_process_credential
-from laconic.k1.paired_config import (
-    PairedReplayConfigError,
-    read_paired_config,
-    verify_execution_config,
-    verify_provider_contract,
-)
-from laconic.k1.paired_report import (
-    PairedReportError,
-    build_paired_report,
-    verify_paired_report,
-    write_paired_report,
-)
-from laconic.k1.paired_runner import PairedReplayError, run_paired_replay
-from laconic.k1.searchat_export import produce_manifest
-from laconic.k1.split import SplitPolicy
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
 from laconic.render.narrate import (
     NarrationConfig,
@@ -122,14 +90,12 @@ EXIT_LIVE_CONFIG_ERROR = 10
 EXIT_COST_CAP_EXCEEDED = 11
 EXIT_CLIENT_IMPORT_ERROR = 12
 EXIT_UNKNOWN_GATE = 13
-EXIT_K5_FIXTURE = 14
+EXIT_REASONING_ACCURACY_FIXTURE = 14
 EXIT_RENDER_TRACE = 15
 EXIT_NARRATION_CONFIG = 16
 EXIT_NARRATION_RESPONSE = 17
 EXIT_STUDY_OUTPUT_ERROR = 18
 EXIT_STUDY_INSUFFICIENT_PARTICIPANTS = 19
-
-EXIT_K1_MANIFEST = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -238,11 +204,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     gates = subcommands.add_parser(
         "gates",
-        help="run K1, K2, K4, K5 and print pass/fail",
-        description=(
-            "Evaluate the pre-registered gates (docs/overview.md §6.3) against a "
-            "committed transcript corpus and its recorded-response fixtures."
-        ),
+        help="run product evaluation criteria and print pass/fail",
+        description="Evaluate the codec against committed transcript-corpus fixtures.",
     )
     gates.add_argument(
         "--corpus",
@@ -252,8 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gates.add_argument(
         "--only",
-        metavar="K1,K2,...",
-        help="comma-separated gate names to run (default: every gate this build knows)",
+        metavar="NAME,...",
+        help="comma-separated criterion names (default: every criterion this build knows)",
     )
     gates.add_argument(
         "--format",
@@ -262,281 +225,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="report format",
     )
     gates.set_defaults(handler=_gates)
-
-    k1 = subcommands.add_parser(
-        "k1",
-        help="manage private metadata-only artifacts for the K1 hybrid remeasurement",
-    )
-    k1_subcommands = k1.add_subparsers(dest="k1_command")
-    k1_manifest = k1_subcommands.add_parser(
-        "manifest",
-        help="read and verify a frozen metadata-only candidate manifest",
-    )
-    k1_manifest_subcommands = k1_manifest.add_subparsers(dest="k1_manifest_command")
-    k1_manifest_verify = k1_manifest_subcommands.add_parser(
-        "verify",
-        help="verify the manifest digest, frozen split, and native source hashes",
-    )
-    k1_manifest_verify.add_argument(
-        "--manifest",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private metadata-only K1 manifest",
-    )
-    k1_manifest_verify.set_defaults(handler=_k1_manifest_verify)
-    k1_manifest_from_searchat = k1_manifest_subcommands.add_parser(
-        "from-searchat",
-        help="freeze a manifest from a private metadata-only Searchat export",
-    )
-    k1_manifest_from_searchat.add_argument(
-        "--input",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="metadata-only Searchat export",
-    )
-    k1_manifest_from_searchat.add_argument(
-        "--output",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="destination for the private frozen manifest",
-    )
-    k1_manifest_from_searchat.add_argument(
-        "--holdout-fraction",
-        type=float,
-        default=0.2,
-        help="fraction assigned to confirmatory holdout (default: 0.2)",
-    )
-    k1_manifest_from_searchat.add_argument(
-        "--seed",
-        default="laconic-k1-v1",
-        help="deterministic split seed (default: laconic-k1-v1)",
-    )
-    k1_manifest_from_searchat.set_defaults(handler=_k1_manifest_from_searchat)
-    k1_eligibility = k1_subcommands.add_parser(
-        "eligibility",
-        help="build and verify a private native-evidence eligibility ledger",
-    )
-    k1_eligibility_subcommands = k1_eligibility.add_subparsers(dest="k1_eligibility_command")
-    k1_eligibility_build = k1_eligibility_subcommands.add_parser(
-        "build",
-        help="probe every manifest candidate and write private dispositions",
-    )
-    k1_eligibility_build.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_eligibility_build.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_eligibility_build.add_argument(
-        "--ledger", type=Path, required=True, metavar="FILE", help="private eligibility ledger"
-    )
-    k1_eligibility_build.set_defaults(handler=_k1_eligibility_build)
-    k1_eligibility_verify = k1_eligibility_subcommands.add_parser(
-        "verify",
-        help="verify a complete eligibility ledger and recheck confirmatory records",
-    )
-    k1_eligibility_verify.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_eligibility_verify.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_eligibility_verify.add_argument(
-        "--ledger", type=Path, required=True, metavar="FILE", help="private eligibility ledger"
-    )
-    k1_eligibility_verify.set_defaults(handler=_k1_eligibility_verify)
-    k1_environment = k1_subcommands.add_parser(
-        "environment",
-        help="verify private non-content tool-environment admission receipts",
-    )
-    k1_environment_subcommands = k1_environment.add_subparsers(dest="k1_environment_command")
-    k1_environment_build = k1_environment_subcommands.add_parser(
-        "build",
-        help="validate recorded-tool environments and write private admission receipts",
-    )
-    k1_environment_build.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_environment_build.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_environment_build.add_argument(
-        "--eligibility-ledger",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private verified eligibility ledger",
-    )
-    k1_environment_build.add_argument(
-        "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
-    )
-    k1_environment_build.set_defaults(handler=_k1_environment_build)
-    k1_environment_verify = k1_environment_subcommands.add_parser(
-        "verify",
-        help="verify every confirmatory candidate has a valid tool environment",
-    )
-    k1_environment_verify.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_environment_verify.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_environment_verify.add_argument(
-        "--eligibility-ledger",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private verified eligibility ledger",
-    )
-    k1_environment_verify.add_argument(
-        "--ledger", type=Path, required=True, metavar="FILE", help="private environment ledger"
-    )
-    k1_environment_verify.set_defaults(handler=_k1_environment_verify)
-    k1_epoch = k1_subcommands.add_parser(
-        "epoch",
-        help="create and verify a private K1 sealed evidence epoch",
-    )
-    k1_epoch_subcommands = k1_epoch.add_subparsers(dest="k1_epoch_command")
-    k1_epoch_create = k1_epoch_subcommands.add_parser(
-        "create",
-        help="seal a frozen metadata-only manifest without opening candidate sources",
-    )
-    k1_epoch_create.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_epoch_create.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_epoch_create.add_argument(
-        "--audit", type=Path, required=True, metavar="FILE", help="private access audit"
-    )
-    k1_epoch_create.add_argument(
-        "--approved-root",
-        action="append",
-        type=Path,
-        required=True,
-        metavar="DIRECTORY",
-        help="approved private root; repeat for multiple roots",
-    )
-    k1_epoch_create.add_argument("--epoch-id", required=True, help="new private epoch identifier")
-    k1_epoch_create.add_argument(
-        "--created-at", required=True, help="ISO-8601 epoch creation timestamp"
-    )
-    k1_epoch_create.set_defaults(handler=_k1_epoch_create)
-    k1_epoch_verify = k1_epoch_subcommands.add_parser(
-        "verify",
-        help="verify an epoch receipt and hash-chained audit without opening candidate sources",
-    )
-    k1_epoch_verify.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_epoch_verify.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_epoch_verify.set_defaults(handler=_k1_epoch_verify)
-
-    k1_interaction = k1_subcommands.add_parser(
-        "interaction",
-        help="verify a private M3E chronological interaction receipt",
-    )
-    k1_interaction_subcommands = k1_interaction.add_subparsers(dest="k1_interaction_command")
-    k1_interaction_verify = k1_interaction_subcommands.add_parser(
-        "verify",
-        help="verify receipt chronology, M2/M3 bindings, and redesign-only audit provenance",
-    )
-    k1_interaction_verify.add_argument(
-        "--receipt", type=Path, required=True, metavar="FILE", help="private interaction receipt"
-    )
-    k1_interaction_verify.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_interaction_verify.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_interaction_verify.add_argument(
-        "--eligibility-ledger",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private M2 eligibility ledger",
-    )
-    k1_interaction_verify.add_argument(
-        "--environment-ledger",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private M3 environment ledger",
-    )
-    k1_interaction_verify.add_argument(
-        "--split",
-        choices=["redesign"],
-        required=True,
-        help="receipt split; only redesign is admitted before M6",
-    )
-    k1_interaction_verify.set_defaults(handler=_k1_interaction_verify)
-
-    k1_replay = k1_subcommands.add_parser(
-        "replay",
-        help="validate private configuration for a contemporary K1 paired replay",
-    )
-    k1_replay_subcommands = k1_replay.add_subparsers(dest="k1_replay_command")
-    k1_replay_verify_config = k1_replay_subcommands.add_parser(
-        "verify-config",
-        help="verify a private, integrity-checked paired replay configuration",
-    )
-    k1_replay_verify_config.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private paired replay configuration",
-    )
-    k1_replay_verify_config.set_defaults(handler=_k1_replay_verify_config)
-    k1_replay_run = k1_replay_subcommands.add_parser(
-        "run",
-        help="execute the approved redesign-only paired replay through OpenRouter",
-    )
-    k1_replay_run.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private paired replay configuration",
-    )
-    k1_replay_run.add_argument(
-        "--run-id", required=True, metavar="ID", help="private identifier for this execution"
-    )
-    k1_replay_run.add_argument(
-        "--report",
-        type=Path,
-        metavar="FILE",
-        help="private M5-ready paired report output; defaults under the private artifact root",
-    )
-    k1_replay_run.set_defaults(handler=_k1_replay_run)
-    k1_replay_verify_report = k1_replay_subcommands.add_parser(
-        "verify-report",
-        help="verify a private M5-ready paired receipt report and response-artifact digests",
-    )
-    k1_replay_verify_report.add_argument(
-        "--report", type=Path, required=True, metavar="FILE", help="private paired receipt report"
-    )
-    k1_replay_verify_report.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="private paired replay configuration",
-    )
-    k1_replay_verify_report.add_argument(
-        "--epoch", type=Path, required=True, metavar="FILE", help="private sealed K1 epoch"
-    )
-    k1_replay_verify_report.add_argument(
-        "--manifest", type=Path, required=True, metavar="FILE", help="private frozen K1 manifest"
-    )
-    k1_replay_verify_report.set_defaults(handler=_k1_replay_verify_report)
 
     expand = subcommands.add_parser(
         "expand",
@@ -597,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     study = subcommands.add_parser(
         "study",
-        help="K3 human-study harness (docs/system-design.md §4.1)",
+        help="human-study harness (docs/system-design.md §4.1)",
     )
     study_subcommands = study.add_subparsers(dest="study_command")
     study_dry_run = study_subcommands.add_parser(
@@ -1098,9 +786,9 @@ def _gates(args: argparse.Namespace) -> int:
     except MalformedRecordError as error:
         print(f"laconic gates: {error}", file=sys.stderr)
         return EXIT_MALFORMED_RECORD
-    except K5FixtureError as error:
+    except ReasoningAccuracyFixtureError as error:
         print(f"laconic gates: {error}", file=sys.stderr)
-        return EXIT_K5_FIXTURE
+        return EXIT_REASONING_ACCURACY_FIXTURE
     except OSError as error:
         print(f"laconic gates: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
@@ -1110,199 +798,6 @@ def _gates(args: argparse.Namespace) -> int:
     else:
         _report_gates(suite)
     return suite.exit_code
-
-
-def _k1_epoch_create(args: argparse.Namespace) -> int:
-    try:
-        epoch = create_epoch(
-            args.manifest,
-            args.epoch,
-            audit_path=args.audit,
-            approved_roots=tuple(args.approved_root),
-            epoch_id=args.epoch_id,
-            created_at=args.created_at,
-        )
-    except (EpochError, ManifestError) as error:
-        print(f"laconic k1 epoch create: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(f"sealed K1 epoch {args.epoch}: digest {epoch.digest}, audit {epoch.audit_path}")
-    return EXIT_OK
-
-
-def _k1_epoch_verify(args: argparse.Namespace) -> int:
-    try:
-        epoch = verify_epoch(args.epoch, args.manifest)
-    except (EpochError, ManifestError) as error:
-        print(f"laconic k1 epoch verify: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(f"verified K1 epoch {args.epoch}: digest {epoch.digest}, audit {epoch.audit_path}")
-    return EXIT_OK
-
-
-def _k1_manifest_verify(args: argparse.Namespace) -> int:
-    try:
-        manifest = verify_manifest(args.manifest)
-    except ManifestError as error:
-        print(f"laconic k1 manifest verify: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(
-        f"verified K1 manifest {args.manifest}: {len(manifest.candidates)} candidate(s), "
-        f"digest {manifest.digest}"
-    )
-    return EXIT_OK
-
-
-def _k1_eligibility_build(args: argparse.Namespace) -> int:
-    try:
-        ledger = assess_manifest(args.epoch, args.manifest)
-        write_eligibility_ledger(args.ledger, ledger)
-    except EligibilityLedgerError as error:
-        print(f"laconic k1 eligibility build: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    counts = {
-        disposition: sum(record.disposition == disposition for record in ledger.records)
-        for disposition in ("confirmatory", "diagnostic_only", "excluded")
-    }
-    print(
-        f"wrote K1 eligibility ledger {args.ledger}: {len(ledger.records)} candidate(s), "
-        f"confirmatory={counts['confirmatory']}, "
-        f"diagnostic-only={counts['diagnostic_only']}, excluded={counts['excluded']}"
-    )
-    return EXIT_OK
-
-
-def _k1_eligibility_verify(args: argparse.Namespace) -> int:
-    try:
-        ledger = verify_eligibility(args.epoch, args.manifest, args.ledger)
-    except EligibilityLedgerError as error:
-        print(f"laconic k1 eligibility verify: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(f"verified K1 eligibility ledger {args.ledger}: {len(ledger.records)} candidate(s)")
-    return EXIT_OK
-
-
-def _k1_environment_build(args: argparse.Namespace) -> int:
-    try:
-        ledger = assess_environments(args.epoch, args.manifest, args.eligibility_ledger)
-        write_environment_ledger(args.ledger, ledger)
-    except EnvironmentLedgerError as error:
-        print(f"laconic k1 environment build: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    counts = environment_counts(ledger)
-    print(
-        f"wrote K1 environment ledger {args.ledger}: {len(ledger.records)} candidate(s), "
-        f"valid={counts['valid']}, unsupported={counts['unsupported']}, "
-        f"unavailable={counts['unavailable']}"
-    )
-    return EXIT_OK
-
-
-def _k1_environment_verify(args: argparse.Namespace) -> int:
-    try:
-        ledger = verify_environment(args.epoch, args.manifest, args.eligibility_ledger, args.ledger)
-    except EnvironmentLedgerError as error:
-        print(f"laconic k1 environment verify: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    counts = environment_counts(ledger)
-    print(
-        f"verified K1 environment ledger {args.ledger}: {len(ledger.records)} candidate(s), "
-        f"valid={counts['valid']}, unsupported={counts['unsupported']}, "
-        f"unavailable={counts['unavailable']}"
-    )
-    return EXIT_OK
-
-
-def _k1_interaction_verify(args: argparse.Namespace) -> int:
-    try:
-        receipt = verify_interaction_receipt(
-            args.receipt,
-            args.epoch,
-            args.manifest,
-            args.eligibility_ledger,
-            args.environment_ledger,
-        )
-    except InteractionReceiptError as error:
-        print(f"laconic k1 interaction verify: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(
-        f"verified K1 interaction receipt {args.receipt}: "
-        f"candidate={receipt.candidate_id}, digest {receipt.digest}"
-    )
-    return EXIT_OK
-
-
-def _k1_replay_verify_config(args: argparse.Namespace) -> int:
-    try:
-        config = read_paired_config(args.config)
-        verify_execution_config(config)
-    except PairedReplayConfigError as error:
-        print(f"laconic k1 replay verify-config: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(
-        f"verified K1 paired replay config {args.config}: "
-        f"provider={config.provider}, model={config.model}, digest {config.digest}"
-    )
-    return EXIT_OK
-
-
-def _k1_replay_run(args: argparse.Namespace) -> int:
-    try:
-        config = read_paired_config(args.config)
-        verify_provider_contract(config)
-        require_process_credential(config.credential_environment)
-        receipt = run_paired_replay(config, OpenRouterChatCompletionsClient(), run_id=args.run_id)
-        epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
-        report_path = args.report or (config.artifact_root / args.run_id / "paired-report.json")
-        report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
-        write_paired_report(report_path, epoch, report)
-    except (
-        InteractionReceiptError,
-        PairedReplayConfigError,
-        PairedReplayError,
-        PairedReportError,
-        EpochError,
-    ) as error:
-        print(f"laconic k1 replay run: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(
-        f"wrote K1 paired report {report_path}: receipt={receipt.digest}, "
-        f"report={report.digest}, cost=${receipt.total_cost_usd}"
-    )
-    return EXIT_OK
-
-
-def _k1_replay_verify_report(args: argparse.Namespace) -> int:
-    try:
-        config = read_paired_config(args.config)
-        report = verify_paired_report(args.report, args.epoch, args.manifest, config)
-    except (PairedReplayConfigError, PairedReportError) as error:
-        print(f"laconic k1 replay verify-report: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(
-        f"verified K1 paired report {args.report}: {len(report.strata)} stratum/strata, "
-        f"digest {report.digest}"
-    )
-    return EXIT_OK
-
-
-def _k1_manifest_from_searchat(args: argparse.Namespace) -> int:
-    try:
-        manifest = produce_manifest(
-            args.input,
-            args.output,
-            policy=SplitPolicy(
-                holdout_fraction=args.holdout_fraction,
-                seed=args.seed,
-            ),
-        )
-    except ManifestError as error:
-        print(f"laconic k1 manifest from-searchat: {error}", file=sys.stderr)
-        return EXIT_K1_MANIFEST
-    print(
-        f"wrote K1 manifest {args.output}: {len(manifest.candidates)} candidate(s), "
-        f"digest {manifest.digest}"
-    )
-    return EXIT_OK
 
 
 def _expand(args: argparse.Namespace) -> int:
@@ -1429,7 +924,7 @@ def _report_study_dry_run(result: DryRunResult) -> None:
         f"margin=\u00b1{detection.margin_pp:.1f}pp)"
     )
     verdict = "equivalent" if detection.equivalent else "not equivalent"
-    print(f"  K3 verdict (dry run, simulated data): {verdict}")
+    print(f"  human-study verdict (dry run, simulated data): {verdict}")
 
 
 def _turn_range(value: str) -> tuple[int, int]:
@@ -1576,7 +1071,7 @@ def _report_reduction(paths: Sequence[Path]) -> None:
 
     This is a *gross* comparison: it never subtracts follow-up reads the
     codec might induce. Net accounting is ``laconic replay``'s job, added in
-    M8 — reporting it here would let this milestone claim a savings number
+    milestone — reporting it here would let this milestone claim a savings number
     it has no way to have earned honestly.
     """
     reads = 0
@@ -1594,7 +1089,7 @@ def _report_reduction(paths: Sequence[Path]) -> None:
             raw_total += record.raw_chars
             encoded_total += record.encoded_chars
 
-    print("\nFile observation encoder — gross reduction (induced reads: see M8):")
+    print("\nFile observation encoder — gross reduction (induced reads: see milestone):")
     print(f"  Read tool results seen:   {reads:,}")
     print(f"  unique payloads encoded:  {len(seen_handles):,}")
     if raw_total == 0:

@@ -1,12 +1,12 @@
 """The gate result shape and target/kill verdict logic shared by every
 gate module.
 
-``docs/system-design.md`` §6 M9's acceptance line: "A result below a
+``docs/system-design.md`` §6 milestone's acceptance line: "A result below a
 target but above its kill condition remains a reported failure but exits
 zero; it blocks dependent milestones until reconciliation resolves the
 target miss." :func:`evaluate` is the one place that three-way split is
-computed, so K1 and K2 (which have a real gap between target and kill)
-and K4/K5 (whose kill condition is the same boundary as their target)
+computed, so net-cost and action-equivalence (which have a real gap between target and kill)
+and codec-overhead/reasoning-accuracy (whose kill condition is the same boundary as their target)
 are judged by identical logic rather than four hand-rolled comparisons.
 """
 
@@ -20,7 +20,7 @@ from laconic.gates.thresholds import THRESHOLDS
 
 class GateVerdict(StrEnum):
     """One gate's outcome. There is no "unsure" value: every automated
-    gate resolves to exactly one of the first three; K3 always reports
+    gate resolves to exactly one of the first three; human-bug-catch always reports
     the fourth."""
 
     PASS = "pass"
@@ -31,7 +31,7 @@ class GateVerdict(StrEnum):
     @property
     def exits_non_zero(self) -> bool:
         """Whether this verdict, alone, must make the gate suite's exit
-        code non-zero -- ``docs/system-design.md`` §6 M9: "A kill
+        code non-zero -- ``docs/system-design.md`` §6 milestone: "A kill
         condition exits non-zero. A result below a target but above its
         kill condition remains a reported failure but exits zero."""
         return self is GateVerdict.KILL
@@ -94,7 +94,7 @@ class GateResult:
     @staticmethod
     def manual(gate: str, description: str, *, detail: str) -> GateResult:
         """Build a :class:`GateResult` for a gate this build never
-        automates (K3) -- reported explicitly rather than omitted."""
+        automates (human-bug-catch) -- reported explicitly rather than omitted."""
         return GateResult(
             gate=gate,
             description=description,

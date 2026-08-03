@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from laconic.gates import k1, k2, k4, k5
+from laconic.gates import action_equivalence, codec_overhead, net_cost, reasoning_accuracy
 from laconic.gates.protocol import GateResult, GateSuiteResult, GateVerdict, evaluate
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.gates.thresholds import THRESHOLDS, GateThreshold
@@ -18,18 +18,18 @@ from laconic.replay.engine import recorded_response_path
 
 def test_protocol_thresholds_match_the_published_table() -> None:
     """`docs/overview.md` §6.3 and `docs/system-design.md` §4, verbatim."""
-    assert THRESHOLDS["K1"].target == 25.0
-    assert THRESHOLDS["K1"].kill == 15.0
-    assert THRESHOLDS["K2"].target == 95.0
-    assert THRESHOLDS["K2"].kill == 90.0
-    assert THRESHOLDS["K4"].target == 500.0
-    assert THRESHOLDS["K4"].kill == 500.0
-    assert THRESHOLDS["K5"].target == 2.0
-    assert THRESHOLDS["K5"].kill == 2.0
+    assert THRESHOLDS["net-cost"].target == 25.0
+    assert THRESHOLDS["net-cost"].kill == 15.0
+    assert THRESHOLDS["action-equivalence"].target == 95.0
+    assert THRESHOLDS["action-equivalence"].kill == 90.0
+    assert THRESHOLDS["codec-overhead"].target == 500.0
+    assert THRESHOLDS["codec-overhead"].kill == 500.0
+    assert THRESHOLDS["reasoning-accuracy"].target == 2.0
+    assert THRESHOLDS["reasoning-accuracy"].kill == 2.0
 
 
 def test_protocol_k3_carries_no_automated_threshold() -> None:
-    assert "K3" not in THRESHOLDS
+    assert "human-bug-catch" not in THRESHOLDS
 
 
 def test_protocol_gate_threshold_rejects_a_kill_above_target_for_at_least() -> None:
@@ -50,30 +50,30 @@ def test_protocol_gate_threshold_rejects_a_kill_below_target_for_at_most() -> No
 
 
 def test_protocol_evaluate_at_least_passes_at_or_above_target() -> None:
-    assert evaluate("K1", 25.0) is GateVerdict.PASS
-    assert evaluate("K1", 40.0) is GateVerdict.PASS
+    assert evaluate("net-cost", 25.0) is GateVerdict.PASS
+    assert evaluate("net-cost", 40.0) is GateVerdict.PASS
 
 
 def test_protocol_evaluate_at_least_fails_target_between_kill_and_target() -> None:
-    assert evaluate("K1", 15.0) is GateVerdict.FAILED_TARGET
-    assert evaluate("K1", 24.9) is GateVerdict.FAILED_TARGET
+    assert evaluate("net-cost", 15.0) is GateVerdict.FAILED_TARGET
+    assert evaluate("net-cost", 24.9) is GateVerdict.FAILED_TARGET
 
 
 def test_protocol_evaluate_at_least_kills_below_kill() -> None:
-    assert evaluate("K1", 14.9) is GateVerdict.KILL
-    assert evaluate("K1", 0.0) is GateVerdict.KILL
-    assert evaluate("K1", -5.0) is GateVerdict.KILL
+    assert evaluate("net-cost", 14.9) is GateVerdict.KILL
+    assert evaluate("net-cost", 0.0) is GateVerdict.KILL
+    assert evaluate("net-cost", -5.0) is GateVerdict.KILL
 
 
 def test_protocol_evaluate_at_most_passes_at_or_below_target() -> None:
-    assert evaluate("K4", 500.0) is GateVerdict.PASS
-    assert evaluate("K4", 0.0) is GateVerdict.PASS
+    assert evaluate("codec-overhead", 500.0) is GateVerdict.PASS
+    assert evaluate("codec-overhead", 0.0) is GateVerdict.PASS
 
 
 def test_protocol_evaluate_at_most_kills_above_target_when_kill_equals_target() -> None:
     """K4 and K5 have no failed-but-not-killed zone: kill == target."""
-    assert evaluate("K4", 500.01) is GateVerdict.KILL
-    assert evaluate("K5", 2.01) is GateVerdict.KILL
+    assert evaluate("codec-overhead", 500.01) is GateVerdict.KILL
+    assert evaluate("reasoning-accuracy", 2.01) is GateVerdict.KILL
 
 
 def test_protocol_evaluate_unknown_gate_raises() -> None:
@@ -85,7 +85,7 @@ def test_protocol_evaluate_unknown_gate_raises() -> None:
 
 
 def test_protocol_gate_result_measured_derives_its_own_verdict() -> None:
-    result = GateResult.measured("K1", 30.0, detail="corpus-wide")
+    result = GateResult.measured("net-cost", 30.0, detail="corpus-wide")
     assert result.verdict is GateVerdict.PASS
     assert result.target == 25.0
     assert result.kill == 15.0
@@ -95,12 +95,12 @@ def test_protocol_gate_result_measured_derives_its_own_verdict() -> None:
 def test_protocol_gate_result_measured_cannot_disagree_with_evaluate() -> None:
     """A caller cannot hand-pick a verdict that contradicts the value --
     there is no `verdict=` parameter to `measured` at all."""
-    result = GateResult.measured("K1", 10.0, detail="corpus-wide")
+    result = GateResult.measured("net-cost", 10.0, detail="corpus-wide")
     assert result.verdict is GateVerdict.KILL
 
 
 def test_protocol_gate_result_manual_has_no_value_or_threshold() -> None:
-    result = GateResult.manual("K3", "Human bug-catch rate", detail="not evaluated")
+    result = GateResult.manual("human-bug-catch", "Human bug-catch rate", detail="not evaluated")
     assert result.verdict is GateVerdict.MANUAL
     assert result.value is None
     assert result.target is None
@@ -108,10 +108,10 @@ def test_protocol_gate_result_manual_has_no_value_or_threshold() -> None:
 
 
 def test_protocol_gate_result_to_json_round_trips_the_verdict_as_a_string() -> None:
-    result = GateResult.measured("K2", 96.0, detail="d")
+    result = GateResult.measured("action-equivalence", 96.0, detail="d")
     payload = result.to_json()
     assert payload["verdict"] == "pass"
-    assert payload["gate"] == "K2"
+    assert payload["gate"] == "action-equivalence"
 
 
 # --- GateSuiteResult ----------------------------------------------------
@@ -120,16 +120,16 @@ def test_protocol_gate_result_to_json_round_trips_the_verdict_as_a_string() -> N
 def test_protocol_suite_exit_code_is_zero_when_no_gate_kills() -> None:
     suite = GateSuiteResult(
         results=(
-            GateResult.measured("K1", 30.0, detail="d"),
-            GateResult.measured("K2", 18.0 + 77.0, detail="d"),  # 95.0, passes
-            GateResult.manual("K3", "d", detail="d"),
+            GateResult.measured("net-cost", 30.0, detail="d"),
+            GateResult.measured("action-equivalence", 18.0 + 77.0, detail="d"),  # 95.0, passes
+            GateResult.manual("human-bug-catch", "d", detail="d"),
         )
     )
     assert suite.exit_code == 0
 
 
 def test_protocol_suite_exit_code_is_zero_for_a_failed_target_short_of_a_kill() -> None:
-    suite = GateSuiteResult(results=(GateResult.measured("K1", 18.0, detail="d"),))
+    suite = GateSuiteResult(results=(GateResult.measured("net-cost", 18.0, detail="d"),))
     assert suite.results[0].verdict is GateVerdict.FAILED_TARGET
     assert suite.exit_code == 0
 
@@ -137,15 +137,15 @@ def test_protocol_suite_exit_code_is_zero_for_a_failed_target_short_of_a_kill() 
 def test_protocol_suite_exit_code_is_non_zero_when_any_gate_kills() -> None:
     suite = GateSuiteResult(
         results=(
-            GateResult.measured("K1", 30.0, detail="d"),
-            GateResult.measured("K4", 600.0, detail="d"),
+            GateResult.measured("net-cost", 30.0, detail="d"),
+            GateResult.measured("codec-overhead", 600.0, detail="d"),
         )
     )
     assert suite.exit_code == 1
 
 
 def test_protocol_suite_to_json_lists_every_gate() -> None:
-    suite = GateSuiteResult(results=(GateResult.measured("K1", 30.0, detail="d"),))
+    suite = GateSuiteResult(results=(GateResult.measured("net-cost", 30.0, detail="d"),))
     payload = suite.to_json()
     assert isinstance(payload["gates"], list)
     assert len(payload["gates"]) == 1
@@ -162,14 +162,14 @@ def test_k1_measures_the_committed_corpus_below_the_kill_threshold() -> None:
     five whale reads out of 125 turns, and the honest number is a kill,
     not a pass. This pins that number so a change to the committed
     fixtures or the measurement itself is caught."""
-    result = k1.measure([CORPUS_DIR])
-    assert result.gate == "K1"
+    result = net_cost.measure([CORPUS_DIR])
+    assert result.gate == "net-cost"
     assert result.value == pytest.approx(8.53, abs=0.01)
     assert result.verdict is GateVerdict.KILL
 
 
 def test_k2_measures_the_committed_corpus_at_full_equivalence() -> None:
-    result = k2.measure([CORPUS_DIR])
+    result = action_equivalence.measure([CORPUS_DIR])
     assert result.value == pytest.approx(100.0)
     assert result.verdict is GateVerdict.PASS
 
@@ -246,13 +246,13 @@ def test_k1_passes_on_a_fixture_with_real_net_savings(tmp_path: Path) -> None:
             )
         ],
     )
-    result = k1.measure([tmp_path])
+    result = net_cost.measure([tmp_path])
     assert result.verdict is GateVerdict.PASS
     assert result.value is not None and result.value > 25.0
 
 
 def test_k1_on_a_corpus_with_no_baseline_transcripts_reports_zero(tmp_path: Path) -> None:
-    result = k1.measure([tmp_path])
+    result = net_cost.measure([tmp_path])
     assert result.value == 0.0
     assert result.verdict is GateVerdict.KILL
     assert "no baseline transcripts" in result.detail
@@ -273,7 +273,7 @@ def test_k2_reports_below_target_when_an_action_diverges(tmp_path: Path) -> None
             )
         ],
     )
-    result = k2.measure([tmp_path])
+    result = action_equivalence.measure([tmp_path])
     assert result.value == 0.0
     assert result.verdict is GateVerdict.KILL
 
@@ -282,19 +282,25 @@ def test_k2_reports_below_target_when_an_action_diverges(tmp_path: Path) -> None
 
 
 def test_runner_only_filters_which_gates_run() -> None:
-    suite = run_gates([CORPUS_DIR], only=["K1"])
-    assert [r.gate for r in suite.results] == ["K1"]
+    suite = run_gates([CORPUS_DIR], only=["net-cost"])
+    assert [r.gate for r in suite.results] == ["net-cost"]
 
 
 def test_runner_default_run_includes_every_registered_gate_plus_k3() -> None:
     suite = run_gates([CORPUS_DIR])
-    assert {r.gate for r in suite.results} == {"K1", "K2", "K3", "K4", "K5"}
+    assert {r.gate for r in suite.results} == {
+        "net-cost",
+        "action-equivalence",
+        "human-bug-catch",
+        "codec-overhead",
+        "reasoning-accuracy",
+    }
 
 
 def test_runner_k3_is_always_manual() -> None:
-    suite = run_gates([CORPUS_DIR], only=["K3"])
+    suite = run_gates([CORPUS_DIR], only=["human-bug-catch"])
     assert suite.results[0].verdict is GateVerdict.MANUAL
-    assert suite.results[0].gate == "K3"
+    assert suite.results[0].gate == "human-bug-catch"
 
 
 def test_runner_rejects_an_unknown_gate_name() -> None:
@@ -303,7 +309,7 @@ def test_runner_rejects_an_unknown_gate_name() -> None:
 
 
 def test_runner_exit_code_reflects_a_real_kill_on_the_committed_corpus() -> None:
-    suite = run_gates([CORPUS_DIR], only=["K1", "K2"])
+    suite = run_gates([CORPUS_DIR], only=["net-cost", "action-equivalence"])
     assert suite.exit_code == 1
 
 
@@ -319,14 +325,14 @@ def test_runner_raises_on_a_corpus_with_no_baseline_transcripts(tmp_path: Path) 
 
 
 def test_k4_measures_the_committed_corpus_under_the_kill_threshold() -> None:
-    result = k4.measure([CORPUS_DIR])
-    assert result.gate == "K4"
+    result = codec_overhead.measure([CORPUS_DIR])
+    assert result.gate == "codec-overhead"
     assert result.value is not None and 0.0 < result.value < 500.0
     assert result.verdict is GateVerdict.PASS
 
 
 def test_k4_on_a_corpus_with_no_baseline_transcripts_reports_zero(tmp_path: Path) -> None:
-    result = k4.measure([tmp_path])
+    result = codec_overhead.measure([tmp_path])
     assert result.value == 0.0
     assert result.verdict is GateVerdict.PASS
 
@@ -346,7 +352,7 @@ def test_k4_reports_zero_overhead_when_encoding_only_shrinks_content(tmp_path: P
             },
         ],
     )
-    result = k4.measure([tmp_path])
+    result = codec_overhead.measure([tmp_path])
     assert result.value == 0.0
 
 
@@ -367,7 +373,7 @@ def test_k4_detects_overhead_on_a_short_search_result_with_few_unique_paths(tmp_
             },
         ],
     )
-    result = k4.measure([tmp_path])
+    result = codec_overhead.measure([tmp_path])
     assert result.value is not None and result.value > 0.0
 
 
@@ -400,7 +406,7 @@ def test_k4_measures_overhead_for_tools_outside_file_command_search(tmp_path: Pa
             },
         ],
     )
-    result = k4.measure([tmp_path])
+    result = codec_overhead.measure([tmp_path])
     assert result.detail is not None
     assert "1 of which invoked a tool this codec encoded" in result.detail
 
@@ -409,97 +415,114 @@ def test_k4_measures_overhead_for_tools_outside_file_command_search(tmp_path: Pa
 
 
 def test_k5_extract_items_derives_from_the_committed_corpus() -> None:
-    items = k5.extract_items([CORPUS_DIR])
+    items = reasoning_accuracy.extract_items([CORPUS_DIR])
     assert len(items) == 50
     assert all(item.expected_answer.isdigit() for item in items)
     assert len(items) == len({item.item_id for item in items})
 
 
 def test_k5_extract_items_respects_the_limit() -> None:
-    items = k5.extract_items([CORPUS_DIR], limit=5)
+    items = reasoning_accuracy.extract_items([CORPUS_DIR], limit=5)
     assert len(items) == 5
 
 
 def test_k5_accuracy_computes_the_exact_match_rate() -> None:
     items = (
-        k5.K5Item(item_id="a_0", question="q", expected_answer="0"),
-        k5.K5Item(item_id="b_1", question="q", expected_answer="1"),
+        reasoning_accuracy.ReasoningItem(item_id="a_0", question="q", expected_answer="0"),
+        reasoning_accuracy.ReasoningItem(item_id="b_1", question="q", expected_answer="1"),
     )
-    provenance = k5.Provenance(source="recorded", model="m", captured_at="t")
+    provenance = reasoning_accuracy.Provenance(source="recorded", model="m", captured_at="t")
     responses = (
-        k5.K5Response(item_id="a_0", condition="off", answer="0", provenance=provenance),
-        k5.K5Response(item_id="b_1", condition="off", answer="WRONG", provenance=provenance),
+        reasoning_accuracy.ReasoningResponse(
+            item_id="a_0", condition="off", answer="0", provenance=provenance
+        ),
+        reasoning_accuracy.ReasoningResponse(
+            item_id="b_1", condition="off", answer="WRONG", provenance=provenance
+        ),
     )
-    assert k5.accuracy(items, responses, condition="off") == 50.0
+    assert reasoning_accuracy.accuracy(items, responses, condition="off") == 50.0
 
 
 def test_k5_accuracy_raises_when_a_condition_response_is_missing() -> None:
-    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="0"),)
-    with pytest.raises(k5.K5FixtureError, match="a_0"):
-        k5.accuracy(items, (), condition="off")
+    items = (reasoning_accuracy.ReasoningItem(item_id="a_0", question="q", expected_answer="0"),)
+    with pytest.raises(reasoning_accuracy.ReasoningAccuracyFixtureError, match="a_0"):
+        reasoning_accuracy.accuracy(items, (), condition="off")
 
 
 def test_k5_measures_the_committed_corpus_at_zero_delta() -> None:
-    result = k5.measure([CORPUS_DIR])
+    result = reasoning_accuracy.measure([CORPUS_DIR])
     assert result.value == 0.0
     assert result.verdict is GateVerdict.PASS
 
 
-def test_k5_load_responses_requires_a_committed_fixture(tmp_path: Path) -> None:
-    with pytest.raises(k5.K5FixtureError, match="no committed K5 response fixture"):
-        k5.load_responses(tmp_path / "missing.ndjson")
+def test_reasoning_accuracy_requires_a_committed_fixture(tmp_path: Path) -> None:
+    with pytest.raises(
+        reasoning_accuracy.ReasoningAccuracyFixtureError,
+        match="no committed reasoning-accuracy response fixture",
+    ):
+        reasoning_accuracy.load_responses(tmp_path / "missing.ndjson")
 
 
 def test_k5_load_responses_requires_provenance(tmp_path: Path) -> None:
     path = tmp_path / "r.ndjson"
     path.write_text(json.dumps({"item_id": "a_0", "condition": "off", "answer": "0"}) + "\n")
-    with pytest.raises(k5.K5FixtureError, match="no `provenance` block"):
-        k5.load_responses(path)
+    with pytest.raises(
+        reasoning_accuracy.ReasoningAccuracyFixtureError, match="no `provenance` block"
+    ):
+        reasoning_accuracy.load_responses(path)
 
 
 def test_k5_load_responses_raises_a_loud_error_for_unparseable_json(tmp_path: Path) -> None:
     path = tmp_path / "r.ndjson"
     path.write_text('{"item_id": "a_0", "condition": "off"\n')
-    with pytest.raises(k5.K5FixtureError, match=r"r\.ndjson:1: not valid JSON"):
-        k5.load_responses(path)
+    with pytest.raises(
+        reasoning_accuracy.ReasoningAccuracyFixtureError, match=r"r\.ndjson:1: not valid JSON"
+    ):
+        reasoning_accuracy.load_responses(path)
 
 
 def test_k5_load_responses_raises_a_loud_error_for_a_non_object_line(tmp_path: Path) -> None:
     path = tmp_path / "r.ndjson"
     path.write_text("[1, 2, 3]\n")
-    with pytest.raises(k5.K5FixtureError, match=r"r\.ndjson:1: malformed"):
-        k5.load_responses(path)
+    with pytest.raises(
+        reasoning_accuracy.ReasoningAccuracyFixtureError, match=r"r\.ndjson:1: malformed"
+    ):
+        reasoning_accuracy.load_responses(path)
 
 
 def test_k5_load_responses_rejects_a_duplicate_item_condition_pair(tmp_path: Path) -> None:
     path = tmp_path / "r.ndjson"
     record = {"item_id": "a_0", "condition": "off", "answer": "0", "provenance": _provenance()}
     path.write_text(json.dumps(record) + "\n" + json.dumps(record) + "\n")
-    with pytest.raises(k5.K5FixtureError, match="duplicate response"):
-        k5.load_responses(path)
+    with pytest.raises(
+        reasoning_accuracy.ReasoningAccuracyFixtureError, match="duplicate response"
+    ):
+        reasoning_accuracy.load_responses(path)
 
 
 def test_k5_responses_path_for_rejects_more_than_one_corpus_root(tmp_path: Path) -> None:
     other = tmp_path / "other"
     other.mkdir()
-    with pytest.raises(k5.K5FixtureError, match="exactly one corpus root"):
-        k5.responses_path_for([tmp_path, other])
+    with pytest.raises(
+        reasoning_accuracy.ReasoningAccuracyFixtureError, match="exactly one corpus root"
+    ):
+        reasoning_accuracy.responses_path_for([tmp_path, other])
 
 
 def test_k5_write_responses_round_trips_through_load_responses(tmp_path: Path) -> None:
-    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="0"),)
-    responses = k5.generate_synthetic_responses(items, model="m")
+    items = (reasoning_accuracy.ReasoningItem(item_id="a_0", question="q", expected_answer="0"),)
+    responses = reasoning_accuracy.generate_synthetic_responses(items, model="m")
     path = tmp_path / "r.ndjson"
-    k5.write_responses(path, responses)
-    loaded = k5.load_responses(path)
+    reasoning_accuracy.write_responses(path, responses)
+    loaded = reasoning_accuracy.load_responses(path)
     assert loaded == responses
 
 
 def test_k5_generate_synthetic_responses_answers_correctly_both_conditions() -> None:
-    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="7"),)
-    responses = k5.generate_synthetic_responses(items, model="m")
-    assert k5.accuracy(items, responses, condition="off") == 100.0
-    assert k5.accuracy(items, responses, condition="on") == 100.0
+    items = (reasoning_accuracy.ReasoningItem(item_id="a_0", question="q", expected_answer="7"),)
+    responses = reasoning_accuracy.generate_synthetic_responses(items, model="m")
+    assert reasoning_accuracy.accuracy(items, responses, condition="off") == 100.0
+    assert reasoning_accuracy.accuracy(items, responses, condition="on") == 100.0
     assert all(r.provenance.source == "recorded" for r in responses)
 
 
@@ -508,15 +531,15 @@ class _FakeK5Client:
         self._answers = answers
         self.calls: list[str] = []
 
-    def answer(self, *, item: k5.K5Item, context: str, model: str) -> str:
+    def answer(self, *, item: reasoning_accuracy.ReasoningItem, context: str, model: str) -> str:
         self.calls.append(context)
         return self._answers[context]
 
 
 def test_k5_capture_live_responses_tags_provenance_as_live() -> None:
-    items = (k5.K5Item(item_id="a_0", question="q", expected_answer="7"),)
+    items = (reasoning_accuracy.ReasoningItem(item_id="a_0", question="q", expected_answer="7"),)
     client = _FakeK5Client({"raw-text": "7", "encoded-text": "7"})
-    responses = k5.capture_live_responses(
+    responses = reasoning_accuracy.capture_live_responses(
         items,
         contexts={"a_0": ("raw-text", "encoded-text")},
         client=client,
@@ -573,7 +596,7 @@ def test_negative_control_k1_an_expensive_induced_read_can_erase_savings_into_a_
             ),
         ],
     )
-    result = k1.measure([tmp_path])
+    result = net_cost.measure([tmp_path])
     assert result.verdict is GateVerdict.KILL
     assert result.value is not None and result.value < 0.0
 
@@ -599,7 +622,7 @@ def test_negative_control_k4_a_pathological_search_result_can_reach_the_kill_thr
             },
         ],
     )
-    result = k4.measure([tmp_path])
+    result = codec_overhead.measure([tmp_path])
     assert result.verdict is GateVerdict.KILL
     assert result.value is not None and result.value > 500.0
 
@@ -629,9 +652,9 @@ def test_negative_control_k5_a_wrong_codec_on_answer_can_reach_the_kill_threshol
             },
         ],
     )
-    items = k5.extract_items([tmp_path])
+    items = reasoning_accuracy.extract_items([tmp_path])
     assert len(items) == 1
-    responses_path = k5.responses_path_for([tmp_path])
+    responses_path = reasoning_accuracy.responses_path_for([tmp_path])
     _write(
         responses_path,
         [
@@ -649,6 +672,6 @@ def test_negative_control_k5_a_wrong_codec_on_answer_can_reach_the_kill_threshol
             },
         ],
     )
-    result = k5.measure([tmp_path])
+    result = reasoning_accuracy.measure([tmp_path])
     assert result.verdict is GateVerdict.KILL
     assert result.value == 100.0

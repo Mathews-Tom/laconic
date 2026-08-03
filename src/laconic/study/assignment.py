@@ -1,4 +1,4 @@
-"""Within-subjects, counterbalanced condition assignment for the K3 harness.
+"""Within-subjects, counterbalanced condition assignment for the human-bug-catch harness.
 
 ``docs/system-design.md`` §4.1's Design line: "Within-subjects, counter-
 balanced. Each participant reviews agent traces in both conditions --

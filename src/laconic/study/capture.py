@@ -1,4 +1,4 @@
-"""Response capture for the K3 human-study harness.
+"""Response capture for the human-bug-catch human-study harness.
 
 ``docs/system-design.md`` §4.1: "Primary measure. Defect detection rate."
 and "Secondary measures. Time to decision, self-reported confidence, and

@@ -1,13 +1,13 @@
-"""K4: codec overhead in added input tokens per turn.
+"""codec-overhead: codec overhead in added input tokens per turn.
 
 ``docs/overview.md`` §6.3: "Codec overhead in added input tokens per
 turn ... < 500," kill "above → Caveman's net-negative trap, reproduced."
 Read (``.docs/DEVELOPMENT_PLAN_HISTORY.md`` H-25) as the codec's own
 *structural* tax -- the outline header, span markers, and elision framing
 :mod:`laconic.codec.observe` emits regardless of content size -- not a
-net-cost figure (that is K1's job). Unlike K1/K2, K4 needs neither a
-committed fixture nor a model: it runs the real encoder against every
-observation in the corpus, live, on any build.
+net-cost figure. Unlike net cost and action equivalence, codec overhead
+needs neither a committed fixture nor a model: it runs the real encoder
+against every observation in the corpus.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from laconic.replay.corpus import JsonValue, iter_records
 from laconic.replay.engine import find_baseline_transcripts
 
 #: A widely-cited approximation for English/code text -- documented here
-#: because K4 is explicitly a structural/format-tax gate, never a dollar
-#: figure; M8's net-cost accounting stays strictly usage-based and never
+#: because codec-overhead is explicitly a structural/format-tax gate, never a dollar
+#: figure; milestone's net-cost accounting stays strictly usage-based and never
 #: uses a char-per-token estimate anywhere.
 CHARS_PER_TOKEN = 4.0
 
@@ -59,7 +59,7 @@ def _overhead_tokens(path: Path, codec: ObservationCodec) -> list[tuple[float, b
     ``(encoded_chars - raw_chars) / CHARS_PER_TOKEN`` for one the codec
     made bigger. Every tool name is encoded, dispatched by
     :meth:`~laconic.codec.observe.ObservationCodec.encode` exactly as
-    production does -- including one this build falls back on -- so K4
+    production does -- including one this build falls back on -- so codec-overhead
     measures the same population the codec actually touches, not a
     hand-picked subset of it.
     """
@@ -108,9 +108,9 @@ def _overhead_tokens(path: Path, codec: ObservationCodec) -> list[tuple[float, b
 
 
 def measure(paths: Sequence[Path]) -> GateResult:
-    """Measure K4 across every baseline transcript under ``paths``.
+    """Measure codec-overhead across every baseline transcript under ``paths``.
 
-    Requires no recorded-response fixture: K4 asks whether the codec's
+    Requires no recorded-response fixture: codec-overhead asks whether the codec's
     own output format ever costs more than the raw content it replaces,
     which is answerable from the baseline transcript and the real codec
     alone.
@@ -124,14 +124,14 @@ def measure(paths: Sequence[Path]) -> GateResult:
     """
     baselines = find_baseline_transcripts(paths)
     if not baselines:
-        return GateResult.measured("K4", 0.0, detail="no baseline transcripts found")
+        return GateResult.measured("codec-overhead", 0.0, detail="no baseline transcripts found")
     all_overhead: list[tuple[float, bool]] = []
     with Ledger(":memory:", "k4-gate") as ledger:
         codec = ObservationCodec(ledger)
         for baseline in baselines:
             all_overhead.extend(_overhead_tokens(baseline, codec))
     if not all_overhead:
-        return GateResult.measured("K4", 0.0, detail="no assistant turns found")
+        return GateResult.measured("codec-overhead", 0.0, detail="no assistant turns found")
     values = [value for value, _ in all_overhead]
     mean_overhead = sum(values) / len(values)
     encoded_turns = sum(1 for _, encoded_any in all_overhead if encoded_any)
@@ -141,4 +141,4 @@ def measure(paths: Sequence[Path]) -> GateResult:
         f"{encoded_turns} of which invoked a tool this codec encoded, "
         f"{inflated} turn(s) where encoding added chars over raw"
     )
-    return GateResult.measured("K4", mean_overhead, detail=detail)
+    return GateResult.measured("codec-overhead", mean_overhead, detail=detail)

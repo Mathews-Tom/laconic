@@ -1,8 +1,8 @@
-"""K2: action equivalence, compressed vs raw observation.
+"""action-equivalence: action equivalence, compressed vs raw observation.
 
 ``docs/overview.md`` §6.3: "Action equivalence, compressed vs raw
 observation ... ≥ 95%," kill "< 90% → codec is lossy where it matters."
-Computed corpus-wide, matching K1's weighting rationale
+Computed corpus-wide, matching net-cost's weighting rationale
 (``.docs/DEVELOPMENT_PLAN_HISTORY.md`` H-25): total equivalent turns over
 total compared turns across every session, not a mean of per-session
 rates.
@@ -19,7 +19,7 @@ from laconic.replay.equivalence import compare_session
 
 
 def measure(paths: Sequence[Path]) -> GateResult:
-    """Measure K2 across every baseline transcript under ``paths`` that
+    """Measure action-equivalence across every baseline transcript under ``paths`` that
     has a committed recorded-response fixture.
 
     Structural comparison only (:mod:`laconic.replay.equivalence`) --
@@ -28,7 +28,9 @@ def measure(paths: Sequence[Path]) -> GateResult:
     """
     baselines = find_baseline_transcripts(paths)
     if not baselines:
-        return GateResult.measured("K2", 100.0, detail="no baseline transcripts found")
+        return GateResult.measured(
+            "action-equivalence", 100.0, detail="no baseline transcripts found"
+        )
     total_compared = 0
     total_equivalent = 0
     for baseline in baselines:
@@ -38,7 +40,9 @@ def measure(paths: Sequence[Path]) -> GateResult:
         total_compared += len(equivalence.comparisons)
         total_equivalent += sum(1 for c in equivalence.comparisons if c.is_equivalent)
     if total_compared == 0:
-        return GateResult.measured("K2", 100.0, detail="no comparable action turns in the corpus")
+        return GateResult.measured(
+            "action-equivalence", 100.0, detail="no comparable action turns in the corpus"
+        )
     rate_pct = 100 * total_equivalent / total_compared
     detail = f"{len(baselines)} session(s), {total_equivalent}/{total_compared} turns equivalent"
-    return GateResult.measured("K2", rate_pct, detail=detail)
+    return GateResult.measured("action-equivalence", rate_pct, detail=detail)

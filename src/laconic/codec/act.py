@@ -23,7 +23,7 @@ from laconic.ledger import RAW_ENCODING, RAW_ERRORS, Ledger, ObservationKind, Un
 class StaleAnchorError(ValueError):
     """Raised when an anchor does not resolve against a file's current state.
 
-    Covers every failure shape named in ``docs/system-design.md`` §6 M6's
+    Covers every failure shape named in ``docs/system-design.md`` §6 milestone's
     acceptance text: a symbol that no longer exists at all, one that exists
     but not at the requested occurrence (a prior edit removed one of several
     same-named matches), and a file type this build cannot outline at all
