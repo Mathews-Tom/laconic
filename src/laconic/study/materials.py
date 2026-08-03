@@ -1,4 +1,4 @@
-"""Seeded-defect trace materials for the K3 human-study harness.
+"""Seeded-defect trace materials for the human-bug-catch human-study harness.
 
 ``docs/system-design.md`` §4.1's Materials line: "Real agent traces from the
 corpus, each containing exactly one seeded defect of a known class: an
@@ -13,12 +13,12 @@ exposed in the two conditions the study compares:
   print: :func:`laconic.render.templates.render`'s provenance-tagged
   structural facts, plus a narration block via
   :func:`laconic.render.templates.render_narration`. This exercises the same
-  M11 narration-rendering code path a real ``--provider ollama`` view uses
+  milestone narration-rendering code path a real ``--provider ollama`` view uses
   (visually distinct generated prose, every span source-handle-tagged), but
   through a deterministic, committed fixture provider rather than a live
-  model call -- the same CI-safety posture M8/M9 already use for
-  recorded-response replay, and confirmed compatible with M11's actual
-  ``NarrationProvider`` contract at M14's design gate (H-31).
+  model call -- the same CI-safety posture milestone/milestone already use for
+  recorded-response replay, and confirmed compatible with milestone's actual
+  ``NarrationProvider`` contract at milestone's design gate (H-31).
 
 Materials are synthetic and hand-authored, not derived from a real corpus
 transcript: each ``TraceRecord`` is constructed directly rather than through
@@ -83,7 +83,7 @@ class _Observation:
 
 @dataclass(frozen=True, slots=True)
 class _FixtureNarrationProvider:
-    """A deterministic, committed stand-in for a real M11 narration call.
+    """A deterministic, committed stand-in for a real milestone narration call.
 
     Implements :class:`~laconic.render.narrate.NarrationProvider` structurally
     (``narrate(entries) -> Narration | None``) so :func:`_build_task` can call

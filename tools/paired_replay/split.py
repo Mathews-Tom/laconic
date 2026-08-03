@@ -1,4 +1,4 @@
-"""Deterministic, lineage-safe K1 redesign and holdout splitting."""
+"""Deterministic, lineage-safe paired replay redesign and holdout splitting."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Final
 
-from laconic.k1.manifest import Candidate, Manifest, ManifestError, Split
+from tools.paired_replay.manifest import Candidate, Manifest, ManifestError, Split
 
 _REDESIGN: Final[Split] = "redesign"
 _HOLDOUT: Final[Split] = "holdout"

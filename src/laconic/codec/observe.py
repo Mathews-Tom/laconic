@@ -51,7 +51,7 @@ def subject_for(tool_input: Mapping[str, object]) -> str:
     :data:`_SUBJECT_KEYS` its input carries, or the input's own JSON as a
     last resort so a subject is never empty.
 
-    The single source for this lookup -- ``laconic.cli``, K4, and the
+    The single source for this lookup -- ``laconic.cli``, codec-overhead, and the
     fixture generator all encode real tool observations and must derive
     the same subject for the same input, so none of them keeps its own
     copy.

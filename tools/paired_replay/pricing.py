@@ -1,4 +1,4 @@
-"""Strict live-usage normalization and decimal pricing for K1 paired replay."""
+"""Strict live-usage normalization and decimal pricing for paired replay."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from laconic.k1.paired_config import PairedReplayConfigError, PriceTable, UsageMapping
+from tools.paired_replay.config import PairedReplayConfigError, PriceTable, UsageMapping
 
 _MILLION = Decimal("1000000")
 

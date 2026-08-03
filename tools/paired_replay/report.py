@@ -1,4 +1,4 @@
-"""Persistent, non-content M4 paired receipts and M5-ready stratum reports."""
+"""Persistent, non-content M4 paired receipts and paired-replay stratum reports."""
 
 from __future__ import annotations
 
@@ -14,10 +14,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import cast
 
-from laconic.k1.epoch import EpochError, SealedEpoch, read_access_audit, verify_epoch_manifest
-from laconic.k1.manifest import Manifest, is_sha256, stratum_for
-from laconic.k1.paired_config import PairedReplayConfig
-from laconic.k1.paired_runner import PairedArmReceipt, PairedRunReceipt
+from tools.paired_replay.config import PairedReplayConfig
+from tools.paired_replay.epoch import (
+    EpochError,
+    SealedEpoch,
+    read_access_audit,
+    verify_epoch_manifest,
+)
+from tools.paired_replay.manifest import Manifest, is_sha256, stratum_for
+from tools.paired_replay.runner import PairedArmReceipt, PairedRunReceipt
 
 REPORT_SCHEMA_VERSION = 1
 
@@ -183,7 +188,7 @@ def build_paired_report(
 
 
 def write_paired_report(path: Path, epoch: SealedEpoch, report: PersistentPairedReport) -> None:
-    """Atomically persist an M5-ready report under an approved private root as 0600."""
+    """Atomically persist an paired-replay report under an approved private root as 0600."""
     _require_approved_private_path(path, epoch)
     _write_private_json(path, report.to_document())
 
@@ -266,7 +271,7 @@ def _verify_config_and_receipt(
     receipt: PairedRunReceipt,
 ) -> None:
     if config.split != "redesign":
-        raise PairedReportError("paired report requires the redesign split before M6")
+        raise PairedReportError("paired report requires the redesign split before release approval")
     if config.epoch_digest != epoch.digest or receipt.epoch_digest != epoch.digest:
         raise PairedReportError("paired receipt epoch_digest does not match sealed epoch")
     if receipt.config_digest != config.digest:

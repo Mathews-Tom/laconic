@@ -22,37 +22,35 @@ jobs:
       - run: uv run pytest -q
       - run: uv run laconic --help
       - run: uv run laconic --version | grep -Eqx 'laconic [0-9]+\.[0-9]+\.[0-9]+'
-      # laconic.gates.k1/k2/k5 read only committed recorded-response
-      # fixtures (mode="recorded") -- there is no live-mode flag on this
-      # command at all, so CI cannot reach one; see
-      # laconic.gates.k5's module docstring and .docs/DEVELOPMENT_PLAN_HISTORY.md
-      # H-25. continue-on-error is deliberate: the pre-registered gates
-      # are reported, not silently hidden, but an already-analyzed kill
-      # condition (docs/overview.md §6.3; .docs/DEVELOPMENT_PLAN_HISTORY.md
-      # H-25/H-26) must not block ordinary CI on unrelated changes --
-      # only the release-verification chain in DEVELOPMENT_PLAN.md §4 is
-      # meant to be blocked by it, per that section's own "a kill-condition
-      # breach blocks the release until reconciliation."
+      # `laconic gates` reads only committed recorded-response fixtures; it
+      # has no live-mode flag or provider configuration. Keep its verdicts
+      # visible without allowing the pre-registered net-cost result to block
+      # unrelated CI.
       - name: gates
         continue-on-error: true
         run: uv run laconic gates --corpus tests/corpus --format json | tee gates.json
-      # continue-on-error above hides a real verdict from a crash: a step
-      # whose exit code is nonzero for *any* reason (K1's accepted kill,
-      # an uncaught exception, a malformed report) looks identical once
-      # continue-on-error swallows it. This step is deliberately NOT
-      # continue-on-error: it re-reads the same report and fails the job
-      # for real unless the shape is exactly the five known gates, K3 is
-      # still manual, and the only kill verdict (if any) is K1's -- so a
-      # broken gate runner cannot hide behind K1's already-analyzed kill.
+      # The tolerated gates step also masks malformed output and runner
+      # crashes. Re-read the report in a required step so CI accepts only the
+      # declared gate set, the manual human assessment, and the known
+      # net-cost kill condition.
       - name: gates verdict guard
         run: |
           uv run python -c "
           import json
           payload = json.load(open('gates.json'))
           gates = {g['gate']: g['verdict'] for g in payload['gates']}
-          assert gates.keys() == {'K1', 'K2', 'K3', 'K4', 'K5'}, f'unexpected gate set: {sorted(gates)}'
-          assert gates['K3'] == 'manual', f'K3 not manual: {gates[\"K3\"]}'
-          unexpected_kills = [g for g, v in gates.items() if v == 'kill' and g != 'K1']
+          expected_gates = {
+              'net-cost',
+              'action-equivalence',
+              'human-bug-catch',
+              'codec-overhead',
+              'reasoning-accuracy',
+          }
+          assert gates.keys() == expected_gates, f'unexpected gate set: {sorted(gates)}'
+          assert gates['human-bug-catch'] == 'manual', (
+              f'human bug catch not manual: {gates[\"human-bug-catch\"]}'
+          )
+          unexpected_kills = [g for g, v in gates.items() if v == 'kill' and g != 'net-cost']
           assert not unexpected_kills, f'unexpected kill(s): {unexpected_kills}'
           print('gate suite shape OK:', gates)
           "

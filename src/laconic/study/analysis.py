@@ -1,13 +1,13 @@
-"""Pre-registered K3 analysis: paired equivalence test plus secondary measures.
+"""Pre-registered human-bug-catch analysis: paired equivalence test plus secondary measures.
 
 ``docs/system-design.md`` §4.1's Analysis line: "Pre-registered; paired
 comparison with the equivalence margin stated in advance rather than chosen
-after seeing the data." ``DEVELOPMENT_PLAN.md`` §6 M14's acceptance line:
+after seeing the data." ``DEVELOPMENT_PLAN.md`` §6 milestone's acceptance line:
 "the analysis script is committed before any real data is collected... with
 its equivalence margin fixed in advance."
 
 :data:`EQUIVALENCE_MARGIN_PP` is that fixed margin. It is a module-level
-constant, sourced from the published K3 target in ``docs/overview.md`` §6.3
+constant, sourced from the published human-bug-catch target in ``docs/overview.md`` §6.3
 / ``docs/system-design.md`` §4 ("within 5pp"), not invented for this module.
 :func:`analyze` takes no margin parameter -- there is no call-site or CLI
 flag anywhere in this package that can override it -- so applying this
@@ -23,9 +23,9 @@ from statistics import NormalDist, fmean, stdev
 from laconic.study.assignment import Condition
 from laconic.study.capture import ResponseRecord
 
-#: ``docs/overview.md`` §6.3 / ``docs/system-design.md`` §4's K3 row: target
+#: ``docs/overview.md`` §6.3 / ``docs/system-design.md`` §4's human-bug-catch row: target
 #: "within 5pp", kill "worse by > 10pp". Fixed before any participant data
-#: exists, confirmed unchanged at M14's design gate (H-31).
+#: exists, confirmed unchanged at milestone's design gate (H-31).
 EQUIVALENCE_MARGIN_PP: float = 5.0
 
 #: Two one-sided tests at alpha = 0.05 each is the standard TOST
@@ -76,7 +76,7 @@ class EquivalenceResult:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisResult:
-    """Every statistic the pre-registered K3 analysis reports."""
+    """Every statistic the pre-registered human-bug-catch analysis reports."""
 
     n_participants: int
     n_pairs: int
@@ -157,7 +157,7 @@ def _paired_measure(
 
 
 def analyze(responses: Sequence[ResponseRecord]) -> AnalysisResult:
-    """Run the pre-registered K3 analysis over a matched-pair response set.
+    """Run the pre-registered human-bug-catch analysis over a matched-pair response set.
 
     The primary measure -- paired detection-rate difference (rendered -
     raw) -- is aggregated to one mean difference per participant (see

@@ -13,7 +13,6 @@ import pytest
 from laconic.cli import (
     EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF,
     EXIT_CLIENT_IMPORT_ERROR,
-    EXIT_K5_FIXTURE,
     EXIT_LIVE_CONFIG_ERROR,
     EXIT_MALFORMED_RECORD,
     EXIT_MISMATCH,
@@ -21,6 +20,7 @@ from laconic.cli import (
     EXIT_NO_CORPUS,
     EXIT_NO_EXPECTATION,
     EXIT_OK,
+    EXIT_REASONING_ACCURACY_FIXTURE,
     EXIT_REPORT_REQUIRES_CODEC,
     EXIT_UNKNOWN_GATE,
     main,
@@ -662,7 +662,7 @@ def test_gates_exit_code_reflects_the_committed_corpus_real_kill(
     exit_code = main(["gates", "--corpus", str(CORPUS_DIR)])
     assert exit_code == 1
     out = capsys.readouterr().out
-    assert "K1" in out
+    assert "net-cost" in out
     assert "kill" in out
 
 
@@ -670,20 +670,36 @@ def test_gates_format_json_is_parseable(capsys: pytest.CaptureFixture[str]) -> N
     main(["gates", "--corpus", str(CORPUS_DIR), "--format", "json"])
     payload = json.loads(capsys.readouterr().out)
     gate_names = {entry["gate"] for entry in payload["gates"]}
-    assert gate_names == {"K1", "K2", "K3", "K4", "K5"}
+    assert gate_names == {
+        "net-cost",
+        "action-equivalence",
+        "human-bug-catch",
+        "codec-overhead",
+        "reasoning-accuracy",
+    }
 
 
 def test_gates_only_filters_which_gates_run(capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(["gates", "--corpus", str(CORPUS_DIR), "--only", "K4,K5", "--format", "json"])
+    exit_code = main(
+        [
+            "gates",
+            "--corpus",
+            str(CORPUS_DIR),
+            "--only",
+            "codec-overhead,reasoning-accuracy",
+            "--format",
+            "json",
+        ]
+    )
     assert exit_code == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
-    assert {entry["gate"] for entry in payload["gates"]} == {"K4", "K5"}
+    assert {entry["gate"] for entry in payload["gates"]} == {"codec-overhead", "reasoning-accuracy"}
 
 
 def test_gates_only_rejects_an_unknown_gate_name(capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(["gates", "--corpus", str(CORPUS_DIR), "--only", "K99"])
+    exit_code = main(["gates", "--corpus", str(CORPUS_DIR), "--only", "unknown-criterion"])
     assert exit_code == EXIT_UNKNOWN_GATE
-    assert "K99" in capsys.readouterr().err
+    assert "unknown-criterion" in capsys.readouterr().err
 
 
 def test_gates_on_a_corpus_with_no_transcripts_reports_a_missing_recorded_response(
@@ -715,7 +731,7 @@ def test_gates_on_a_corpus_with_no_transcripts_reports_a_missing_recorded_respon
         )
         + "\n"
     )
-    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "K1"])
+    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "net-cost"])
     assert exit_code == EXIT_MISSING_RECORDED_RESPONSE
     assert "no committed recorded-response fixture" in capsys.readouterr().err
 
@@ -730,7 +746,7 @@ def test_gates_on_an_empty_corpus_reports_no_corpus_rather_than_a_false_pass(
     assert "no baseline transcripts" in capsys.readouterr().err
 
 
-def test_gates_reports_a_malformed_k5_fixture_with_its_own_exit_code(
+def test_gates_reports_a_malformed_reasoning_accuracy_fixture_with_its_own_exit_code(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     session = tmp_path / "s.jsonl"
@@ -752,9 +768,9 @@ def test_gates_reports_a_malformed_k5_fixture_with_its_own_exit_code(
         )
         + "\n"
     )
-    (tmp_path / "k5_responses.ndjson").write_text('{"item_id": "widget_7"\n')
-    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "K5"])
-    assert exit_code == EXIT_K5_FIXTURE
+    (tmp_path / "reasoning_accuracy_responses.ndjson").write_text('{"item_id": "widget_7"\n')
+    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "reasoning-accuracy"])
+    assert exit_code == EXIT_REASONING_ACCURACY_FIXTURE
     assert "not valid JSON" in capsys.readouterr().err
 
 

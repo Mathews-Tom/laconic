@@ -1,6 +1,6 @@
-"""Full K3 harness dry run with simulated participant responses.
+"""Full human-bug-catch harness dry run with simulated participant responses.
 
-``DEVELOPMENT_PLAN.md`` §6 M14's acceptance line: "A dry run with simulated
+``DEVELOPMENT_PLAN.md`` §6 milestone's acceptance line: "A dry run with simulated
 responses produces an analysis-ready dataset." This module wires materials,
 condition assignment, response capture, and the pre-registered analysis into
 one seeded, reproducible run; ``laconic study dry-run --seed N --out FILE``
@@ -32,7 +32,7 @@ from laconic.study.materials import build_materials
 DEFAULT_PARTICIPANT_COUNT = 24
 
 #: Base simulated detection probability every response starts from, before
-#: a per-condition adjustment. Not a claim about a real K3 outcome -- a dry
+#: a per-condition adjustment. Not a claim about a real human-bug-catch outcome -- a dry
 #: run's only job is to exercise the full pipeline end to end with a
 #: plausible-shaped dataset.
 _BASE_DETECTION_PROBABILITY = 0.80

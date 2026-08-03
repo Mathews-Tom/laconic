@@ -4,7 +4,7 @@
 tool name, with a safe fallback." :mod:`laconic.codec.observe` dispatches
 every tool name it does not otherwise recognize to :class:`FallbackEncoder`
 so an unfamiliar tool encodes rather than raising — the same posture
-``FallbackOutliner`` (M4) takes for an unrecognized file type.
+``FallbackOutliner`` (milestone) takes for an unrecognized file type.
 
 With no known structure to exploit, this encoder does the two things every
 tool shape shares: it is text that may be long, and it may carry the same

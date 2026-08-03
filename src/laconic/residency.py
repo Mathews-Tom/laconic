@@ -118,8 +118,8 @@ class ResidencyManager:
     existing prefix entry in the ledger: accepting a compaction only
     records that it was justified. Actually applying one — marking the
     underlying observations non-resident and rewriting what a live session
-    serves — is a separate, later action; ``DEVELOPMENT_PLAN.md`` §6 M7
-    names it explicitly out of scope, owned by M12. Every decision this
+    serves — is a separate, later action; ``DEVELOPMENT_PLAN.md`` §6 milestone
+    names it explicitly out of scope, owned by milestone. Every decision this
     manager reaches, accepted or declined, is written to the ledger's
     ``compactions`` table before it is returned, so the audit trail covers
     every verdict rather than only the ones that ran.

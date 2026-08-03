@@ -1,4 +1,4 @@
-"""Fail-closed native transcript extractors for K1 evidence."""
+"""Fail-closed native transcript extractors for paired replay evidence."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from laconic.k1.evidence import (
+from tools.paired_replay.evidence import (
     BillableUsage,
     JsonValue,
     NativeEvent,
@@ -16,7 +16,7 @@ from laconic.k1.evidence import (
     ToolCall,
     ToolResult,
 )
-from laconic.k1.manifest import Candidate, source_sha256
+from tools.paired_replay.manifest import Candidate, source_sha256
 
 
 @dataclass(slots=True)
@@ -33,7 +33,7 @@ class _ClaudeAssistant:
 
 
 def extract_native(candidate: Candidate) -> NativeSession:
-    """Extract a supported native transcript selected by a K1 manifest."""
+    """Extract a supported native transcript selected by a paired replay manifest."""
     if candidate.provider == "claude-code":
         return extract_claude_code(candidate)
     if candidate.provider == "omp":

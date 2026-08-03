@@ -20,15 +20,10 @@ from typing import Literal
 class GateThreshold:
     """One gate's target and kill-condition boundary.
 
-    ``direction`` names which way "better" points: ``"at_least"`` gates
-    (K1, K2) pass at or above ``target``, per the table's own "≥" symbol;
-    ``"at_most"`` gates (K4, K5) pass at or below ``target``, per "< 500"
-    and "within Npp". For K1/K2, ``kill`` is strictly less than ``target``
-    -- the table names a distinct "failed target, not a kill" zone between
-    the two. For K4/K5, ``kill`` equals ``target``: the table's kill
-    condition is literally "above"/"beyond" the same number the target
-    names, so there is no such zone for those two gates -- clearing the
-    target is the only way to avoid a kill.
+    ``direction`` names which way "better" points. Net cost and action
+    equivalence pass at or above their targets. Codec overhead and reasoning
+    accuracy pass at or below their targets. The latter two use the target as
+    their kill boundary; the former two have a reported non-kill failure zone.
     """
 
     gate: str
@@ -51,12 +46,12 @@ class GateThreshold:
             )
 
 
-#: ``docs/overview.md`` §6.3, verbatim. K3 carries no automated threshold --
+#: ``docs/overview.md`` §6.3, verbatim. human-bug-catch carries no automated threshold --
 #: it is human-subject and always reports MANUAL regardless of any number
 #: here -- so it is intentionally absent from this table.
 THRESHOLDS: dict[str, GateThreshold] = {
-    "K1": GateThreshold(
-        gate="K1",
+    "net-cost": GateThreshold(
+        gate="net-cost",
         description=(
             "Session-level net cost reduction on replayed real traces, "
             "including follow-up reads the codec induces"
@@ -66,24 +61,24 @@ THRESHOLDS: dict[str, GateThreshold] = {
         target=25.0,
         kill=15.0,
     ),
-    "K2": GateThreshold(
-        gate="K2",
+    "action-equivalence": GateThreshold(
+        gate="action-equivalence",
         description="Action equivalence, compressed vs raw observation",
         unit="%",
         direction="at_least",
         target=95.0,
         kill=90.0,
     ),
-    "K4": GateThreshold(
-        gate="K4",
+    "codec-overhead": GateThreshold(
+        gate="codec-overhead",
         description="Codec overhead in added input tokens per turn",
         unit="tokens",
         direction="at_most",
         target=500.0,
         kill=500.0,
     ),
-    "K5": GateThreshold(
-        gate="K5",
+    "reasoning-accuracy": GateThreshold(
+        gate="reasoning-accuracy",
         description="Exact-match reasoning benchmark, codec on vs off",
         unit="pp",
         direction="at_most",

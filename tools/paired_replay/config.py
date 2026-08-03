@@ -1,4 +1,4 @@
-"""Private, immutable configuration and provenance contracts for K1 paired replay."""
+"""Private, immutable configuration and provenance contracts for paired replay."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ from types import MappingProxyType
 from typing import Literal, cast
 from urllib.parse import urlsplit
 
-from laconic.k1.evidence import JsonScalar
-from laconic.k1.interaction import InteractionReceiptError, verify_interaction_receipt
-from laconic.k1.manifest import is_sha256
+from tools.paired_replay.evidence import JsonScalar
+from tools.paired_replay.interaction import InteractionReceiptError, verify_interaction_receipt
+from tools.paired_replay.manifest import is_sha256
 
 PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 5
 
@@ -28,7 +28,7 @@ Split = Literal["redesign", "holdout"]
 
 
 class PairedReplayConfigError(ValueError):
-    """Raised when a K1 paired replay configuration is incomplete or unsafe."""
+    """Raised when a paired replay configuration is incomplete or unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +126,7 @@ class ProviderRouting:
 
 @dataclass(frozen=True, slots=True)
 class InteractionReceiptBinding:
-    """One M3E receipt that authorizes a configured redesign workload."""
+    """One chronological receipt that authorizes a configured redesign workload."""
 
     candidate_id: str
     receipt_path: Path
@@ -412,12 +412,12 @@ def read_paired_config(path: Path) -> PairedReplayConfig:
 
 
 def verify_provider_contract(config: PairedReplayConfig) -> None:
-    """Verify the approved provider pin without reading an M3E receipt."""
+    """Verify the approved provider pin without reading an chronological receipt."""
     _validate_openrouter_contract(config)
 
 
 def verify_execution_config(config: PairedReplayConfig) -> None:
-    """Verify the one approved provider contract and every M3E receipt binding."""
+    """Verify the one approved provider contract and every chronological receipt binding."""
     verify_provider_contract(config)
     for binding in config.interaction_receipts:
         try:

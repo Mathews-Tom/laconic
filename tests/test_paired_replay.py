@@ -1,4 +1,4 @@
-"""Tests for K1 paired contemporary replay."""
+"""Tests for paired replay paired contemporary replay."""
 
 from __future__ import annotations
 
@@ -15,24 +15,9 @@ from urllib.error import HTTPError
 
 import pytest
 
-from laconic import cli
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1 import openrouter
-from laconic.k1.eligibility import assess_manifest, write_eligibility_ledger
-from laconic.k1.environment_ledger import (
-    assess_environments,
-    write_environment_ledger,
-)
-from laconic.k1.epoch import read_access_audit, read_epoch
-from laconic.k1.interaction import (
-    InteractionEvent,
-    InteractionReceiptError,
-    ToolInputSchema,
-    build_interaction_receipt,
-)
-from laconic.k1.manifest import Candidate, Manifest, read_manifest, source_sha256, write_manifest
-from laconic.k1.openrouter import OpenRouterChatCompletionsClient
-from laconic.k1.paired_config import (
+from tools.paired_replay import cli, openrouter
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.config import (
     InteractionReceiptBinding,
     PairedReplayConfig,
     PairedReplayConfigError,
@@ -44,13 +29,34 @@ from laconic.k1.paired_config import (
     verify_execution_config,
     write_paired_config,
 )
-from laconic.k1.paired_report import (
+from tools.paired_replay.eligibility import assess_manifest, write_eligibility_ledger
+from tools.paired_replay.environment_ledger import (
+    assess_environments,
+    write_environment_ledger,
+)
+from tools.paired_replay.epoch import read_access_audit, read_epoch
+from tools.paired_replay.interaction import (
+    InteractionEvent,
+    InteractionReceiptError,
+    ToolInputSchema,
+    build_interaction_receipt,
+)
+from tools.paired_replay.manifest import (
+    Candidate,
+    Manifest,
+    read_manifest,
+    source_sha256,
+    write_manifest,
+)
+from tools.paired_replay.openrouter import OpenRouterChatCompletionsClient
+from tools.paired_replay.pricing import BillableResponseUsage, cost_usage, normalize_usage
+from tools.paired_replay.report import (
     PairedReportError,
     build_paired_report,
     verify_paired_report,
     write_paired_report,
 )
-from laconic.k1.paired_runner import (
+from tools.paired_replay.runner import (
     PairedReplayAdmissionError,
     PairedReplayCostCapError,
     PairedReplayError,
@@ -61,7 +67,6 @@ from laconic.k1.paired_runner import (
     admit_paired_workloads,
     run_paired_replay,
 )
-from laconic.k1.pricing import BillableResponseUsage, cost_usage, normalize_usage
 
 
 def _config(tmp_path: Path) -> PairedReplayConfig:
@@ -208,7 +213,6 @@ def _workload(tmp_path: Path) -> tuple[PairedReplayConfig, PairedWorkload]:
     assert (
         main(
             [
-                "k1",
                 "epoch",
                 "create",
                 "--manifest",
@@ -693,7 +697,6 @@ def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
     assert (
         main(
             [
-                "k1",
                 "replay",
                 "verify-report",
                 "--report",
@@ -717,7 +720,6 @@ def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
     assert (
         main(
             [
-                "k1",
                 "replay",
                 "verify-report",
                 "--report",
@@ -730,7 +732,7 @@ def test_paired_report_persists_receipt_and_rejects_tampered_artifact(
                 str(config.manifest_path),
             ]
         )
-        == EXIT_K1_MANIFEST
+        == EXIT_PRIVATE_ARTIFACT
     )
     assert "response artifact digest mismatch" in capsys.readouterr().err
 
@@ -821,7 +823,6 @@ def test_fresh_epoch_workflow_produces_m5_ready_redesign_report(tmp_path: Path) 
     assert (
         main(
             [
-                "k1",
                 "epoch",
                 "verify",
                 "--epoch",
@@ -891,7 +892,6 @@ def test_replay_cli_rejects_missing_credential_before_audit_or_source_access(
     assert (
         main(
             [
-                "k1",
                 "replay",
                 "run",
                 "--config",
@@ -902,7 +902,7 @@ def test_replay_cli_rejects_missing_credential_before_audit_or_source_access(
                 str(report_path),
             ]
         )
-        == EXIT_K1_MANIFEST
+        == EXIT_PRIVATE_ARTIFACT
     )
 
     assert read_access_audit(audit_path).head_digest == audit_before
@@ -927,7 +927,6 @@ def test_replay_cli_returns_manifest_exit_for_interaction_render_failure(
     assert (
         main(
             [
-                "k1",
                 "replay",
                 "run",
                 "--config",
@@ -936,7 +935,7 @@ def test_replay_cli_returns_manifest_exit_for_interaction_render_failure(
                 "render-failure",
             ]
         )
-        == EXIT_K1_MANIFEST
+        == EXIT_PRIVATE_ARTIFACT
     )
     assert "tampered receipt" in capsys.readouterr().err
 
@@ -953,7 +952,6 @@ def test_replay_cli_writes_default_private_report_path(
     assert (
         main(
             [
-                "k1",
                 "replay",
                 "run",
                 "--config",
@@ -1407,8 +1405,8 @@ def test_paired_config_cli_and_artifact_root_hygiene(
     config_path = tmp_path / "private" / "paired-replay.json"
     write_paired_config(config_path, config)
 
-    assert main(["k1", "replay", "verify-config", "--config", str(config_path)]) == EXIT_OK
-    assert "verified K1 paired replay config" in capsys.readouterr().out
+    assert main(["replay", "verify-config", "--config", str(config_path)]) == EXIT_OK
+    assert "verified paired replay config" in capsys.readouterr().out
 
     bad_root = replace(config, artifact_root=tmp_path / "private" / "bad-artifacts")
     bad_root.artifact_root.mkdir(mode=0o755)
@@ -1458,5 +1456,5 @@ def test_paired_config_cli_rejects_nonprivate_config(
     write_paired_config(config_path, config)
     config_path.chmod(0o644)
 
-    assert main(["k1", "replay", "verify-config", "--config", str(config_path)]) == EXIT_K1_MANIFEST
+    assert main(["replay", "verify-config", "--config", str(config_path)]) == EXIT_PRIVATE_ARTIFACT
     assert "mode 0600" in capsys.readouterr().err

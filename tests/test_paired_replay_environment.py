@@ -1,4 +1,4 @@
-"""Tests for K1's fail-closed tool-environment gate."""
+"""Tests for paired replay's fail-closed tool-environment gate."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from laconic.cli import EXIT_K1_MANIFEST, EXIT_OK, main
-from laconic.k1.eligibility import (
+from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
+from tools.paired_replay.eligibility import (
     assess_manifest,
     read_eligibility_ledger,
     write_eligibility_ledger,
 )
-from laconic.k1.environment import (
+from tools.paired_replay.environment import (
     EnvironmentError,
     RecordedToolObservation,
     RecordedToolResolver,
@@ -24,7 +24,7 @@ from laconic.k1.environment import (
     snapshot_tree_sha256,
     validate_snapshot,
 )
-from laconic.k1.environment_ledger import (
+from tools.paired_replay.environment_ledger import (
     EnvironmentLedger,
     EnvironmentLedgerError,
     EnvironmentRecord,
@@ -32,8 +32,8 @@ from laconic.k1.environment_ledger import (
     read_environment_ledger,
     write_environment_ledger,
 )
-from laconic.k1.epoch import create_epoch, read_epoch
-from laconic.k1.manifest import Candidate, Manifest, source_sha256, write_manifest
+from tools.paired_replay.epoch import create_epoch, read_epoch
+from tools.paired_replay.manifest import Candidate, Manifest, source_sha256, write_manifest
 
 
 def _immutable_snapshot(tmp_path: Path) -> Path:
@@ -252,7 +252,6 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
     ledger_path = private / "environment.json"
     build_exit = main(
         [
-            "k1",
             "environment",
             "build",
             "--epoch",
@@ -270,7 +269,6 @@ def test_environment_cli_verifies_private_non_content_admission_receipt(
 
     exit_code = main(
         [
-            "k1",
             "environment",
             "verify",
             "--epoch",
@@ -365,7 +363,6 @@ def test_environment_cli_revalidates_snapshot_receipts(
     assert (
         main(
             [
-                "k1",
                 "environment",
                 "verify",
                 "--epoch",
@@ -389,7 +386,6 @@ def test_environment_cli_revalidates_snapshot_receipts(
     assert (
         main(
             [
-                "k1",
                 "environment",
                 "verify",
                 "--epoch",
@@ -402,7 +398,7 @@ def test_environment_cli_revalidates_snapshot_receipts(
                 str(ledger_path),
             ]
         )
-        == EXIT_K1_MANIFEST
+        == EXIT_PRIVATE_ARTIFACT
     )
     assert "cannot revalidate snapshot environment" in capsys.readouterr().err
 
@@ -443,7 +439,6 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
 
     exit_code = main(
         [
-            "k1",
             "environment",
             "verify",
             "--epoch",
@@ -457,7 +452,7 @@ def test_environment_verification_rejects_confirmatory_candidate_without_receipt
         ]
     )
 
-    assert exit_code == EXIT_K1_MANIFEST
+    assert exit_code == EXIT_PRIVATE_ARTIFACT
     assert "lacks valid environment" in capsys.readouterr().err
 
 
@@ -476,7 +471,6 @@ def test_environment_verification_rejects_wrong_eligibility_ledger_binding(
 
     exit_code = main(
         [
-            "k1",
             "environment",
             "verify",
             "--epoch",
@@ -490,7 +484,7 @@ def test_environment_verification_rejects_wrong_eligibility_ledger_binding(
         ]
     )
 
-    assert exit_code == EXIT_K1_MANIFEST
+    assert exit_code == EXIT_PRIVATE_ARTIFACT
     assert "eligibility_ledger_digest" in capsys.readouterr().err
 
 

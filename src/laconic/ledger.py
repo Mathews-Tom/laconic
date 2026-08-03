@@ -45,7 +45,7 @@ COMPRESSION_LEVEL = 3
 #: Version 2 added ``compactions.projected_turns``, ``.accepted``, and
 #: ``.reason``: version 1's six columns could not distinguish one decline
 #: from another, which contradicts both this table's purpose and
-#: ``DEVELOPMENT_PLAN.md`` §6 M7's "declined attempts with reasons" scope.
+#: ``DEVELOPMENT_PLAN.md`` §6 milestone's "declined attempts with reasons" scope.
 SCHEMA_VERSION = 2
 
 #: ``docs/system-design.md`` §5.1. ``raw_chars`` and ``encoded_chars`` are
