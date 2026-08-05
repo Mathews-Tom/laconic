@@ -103,7 +103,7 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
         usage_mapping=UsageMapping(
             "usage.input_tokens",
             "usage.input_tokens_details.cached_tokens",
-            "usage.input_tokens_details.cache_write_tokens",
+            None,
             "usage.output_tokens",
             True,
         ),
@@ -264,7 +264,6 @@ class _ReplayClient:
                     native_usage={
                         "usage.input_tokens": self.input_tokens,
                         "usage.input_tokens_details.cached_tokens": 0,
-                        "usage.input_tokens_details.cache_write_tokens": 0,
                         "usage.output_tokens": 10,
                     },
                     classification="completed",
@@ -283,7 +282,6 @@ def _turn(
         native_usage={
             "usage.input_tokens": 100,
             "usage.input_tokens_details.cached_tokens": 0,
-            "usage.input_tokens_details.cache_write_tokens": 0,
             "usage.output_tokens": 10,
         },
         classification=classification,
@@ -824,30 +822,23 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
     }
 
 
-def test_normalize_usage_requires_every_declared_native_counter(tmp_path: Path) -> None:
+def test_normalize_usage_treats_omitted_cache_write_as_zero(tmp_path: Path) -> None:
     mapping = _config(tmp_path).usage_mapping
     native_usage = {
         "usage.input_tokens": 100,
         "usage.input_tokens_details.cached_tokens": 20,
-        "usage.input_tokens_details.cache_write_tokens": 10,
         "usage.output_tokens": 50,
     }
 
-    assert normalize_usage(native_usage, mapping) == BillableResponseUsage(70, 20, 10, 50)
+    assert normalize_usage(native_usage, mapping) == BillableResponseUsage(80, 20, 0, 50)
     assert cost_usage(normalize_usage(native_usage, mapping), _config(tmp_path).pricing) == Decimal(
         "0.0002865"
     )
-    negative_remainder = {**native_usage, "usage.input_tokens": 29}
+    negative_remainder = {**native_usage, "usage.input_tokens": 19}
     with pytest.raises(PairedReplayConfigError, match="smaller than declared cache counters"):
         normalize_usage(negative_remainder, mapping)
 
-    native_usage.pop("usage.input_tokens_details.cache_write_tokens")
-    with pytest.raises(PairedReplayConfigError, match="missing configured field"):
-        normalize_usage(native_usage, mapping)
-    native_usage["usage.input_tokens_details.cache_write_tokens"] = True
-    with pytest.raises(PairedReplayConfigError, match="non-negative integer"):
-        normalize_usage(native_usage, mapping)
-    native_usage["new_billable_counter"] = 1
+    native_usage["usage.input_tokens_details.cache_write_tokens"] = 10
     with pytest.raises(PairedReplayConfigError, match="undeclared fields"):
         normalize_usage(native_usage, mapping)
 

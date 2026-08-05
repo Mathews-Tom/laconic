@@ -36,16 +36,17 @@ def normalize_usage(
 ) -> BillableResponseUsage:
     """Map explicit provider counters into disjoint billable usage categories.
 
-    A mapping declares whether its input counter includes the two cache categories.
-    All configured fields are mandatory; undeclared native fields terminate the run
-    rather than becoming free usage.
+    A mapping declares whether its input counter includes cache categories.
+    Every declared native field is mandatory; undeclared native fields terminate the
+    run rather than becoming free usage.
     """
     declared_fields = {
         mapping.input_field,
         mapping.cache_read_field,
-        mapping.cache_write_field,
         mapping.output_field,
     }
+    if mapping.cache_write_field is not None:
+        declared_fields.add(mapping.cache_write_field)
     unexpected_fields = set(native_usage) - declared_fields
     if unexpected_fields:
         raise PairedReplayConfigError(
@@ -53,7 +54,11 @@ def normalize_usage(
         )
     input_tokens = _counter(native_usage, mapping.input_field)
     cache_read_tokens = _counter(native_usage, mapping.cache_read_field)
-    cache_write_tokens = _counter(native_usage, mapping.cache_write_field)
+    cache_write_tokens = (
+        0
+        if mapping.cache_write_field is None
+        else _counter(native_usage, mapping.cache_write_field)
+    )
     if mapping.input_includes_cache:
         input_tokens -= cache_read_tokens + cache_write_tokens
         if input_tokens < 0:

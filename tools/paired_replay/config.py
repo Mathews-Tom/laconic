@@ -73,7 +73,7 @@ class UsageMapping:
 
     input_field: str
     cache_read_field: str
-    cache_write_field: str
+    cache_write_field: str | None
     output_field: str
     input_includes_cache: bool
 
@@ -81,9 +81,10 @@ class UsageMapping:
         fields = (
             self.input_field,
             self.cache_read_field,
-            self.cache_write_field,
             self.output_field,
         )
+        if self.cache_write_field is not None:
+            fields += (self.cache_write_field,)
         if any(not field.strip() for field in fields):
             raise PairedReplayConfigError("usage mapping fields must not be empty")
         if len(set(fields)) != len(fields):
@@ -520,7 +521,7 @@ def _build_execution_config(
         usage_mapping=UsageMapping(
             input_field="usage.input_tokens",
             cache_read_field="usage.input_tokens_details.cached_tokens",
-            cache_write_field="usage.input_tokens_details.cache_write_tokens",
+            cache_write_field=None,
             output_field="usage.output_tokens",
             input_includes_cache=True,
         ),
@@ -644,7 +645,7 @@ def _validate_openai_contract(config: PairedReplayConfig) -> None:
         "input_field": "usage.input_tokens",
         "input_includes_cache": True,
         "cache_read_field": "usage.input_tokens_details.cached_tokens",
-        "cache_write_field": "usage.input_tokens_details.cache_write_tokens",
+        "cache_write_field": None,
         "output_field": "usage.output_tokens",
     }:
         raise PairedReplayConfigError("OpenAI native usage mapping is unapproved")
@@ -683,6 +684,11 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
     induced_policy = document["induced_policy"]
     if unsupported_policy != "terminate_pair" or induced_policy != "include_in_codec_cost":
         raise PairedReplayConfigError("paired replay policies are invalid")
+    cache_write_field = usage_mapping["cache_write_field"]
+    if cache_write_field is not None and (
+        not isinstance(cache_write_field, str) or not cache_write_field.strip()
+    ):
+        raise PairedReplayConfigError("cache_write_field must be a non-empty string or null")
     return PairedReplayConfig(
         epoch_digest=_required_text(document, "epoch_digest"),
         epoch_path=_absolute_path(document, "epoch_path"),
@@ -714,7 +720,7 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
         usage_mapping=UsageMapping(
             _required_text(usage_mapping, "input_field"),
             _required_text(usage_mapping, "cache_read_field"),
-            _required_text(usage_mapping, "cache_write_field"),
+            cache_write_field,
             _required_text(usage_mapping, "output_field"),
             _required_bool(usage_mapping, "input_includes_cache"),
         ),

@@ -332,7 +332,6 @@ def _usage(document: Mapping[str, object]) -> dict[str, object]:
     return {
         "usage.input_tokens": _counter(usage, "input_tokens"),
         "usage.input_tokens_details.cached_tokens": _counter(details, "cached_tokens"),
-        "usage.input_tokens_details.cache_write_tokens": _counter(details, "cache_write_tokens"),
         "usage.output_tokens": _counter(usage, "output_tokens"),
     }
 
@@ -347,7 +346,6 @@ def _unvalidated_usage(document: Mapping[str, object]) -> dict[str, object]:
     return {
         "usage.input_tokens": usage.get("input_tokens"),
         "usage.input_tokens_details.cached_tokens": details.get("cached_tokens"),
-        "usage.input_tokens_details.cache_write_tokens": details.get("cache_write_tokens"),
         "usage.output_tokens": usage.get("output_tokens"),
     }
 
