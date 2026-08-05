@@ -386,3 +386,22 @@ def test_responses_client_rejects_missing_process_credential(tmp_path: Path) -> 
         PairedReplayError, match="required credential environment 'OPENAI_API_KEY' is unset"
     ):
         RecordingResponsesClient([]).respond(_request(tmp_path))
+
+
+def test_responses_client_terminates_response_with_unpinned_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    response = _response([])
+    response["model"] = "gpt-5.4-mini"
+    client = RecordingResponsesClient([response])
+    monkeypatch.setenv("OPENAI_API_KEY", "test-credential")
+
+    replay = client.respond(request)
+
+    assert len(replay.turns) == 1
+    assert replay.turns[0].classification == "unsupported"
+    assert replay.turns[0].unsupported_reason == (
+        "OpenAI Responses response is invalid: "
+        "OpenAI Responses response model does not match configuration"
+    )
