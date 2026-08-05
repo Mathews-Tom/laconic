@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 from dataclasses import replace
 from decimal import Decimal
-from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Literal, cast
-from urllib.error import HTTPError
+from typing import Literal
 
 import pytest
 
-from tools.paired_replay import cli, openrouter
+from tools.paired_replay import cli
 from tools.paired_replay.cli import EXIT_OK, EXIT_PRIVATE_ARTIFACT, main
 from tools.paired_replay.config import (
     InteractionReceiptBinding,
@@ -23,7 +19,6 @@ from tools.paired_replay.config import (
     PairedReplayConfigError,
     PairedRunProvenance,
     PriceTable,
-    ProviderRouting,
     UsageMapping,
     build_execution_config,
     create_execution_config,
@@ -38,9 +33,7 @@ from tools.paired_replay.environment_ledger import (
 )
 from tools.paired_replay.epoch import read_access_audit, read_epoch
 from tools.paired_replay.interaction import (
-    InteractionEvent,
     InteractionReceiptError,
-    ToolInputSchema,
     build_interaction_receipt,
 )
 from tools.paired_replay.manifest import (
@@ -50,7 +43,6 @@ from tools.paired_replay.manifest import (
     source_sha256,
     write_manifest,
 )
-from tools.paired_replay.openrouter import OpenRouterChatCompletionsClient
 from tools.paired_replay.pricing import BillableResponseUsage, cost_usage, normalize_usage
 from tools.paired_replay.report import (
     PairedReportError,
@@ -81,21 +73,20 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
         eligibility_ledger_path=(private / "eligibility.json").resolve(),
         environment_ledger_path=(private / "environment.json").resolve(),
         artifact_root=(private / "artifacts").resolve(),
-        provider="openrouter",
-        endpoint="https://openrouter.ai/api/v1/chat/completions",
+        provider="openai",
+        endpoint="https://api.openai.com/v1/responses",
         api_version="v1",
-        credential_environment="OPENROUTER_API_KEY",
-        privacy_boundary="openrouter-prompt-logging-disabled-anthropic-commercial-retention-30-days",
-        model="anthropic/claude-haiku-4.5",
-        provider_routing=ProviderRouting(
-            only=("anthropic",),
-            allow_fallbacks=False,
-            require_parameters=True,
-        ),
+        credential_environment="OPENAI_API_KEY",
+        privacy_boundary="openai-store-false-abuse-monitoring-30-days-prompt-cache-retention-in-memory",
+        model="gpt-5.4-mini-2026-03-17",
         decoding_parameters={
-            "max_tokens": 4096,
+            "max_output_tokens": 4096,
+            "parallel_tool_calls": True,
+            "prompt_cache_retention": "in_memory",
+            "reasoning_effort": "none",
+            "store": False,
+            "stream": False,
             "temperature": 0.0,
-            "top_p": 1.0,
         },
         seed_supported=False,
         seed=None,
@@ -107,13 +98,13 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
                 "candidate-a", (private / "interaction.json").resolve(), "b" * 64
             ),
         ),
-        pricing=PriceTable("2026-08-01", "1", "0.10", "1.25", "5"),
-        pricing_source="https://openrouter.ai/api/v1/models/anthropic/claude-haiku-4.5/endpoints",
+        pricing=PriceTable("2026-08-04", "0.75", "0.075", "0.75", "4.50"),
+        pricing_source="https://openai.com/api/pricing/",
         usage_mapping=UsageMapping(
-            "usage.prompt_tokens",
-            "usage.prompt_tokens_details.cached_tokens",
-            "usage.prompt_tokens_details.cache_write_tokens",
-            "usage.completion_tokens",
+            "usage.input_tokens",
+            "usage.input_tokens_details.cached_tokens",
+            "usage.input_tokens_details.cache_write_tokens",
+            "usage.output_tokens",
             True,
         ),
         cost_cap_per_pair_usd="0.20",
@@ -271,10 +262,10 @@ class _ReplayClient:
                 PairedResponseTurn(
                     response={"arm": request.arm, "fresh": True},
                     native_usage={
-                        "usage.prompt_tokens": self.input_tokens,
-                        "usage.prompt_tokens_details.cached_tokens": 0,
-                        "usage.prompt_tokens_details.cache_write_tokens": 0,
-                        "usage.completion_tokens": 10,
+                        "usage.input_tokens": self.input_tokens,
+                        "usage.input_tokens_details.cached_tokens": 0,
+                        "usage.input_tokens_details.cache_write_tokens": 0,
+                        "usage.output_tokens": 10,
                     },
                     classification="completed",
                 ),
@@ -290,10 +281,10 @@ def _turn(
     return PairedResponseTurn(
         response={"classification": classification},
         native_usage={
-            "usage.prompt_tokens": 100,
-            "usage.prompt_tokens_details.cached_tokens": 0,
-            "usage.prompt_tokens_details.cache_write_tokens": 0,
-            "usage.completion_tokens": 10,
+            "usage.input_tokens": 100,
+            "usage.input_tokens_details.cached_tokens": 0,
+            "usage.input_tokens_details.cache_write_tokens": 0,
+            "usage.output_tokens": 10,
         },
         classification=classification,
         unsupported_reason=unsupported_reason,
@@ -343,7 +334,6 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "pricing_source",
         "privacy_boundary",
         "provider",
-        "provider_routing",
         "repeat_count",
         "schema_version",
         "seed",
@@ -397,18 +387,18 @@ def test_paired_config_rejects_credential_bearing_endpoints(
 
 
 def test_execution_config_rejects_unapproved_provider_pins(tmp_path: Path) -> None:
-    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+    with pytest.raises(PairedReplayConfigError, match="approved OpenAI contract"):
         verify_execution_config(
             replace(_config(tmp_path), endpoint="https://api.example.test/v1/messages")
         )
-    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+    with pytest.raises(PairedReplayConfigError, match="approved OpenAI contract"):
         verify_execution_config(replace(_config(tmp_path), api_version="v2"))
-    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+    with pytest.raises(PairedReplayConfigError, match="approved OpenAI contract"):
         verify_execution_config(replace(_config(tmp_path), credential_environment="OTHER_API_KEY"))
-    with pytest.raises(PairedReplayConfigError, match="approved OpenRouter contract"):
+    with pytest.raises(PairedReplayConfigError, match="approved OpenAI contract"):
         verify_execution_config(replace(_config(tmp_path), privacy_boundary="unapproved"))
     with pytest.raises(PairedReplayConfigError, match="approved provider contract"):
-        verify_execution_config(replace(_config(tmp_path), model="anthropic/claude-opus-4.6"))
+        verify_execution_config(replace(_config(tmp_path), model="gpt-5.4"))
     with pytest.raises(PairedReplayConfigError, match="does not support a seed"):
         verify_execution_config(replace(_config(tmp_path), seed_supported=True, seed="seed"))
     with pytest.raises(PairedReplayConfigError, match="exactly two seedless repeats"):
@@ -418,10 +408,10 @@ def test_execution_config_rejects_unapproved_provider_pins(tmp_path: Path) -> No
             replace(
                 _config(tmp_path),
                 usage_mapping=UsageMapping(
-                    "usage.prompt_tokens",
-                    "usage.prompt_tokens_details.cache_write_tokens",
-                    "usage.prompt_tokens_details.cached_tokens",
-                    "usage.completion_tokens",
+                    "usage.input_tokens",
+                    "usage.input_tokens_details.cache_write_tokens",
+                    "usage.input_tokens_details.cached_tokens",
+                    "usage.output_tokens",
                     True,
                 ),
             )
@@ -431,27 +421,16 @@ def test_execution_config_rejects_unapproved_provider_pins(tmp_path: Path) -> No
             replace(
                 _config(tmp_path),
                 usage_mapping=UsageMapping(
-                    "usage.prompt_tokens",
-                    "usage.prompt_tokens_details.cached_tokens",
-                    "usage.prompt_tokens_details.cache_write_tokens",
-                    "usage.completion_tokens",
+                    "usage.input_tokens",
+                    "usage.input_tokens_details.cached_tokens",
+                    "usage.input_tokens_details.cache_write_tokens",
+                    "usage.output_tokens",
                     False,
                 ),
             )
         )
     with pytest.raises(PairedReplayConfigError, match="cost caps"):
         verify_execution_config(replace(_config(tmp_path), cost_cap_per_pair_usd="0.21"))
-    with pytest.raises(PairedReplayConfigError, match="routing contract"):
-        verify_execution_config(
-            replace(
-                _config(tmp_path),
-                provider_routing=ProviderRouting(
-                    only=("anthropic",),
-                    allow_fallbacks=True,
-                    require_parameters=True,
-                ),
-            )
-        )
     with pytest.raises(PairedReplayConfigError, match="requires the redesign split"):
         verify_execution_config(replace(_config(tmp_path), split="holdout"))
 
@@ -848,24 +827,24 @@ def test_paired_run_provenance_serializes_complete_noncontent_receipt() -> None:
 def test_normalize_usage_requires_every_declared_native_counter(tmp_path: Path) -> None:
     mapping = _config(tmp_path).usage_mapping
     native_usage = {
-        "usage.prompt_tokens": 100,
-        "usage.prompt_tokens_details.cached_tokens": 20,
-        "usage.prompt_tokens_details.cache_write_tokens": 10,
-        "usage.completion_tokens": 50,
+        "usage.input_tokens": 100,
+        "usage.input_tokens_details.cached_tokens": 20,
+        "usage.input_tokens_details.cache_write_tokens": 10,
+        "usage.output_tokens": 50,
     }
 
     assert normalize_usage(native_usage, mapping) == BillableResponseUsage(70, 20, 10, 50)
     assert cost_usage(normalize_usage(native_usage, mapping), _config(tmp_path).pricing) == Decimal(
-        "0.0003345"
+        "0.0002865"
     )
-    negative_remainder = {**native_usage, "usage.prompt_tokens": 29}
+    negative_remainder = {**native_usage, "usage.input_tokens": 29}
     with pytest.raises(PairedReplayConfigError, match="smaller than declared cache counters"):
         normalize_usage(negative_remainder, mapping)
 
-    native_usage.pop("usage.prompt_tokens_details.cache_write_tokens")
+    native_usage.pop("usage.input_tokens_details.cache_write_tokens")
     with pytest.raises(PairedReplayConfigError, match="missing configured field"):
         normalize_usage(native_usage, mapping)
-    native_usage["usage.prompt_tokens_details.cache_write_tokens"] = True
+    native_usage["usage.input_tokens_details.cache_write_tokens"] = True
     with pytest.raises(PairedReplayConfigError, match="non-negative integer"):
         normalize_usage(native_usage, mapping)
     native_usage["new_billable_counter"] = 1
@@ -882,7 +861,7 @@ def test_decimal_pricing_uses_explicit_cache_categories(tmp_path: Path) -> None:
         output_tokens=8_000_000,
     )
 
-    assert cost_usage(usage, config.pricing) == Decimal("46.20")
+    assert cost_usage(usage, config.pricing) == Decimal("39.900")
 
 
 def test_paired_runner_reuses_identical_settings_and_private_artifacts(tmp_path: Path) -> None:
@@ -1093,20 +1072,6 @@ def test_paired_runner_rejects_nonprivate_artifact_root_before_source_access(
     assert read_access_audit(audit_path).head_digest == audit_before
 
 
-def test_openrouter_client_rejects_missing_process_credential(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, workload = _workload(tmp_path)
-    monkeypatch.delenv(config.credential_environment, raising=False)
-
-    with pytest.raises(PairedReplayError, match="credential environment"):
-        run_paired_replay(
-            config,
-            OpenRouterChatCompletionsClient(),
-            run_id="missing-credential",
-        )
-
-
 def test_replay_cli_rejects_missing_credential_before_audit_or_source_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1176,7 +1141,7 @@ def test_replay_cli_writes_default_private_report_path(
     monkeypatch.setenv(config.credential_environment, "test-credential")
     config_path = config.epoch_path.parent / "paired-config.json"
     write_paired_config(config_path, config)
-    monkeypatch.setattr(cli, "OpenRouterChatCompletionsClient", _ReplayClient)
+    monkeypatch.setattr(cli, "OpenAIResponsesClient", _ReplayClient)
 
     assert (
         main(
@@ -1194,373 +1159,14 @@ def test_replay_cli_writes_default_private_report_path(
     assert (config.artifact_root / "default-report" / "paired-report.json").is_file()
 
 
-def test_openrouter_client_replays_follow_up_prompt_after_tool_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, workload = _workload(tmp_path)
-    monkeypatch.setenv(config.credential_environment, "test-credential")
-    client = OpenRouterChatCompletionsClient()
-    messages: list[list[dict[str, object]]] = []
-
-    def post(
-        request: PairedReplayRequest,
-        credential: str,
-        request_messages: list[dict[str, object]],
-    ) -> dict[str, object]:
-        assert credential == "test-credential"
-        messages.append([message.copy() for message in request_messages])
-        usage = {
-            "prompt_tokens": 1,
-            "completion_tokens": 1,
-            "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-        }
-        if len(request_messages) == 1:
-            return {
-                "model": request.config.model,
-                "usage": usage,
-                "choices": [
-                    {
-                        "message": {
-                            "content": None,
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "arguments": '{"path":"src/app.py"}',
-                                        "name": "Read",
-                                    },
-                                    "id": "tool-1",
-                                    "type": "function",
-                                }
-                            ],
-                        }
-                    }
-                ],
-            }
-        return {
-            "model": request.config.model,
-            "usage": usage,
-            "choices": [{"message": {"content": "Complete.", "role": "assistant"}}],
-        }
-
-    monkeypatch.setattr(client, "_post", post)
-
-    run_paired_replay(config, client, run_id="follow-up")
-
-    follow_up_messages = [
-        request_messages[-2:] for request_messages in messages if len(request_messages) == 4
-    ]
-    assert len(follow_up_messages) == config.repeat_count * 2
-    assert all(
-        tool_message["role"] == "tool"
-        and tool_message["tool_call_id"] == "tool-1"
-        and isinstance(tool_message["content"], str)
-        and user_message == {"role": "user", "content": "Summarize the result."}
-        for tool_message, user_message in follow_up_messages
-    )
-
-
-def test_openrouter_tool_definition_projects_receipt_schema_variants() -> None:
-    path_schema = ToolInputSchema(
-        {
-            "additionalProperties": False,
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-            "type": "object",
-        }
-    )
-    query_schema = ToolInputSchema(
-        {
-            "additionalProperties": False,
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-            "type": "object",
-        }
-    )
-    event = InteractionEvent(
-        native_index=1,
-        kind="tool_call",
-        payload_digest="a" * 64,
-        call_digest="b" * 64,
-        tool_name="read",
-        input_schema=path_schema,
-        authority="recorded_exact",
-    )
-    variant = replace(
-        event,
-        native_index=2,
-        payload_digest="c" * 64,
-        call_digest="d" * 64,
-        input_schema=query_schema,
-    )
-    request = cast(
-        PairedReplayRequest,
-        SimpleNamespace(
-            interaction=SimpleNamespace(receipt=SimpleNamespace(events=(event, variant)))
-        ),
-    )
-
-    assert openrouter._tools(request) == [
-        {
-            "type": "function",
-            "function": {
-                "description": "Replay-authorized native tool",
-                "name": "read",
-                "parameters": {
-                    "properties": {
-                        "path": {"type": "string"},
-                        "query": {"type": "string"},
-                    },
-                    "type": "object",
-                },
-            },
-        }
-    ]
-
-
-def test_openrouter_client_posts_pinned_route_and_projects_native_usage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, workload = _workload(tmp_path)
-    monkeypatch.setenv(config.credential_environment, "test-credential")
-    captured_requests: list[object] = []
-    response_document = json.dumps(
-        {
-            "choices": [{"message": {"content": "Complete.", "role": "assistant"}}],
-            "model": config.model,
-            "usage": {
-                "completion_tokens": 1,
-                "prompt_tokens": 1,
-                "prompt_tokens_details": {
-                    "cache_write_tokens": 0,
-                    "cached_tokens": 0,
-                },
-            },
-        }
-    ).encode()
-
-    class ProviderResponse:
-        def __enter__(self) -> ProviderResponse:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return response_document
-
-    class RecordingOpener:
-        def open(self, request: object, *, timeout: int) -> ProviderResponse:
-            assert timeout == 30
-            captured_requests.append(request)
-            return ProviderResponse()
-
-    opener = RecordingOpener()
-    monkeypatch.setattr(openrouter, "build_opener", lambda *_: opener)
-
-    receipt = run_paired_replay(
-        config,
-        OpenRouterChatCompletionsClient(),
-        run_id="openrouter-payload",
-    )
-
-    assert len(captured_requests) == config.repeat_count * 2
-    request = captured_requests[0]
-    assert isinstance(request, openrouter.Request)
-    assert request.full_url == config.endpoint
-    assert request.get_header("Authorization") == "Bearer test-credential"
-    assert json.loads(request.data) == {
-        "max_tokens": 4096,
-        "messages": [{"role": "user", "content": "Inspect."}],
-        "model": config.model,
-        "provider": {
-            "allow_fallbacks": False,
-            "only": ["anthropic"],
-            "require_parameters": True,
-        },
-        "temperature": 0.0,
-        "tools": [
-            {
-                "function": {
-                    "description": "Replay-authorized native tool",
-                    "name": "Read",
-                    "parameters": {
-                        "additionalProperties": False,
-                        "properties": {"path": {"type": "string"}},
-                        "required": ["path"],
-                        "type": "object",
-                    },
-                },
-                "type": "function",
-            }
-        ],
-        "top_p": 1.0,
-    }
-    assert receipt.total_cost_usd == Decimal("0.000024")
-
-
-def test_openrouter_client_retains_priced_turn_before_unpriceable_response(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, workload = _workload(tmp_path)
-    monkeypatch.setenv(config.credential_environment, "test-credential")
-    client = OpenRouterChatCompletionsClient()
-    usage = {
-        "prompt_tokens": 100,
-        "completion_tokens": 50,
-        "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
-    }
-    call_sizes: list[int] = []
-
-    def post(
-        _: PairedReplayRequest, __: str, messages: list[dict[str, object]]
-    ) -> dict[str, object]:
-        call_sizes.append(len(messages))
-        if len(messages) == 1:
-            return {
-                "model": config.model,
-                "usage": usage,
-                "choices": [
-                    {
-                        "message": {
-                            "content": None,
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "arguments": '{"path":"src/app.py"}',
-                                        "name": "Read",
-                                    },
-                                    "id": "tool-1",
-                                    "type": "function",
-                                }
-                            ],
-                        }
-                    }
-                ],
-            }
-        return {
-            "choices": [{"message": {"content": "Complete.", "role": "assistant"}}],
-            "model": config.model,
-            "usage": {},
-        }
-
-    monkeypatch.setattr(client, "_post", post)
-
-    with pytest.raises(PairedReplayError, match="retained private response artifact"):
-        run_paired_replay(config, client, run_id="unpriceable")
-    assert call_sizes == [1, 4]
-
-    artifact = config.artifact_root / "unpriceable" / "candidate-a" / "0000-raw.json"
-    document = json.loads(artifact.read_text(encoding="utf-8"))
-    assert document["turns"][0]["response"]["usage"] == usage
-    assert document["turns"][0]["usage"] == {
-        "cache_read_tokens": 20,
-        "cache_write_tokens": 10,
-        "input_tokens": 70,
-        "output_tokens": 50,
-    }
-    assert document["turns"][1]["usage"] is None
-    assert "usage_accounting_error" in document
-
-
-def test_openrouter_client_retains_http_error_body_in_private_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, _ = _workload(tmp_path)
-    monkeypatch.setenv(config.credential_environment, "test-credential")
-    error_body = b'{"error":{"message":"unsupported schema"}}'
-
-    class FailingOpener:
-        def open(self, request: object, *, timeout: int) -> object:
-            assert isinstance(request, openrouter.Request)
-            raise HTTPError(request.full_url, 400, "Bad Request", None, BytesIO(error_body))
-
-    monkeypatch.setattr(openrouter, "build_opener", lambda *_: FailingOpener())
-
-    with pytest.raises(PairedReplayError, match="provider response usage cannot be priced"):
-        run_paired_replay(config, OpenRouterChatCompletionsClient(), run_id="http-error-private")
-
-    artifact = config.artifact_root / "http-error-private" / "candidate-a" / "0000-raw.json"
-    document = json.loads(artifact.read_text(encoding="utf-8"))
-    assert document["turns"] == [
-        {
-            "classification": "unsupported",
-            "response": {
-                "body_base64": base64.b64encode(error_body).decode("ascii"),
-                "http_status": 400,
-            },
-            "unsupported_reason": "OpenRouter Chat Completions request failed: HTTP 400",
-            "usage": None,
-        }
-    ]
-    assert "usage_accounting_error" in document
-
-
 def test_paired_runner_records_billed_raw_arm_before_failing_cost_cap(tmp_path: Path) -> None:
     config, _ = _workload(tmp_path)
-    client = _ReplayClient(input_tokens=250_000)
-
+    client = _ReplayClient(input_tokens=300_000)
     with pytest.raises(PairedReplayCostCapError, match="past the"):
         run_paired_replay(config, client, run_id="run-over-cap")
 
     assert [request.arm for request in client.requests] == ["raw"]
     assert (config.artifact_root / "run-over-cap" / "candidate-a" / "0000-raw.json").is_file()
-
-
-def test_openrouter_client_retains_prior_billing_for_terminal_response_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, _ = _workload(tmp_path)
-    monkeypatch.setenv(config.credential_environment, "test-credential")
-    client = OpenRouterChatCompletionsClient()
-    usage = {
-        "prompt_tokens": 100,
-        "completion_tokens": 50,
-        "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
-    }
-
-    def post(
-        _: PairedReplayRequest, __: str, messages: list[dict[str, object]]
-    ) -> dict[str, object]:
-        if len(messages) == 1:
-            return {
-                "model": config.model,
-                "usage": usage,
-                "choices": [
-                    {
-                        "message": {
-                            "content": None,
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "arguments": '{"path":"src/app.py"}',
-                                        "name": "Read",
-                                    },
-                                    "id": "tool-1",
-                                    "type": "function",
-                                }
-                            ],
-                        }
-                    }
-                ],
-            }
-        return {
-            "choices": [{"message": {"content": None, "role": "assistant"}}],
-            "model": config.model,
-            "usage": usage,
-        }
-
-    monkeypatch.setattr(client, "_post", post)
-
-    receipt = run_paired_replay(config, client, run_id="terminal-response-error")
-
-    artifact = config.artifact_root / "terminal-response-error" / "candidate-a" / "0000-raw.json"
-    document = json.loads(artifact.read_text(encoding="utf-8"))
-    assert document["turns"][0]["usage"]["input_tokens"] == 70
-    assert document["turns"][1]["classification"] == "unsupported"
-    assert len(receipt.terminated_pairs) == config.repeat_count
 
 
 def test_paired_runner_accounts_for_induced_codec_turns(tmp_path: Path) -> None:

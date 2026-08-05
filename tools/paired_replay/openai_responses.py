@@ -15,12 +15,12 @@ from laconic.codec.observe import ObservationCodec, subject_for
 from laconic.ledger import Ledger
 from tools.paired_replay.evidence import JsonValue
 from tools.paired_replay.interaction import ReceiptToolProjection
-from tools.paired_replay.openrouter import require_process_credential
 from tools.paired_replay.runner import (
     PairedReplayError,
     PairedReplayRequest,
     PairedReplayResponse,
     PairedResponseTurn,
+    require_process_credential,
 )
 
 
@@ -229,11 +229,11 @@ def _request_payload(
         "input": list(input_items),
         "max_output_tokens": request.config.decoding_parameters["max_output_tokens"],
         "model": request.config.model,
-        "parallel_tool_calls": True,
-        "prompt_cache_retention": "in_memory",
-        "reasoning": {"effort": "none"},
-        "store": False,
-        "stream": False,
+        "parallel_tool_calls": request.config.decoding_parameters["parallel_tool_calls"],
+        "prompt_cache_retention": request.config.decoding_parameters["prompt_cache_retention"],
+        "reasoning": {"effort": request.config.decoding_parameters["reasoning_effort"]},
+        "store": request.config.decoding_parameters["store"],
+        "stream": request.config.decoding_parameters["stream"],
         "temperature": request.config.decoding_parameters["temperature"],
     }
     if projection is None:

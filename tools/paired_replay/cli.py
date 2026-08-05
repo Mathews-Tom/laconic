@@ -30,17 +30,18 @@ from tools.paired_replay.environment_ledger import (
 from tools.paired_replay.epoch import EpochError, create_epoch, verify_epoch, verify_epoch_manifest
 from tools.paired_replay.interaction import InteractionReceiptError, verify_interaction_receipt
 from tools.paired_replay.manifest import ManifestError, verify_manifest
-from tools.paired_replay.openrouter import (
-    OpenRouterChatCompletionsClient,
-    require_process_credential,
-)
+from tools.paired_replay.openai_responses import OpenAIResponsesClient
 from tools.paired_replay.report import (
     PairedReportError,
     build_paired_report,
     verify_paired_report,
     write_paired_report,
 )
-from tools.paired_replay.runner import PairedReplayError, run_paired_replay
+from tools.paired_replay.runner import (
+    PairedReplayError,
+    require_process_credential,
+    run_paired_replay,
+)
 from tools.paired_replay.searchat_export import produce_manifest
 from tools.paired_replay.split import SplitPolicy
 
@@ -402,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     private_replay_verify_config.set_defaults(handler=_private_replay_verify_config)
     private_replay_run = private_replay_subcommands.add_parser(
         "run",
-        help="execute the approved redesign-only paired replay through OpenRouter",
+        help="execute the approved redesign-only paired replay through OpenAI Responses",
     )
     private_replay_run.add_argument(
         "--config",
@@ -629,7 +630,7 @@ def _private_replay_run(args: argparse.Namespace) -> int:
         config = read_paired_config(args.config)
         verify_provider_contract(config)
         require_process_credential(config.credential_environment)
-        receipt = run_paired_replay(config, OpenRouterChatCompletionsClient(), run_id=args.run_id)
+        receipt = run_paired_replay(config, OpenAIResponsesClient(), run_id=args.run_id)
         epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
         report_path = args.report or (config.artifact_root / args.run_id / "paired-report.json")
         report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)

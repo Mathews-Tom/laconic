@@ -40,6 +40,16 @@ class PairedReplayError(RuntimeError):
     """Base class for paired replay admission and execution failures."""
 
 
+def require_process_credential(credential_environment: str) -> str:
+    """Return the sole approved process credential before private source access."""
+    credential = os.environ.get(credential_environment)
+    if not credential:
+        raise PairedReplayError(
+            f"required credential environment {credential_environment!r} is unset"
+        )
+    return credential
+
+
 class PairedReplayAdmissionError(PairedReplayError):
     """Raised when eligibility/environment receipts cannot admit a declared paired workload."""
 
