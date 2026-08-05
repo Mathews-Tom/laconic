@@ -113,7 +113,7 @@ def _response(output: list[dict[str, JsonValue]]) -> dict[str, JsonValue]:
             "output": output,
             "usage": {
                 "input_tokens": 100,
-                "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0},
+                "input_tokens_details": {"cached_tokens": 0},
                 "output_tokens": 10,
             },
         },
@@ -373,7 +373,6 @@ def test_responses_client_retains_billing_before_terminal_request_error(
     assert [turn.classification for turn in replay.turns] == ["completed", "unsupported"]
     assert replay.turns[0].native_usage == {
         "usage.input_tokens": 100,
-        "usage.input_tokens_details.cache_write_tokens": 0,
         "usage.input_tokens_details.cached_tokens": 0,
         "usage.output_tokens": 10,
     }

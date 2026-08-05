@@ -15,12 +15,12 @@ from laconic.codec.observe import ObservationCodec, subject_for
 from laconic.ledger import Ledger
 from tools.paired_replay.evidence import JsonValue
 from tools.paired_replay.interaction import ReceiptToolProjection
-from tools.paired_replay.openrouter import require_process_credential
 from tools.paired_replay.runner import (
     PairedReplayError,
     PairedReplayRequest,
     PairedReplayResponse,
     PairedResponseTurn,
+    require_process_credential,
 )
 
 
@@ -229,11 +229,11 @@ def _request_payload(
         "input": list(input_items),
         "max_output_tokens": request.config.decoding_parameters["max_output_tokens"],
         "model": request.config.model,
-        "parallel_tool_calls": True,
-        "prompt_cache_retention": "in_memory",
-        "reasoning": {"effort": "none"},
-        "store": False,
-        "stream": False,
+        "parallel_tool_calls": request.config.decoding_parameters["parallel_tool_calls"],
+        "prompt_cache_retention": request.config.decoding_parameters["prompt_cache_retention"],
+        "reasoning": {"effort": request.config.decoding_parameters["reasoning_effort"]},
+        "store": request.config.decoding_parameters["store"],
+        "stream": request.config.decoding_parameters["stream"],
         "temperature": request.config.decoding_parameters["temperature"],
     }
     if projection is None:
@@ -332,7 +332,6 @@ def _usage(document: Mapping[str, object]) -> dict[str, object]:
     return {
         "usage.input_tokens": _counter(usage, "input_tokens"),
         "usage.input_tokens_details.cached_tokens": _counter(details, "cached_tokens"),
-        "usage.input_tokens_details.cache_write_tokens": _counter(details, "cache_write_tokens"),
         "usage.output_tokens": _counter(usage, "output_tokens"),
     }
 
@@ -347,7 +346,6 @@ def _unvalidated_usage(document: Mapping[str, object]) -> dict[str, object]:
     return {
         "usage.input_tokens": usage.get("input_tokens"),
         "usage.input_tokens_details.cached_tokens": details.get("cached_tokens"),
-        "usage.input_tokens_details.cache_write_tokens": details.get("cache_write_tokens"),
         "usage.output_tokens": usage.get("output_tokens"),
     }
 

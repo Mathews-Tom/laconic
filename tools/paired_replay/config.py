@@ -26,7 +26,7 @@ from tools.paired_replay.interaction import (
 )
 from tools.paired_replay.manifest import is_sha256
 
-PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 5
+PAIRED_REPLAY_CONFIG_SCHEMA_VERSION = 6
 
 Arm = Literal["raw", "codec"]
 Split = Literal["redesign", "holdout"]
@@ -73,7 +73,7 @@ class UsageMapping:
 
     input_field: str
     cache_read_field: str
-    cache_write_field: str
+    cache_write_field: str | None
     output_field: str
     input_includes_cache: bool
 
@@ -81,9 +81,10 @@ class UsageMapping:
         fields = (
             self.input_field,
             self.cache_read_field,
-            self.cache_write_field,
             self.output_field,
         )
+        if self.cache_write_field is not None:
+            fields += (self.cache_write_field,)
         if any(not field.strip() for field in fields):
             raise PairedReplayConfigError("usage mapping fields must not be empty")
         if len(set(fields)) != len(fields):
@@ -99,33 +100,6 @@ class UsageMapping:
             "input_field": self.input_field,
             "input_includes_cache": self.input_includes_cache,
             "output_field": self.output_field,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderRouting:
-    """The provider-routing controls bound into every replay request."""
-
-    only: tuple[str, ...]
-    allow_fallbacks: bool
-    require_parameters: bool
-
-    def __post_init__(self) -> None:
-        if not self.only or any(not provider.strip() for provider in self.only):
-            raise PairedReplayConfigError("provider routing must name at least one provider")
-        if len(set(self.only)) != len(self.only):
-            raise PairedReplayConfigError("provider routing providers must be unique")
-        if not isinstance(self.allow_fallbacks, bool) or not isinstance(
-            self.require_parameters, bool
-        ):
-            raise PairedReplayConfigError("provider routing flags must be booleans")
-
-    def to_payload(self) -> dict[str, object]:
-        """Return the canonical request-routing serialization."""
-        return {
-            "allow_fallbacks": self.allow_fallbacks,
-            "only": list(self.only),
-            "require_parameters": self.require_parameters,
         }
 
 
@@ -175,7 +149,6 @@ class PairedReplayConfig:
     credential_environment: str
     privacy_boundary: str
     model: str
-    provider_routing: ProviderRouting
     decoding_parameters: Mapping[str, JsonScalar]
     seed_supported: bool
     seed: str | None
@@ -280,7 +253,6 @@ class PairedReplayConfig:
             "induced_policy": self.induced_policy,
             "manifest_path": str(self.manifest_path),
             "model": self.model,
-            "provider_routing": self.provider_routing.to_payload(),
             "pricing": self.pricing.to_payload(),
             "privacy_boundary": self.privacy_boundary,
             "provider": self.provider,
@@ -521,33 +493,36 @@ def _build_execution_config(
         eligibility_ledger_path=eligibility_ledger_path,
         environment_ledger_path=environment_ledger_path,
         artifact_root=artifact_root,
-        provider="openrouter",
-        endpoint="https://openrouter.ai/api/v1/chat/completions",
+        provider="openai",
+        endpoint="https://api.openai.com/v1/responses",
         api_version="v1",
-        credential_environment="OPENROUTER_API_KEY",
+        credential_environment="OPENAI_API_KEY",
         privacy_boundary=(
-            "openrouter-prompt-logging-disabled-anthropic-commercial-retention-30-days"
+            "openai-store-false-abuse-monitoring-30-days-prompt-cache-retention-in-memory"
         ),
-        model="anthropic/claude-haiku-4.5",
-        provider_routing=ProviderRouting(
-            only=("anthropic",),
-            allow_fallbacks=False,
-            require_parameters=True,
-        ),
-        decoding_parameters={"max_tokens": 4096, "temperature": 0.0, "top_p": 1.0},
+        model="gpt-5.4-mini-2026-03-17",
+        decoding_parameters={
+            "max_output_tokens": 4096,
+            "parallel_tool_calls": True,
+            "prompt_cache_retention": "in_memory",
+            "reasoning_effort": "none",
+            "store": False,
+            "stream": False,
+            "temperature": 0.0,
+        },
         seed_supported=False,
         seed=None,
         repeat_count=2,
         split="redesign",
         candidate_ids=tuple(binding.candidate_id for binding in bindings),
         interaction_receipts=tuple(bindings),
-        pricing=PriceTable("2026-08-01", "1", "0.10", "1.25", "5"),
-        pricing_source=("https://openrouter.ai/api/v1/models/anthropic/claude-haiku-4.5/endpoints"),
+        pricing=PriceTable("2026-08-04", "0.75", "0.075", "0.75", "4.50"),
+        pricing_source="https://openai.com/api/pricing/",
         usage_mapping=UsageMapping(
-            input_field="usage.prompt_tokens",
-            cache_read_field="usage.prompt_tokens_details.cached_tokens",
-            cache_write_field="usage.prompt_tokens_details.cache_write_tokens",
-            output_field="usage.completion_tokens",
+            input_field="usage.input_tokens",
+            cache_read_field="usage.input_tokens_details.cached_tokens",
+            cache_write_field=None,
+            output_field="usage.output_tokens",
             input_includes_cache=True,
         ),
         cost_cap_per_pair_usd="0.20",
@@ -583,8 +558,8 @@ def create_execution_config(
 
 
 def verify_provider_contract(config: PairedReplayConfig) -> None:
-    """Verify the approved provider pin without reading an chronological receipt."""
-    _validate_openrouter_contract(config)
+    """Verify the approved direct provider pin without reading a chronological receipt."""
+    _validate_openai_contract(config)
 
 
 def verify_execution_config(config: PairedReplayConfig) -> None:
@@ -624,73 +599,65 @@ def verify_execution_config(config: PairedReplayConfig) -> None:
             )
 
 
-def _validate_openrouter_contract(config: PairedReplayConfig) -> None:
+def _validate_openai_contract(config: PairedReplayConfig) -> None:
     if (
-        config.provider != "openrouter"
-        or config.endpoint != "https://openrouter.ai/api/v1/chat/completions"
+        config.provider != "openai"
+        or config.endpoint != "https://api.openai.com/v1/responses"
         or config.api_version != "v1"
-        or config.credential_environment != "OPENROUTER_API_KEY"
+        or config.credential_environment != "OPENAI_API_KEY"
         or config.privacy_boundary
-        != "openrouter-prompt-logging-disabled-anthropic-commercial-retention-30-days"
+        != "openai-store-false-abuse-monitoring-30-days-prompt-cache-retention-in-memory"
     ):
-        raise PairedReplayConfigError(
-            "configuration does not match the approved OpenRouter contract"
-        )
-    if config.model != "anthropic/claude-haiku-4.5":
-        raise PairedReplayConfigError(
-            "OpenRouter model does not match the approved provider contract"
-        )
-    if config.provider_routing.to_payload() != {
-        "allow_fallbacks": False,
-        "only": ["anthropic"],
-        "require_parameters": True,
-    }:
-        raise PairedReplayConfigError("OpenRouter routing contract is unapproved")
+        raise PairedReplayConfigError("configuration does not match the approved OpenAI contract")
+    if config.model != "gpt-5.4-mini-2026-03-17":
+        raise PairedReplayConfigError("OpenAI model does not match the approved provider contract")
     if config.split != "redesign":
-        raise PairedReplayConfigError("OpenRouter replay requires the redesign split")
+        raise PairedReplayConfigError("OpenAI replay requires the redesign split")
     if config.seed_supported or config.seed is not None:
-        raise PairedReplayConfigError("OpenRouter replay does not support a seed")
+        raise PairedReplayConfigError("OpenAI replay does not support a seed")
     if config.repeat_count != 2:
-        raise PairedReplayConfigError("OpenRouter replay requires exactly two seedless repeats")
+        raise PairedReplayConfigError("OpenAI replay requires exactly two seedless repeats")
     if config.decoding_parameters != {
-        "max_tokens": 4096,
+        "max_output_tokens": 4096,
+        "parallel_tool_calls": True,
+        "prompt_cache_retention": "in_memory",
+        "reasoning_effort": "none",
+        "store": False,
+        "stream": False,
         "temperature": 0.0,
-        "top_p": 1.0,
     }:
         raise PairedReplayConfigError(
-            "OpenRouter decoding parameters do not match the approved provider contract"
+            "OpenAI decoding parameters do not match the approved provider contract"
         )
     if (
         config.pricing.to_payload()
         != {
-            "effective_date": "2026-08-01",
-            "input_per_mtok": "1",
-            "cache_read_per_mtok": "0.10",
-            "cache_write_per_mtok": "1.25",
-            "output_per_mtok": "5",
+            "effective_date": "2026-08-04",
+            "input_per_mtok": "0.75",
+            "cache_read_per_mtok": "0.075",
+            "cache_write_per_mtok": "0.75",
+            "output_per_mtok": "4.50",
         }
-        or config.pricing_source
-        != "https://openrouter.ai/api/v1/models/anthropic/claude-haiku-4.5/endpoints"
+        or config.pricing_source != "https://openai.com/api/pricing/"
     ):
-        raise PairedReplayConfigError("OpenRouter pricing contract is unapproved")
+        raise PairedReplayConfigError("OpenAI pricing contract is unapproved")
     if config.usage_mapping.to_payload() != {
-        "input_field": "usage.prompt_tokens",
+        "input_field": "usage.input_tokens",
         "input_includes_cache": True,
-        "cache_read_field": "usage.prompt_tokens_details.cached_tokens",
-        "cache_write_field": "usage.prompt_tokens_details.cache_write_tokens",
-        "output_field": "usage.completion_tokens",
+        "cache_read_field": "usage.input_tokens_details.cached_tokens",
+        "cache_write_field": None,
+        "output_field": "usage.output_tokens",
     }:
-        raise PairedReplayConfigError("OpenRouter native usage mapping is unapproved")
+        raise PairedReplayConfigError("OpenAI native usage mapping is unapproved")
     if Decimal(config.cost_cap_per_pair_usd) != Decimal("0.20") or Decimal(
         config.cost_cap_run_usd
     ) != Decimal("0.80"):
-        raise PairedReplayConfigError("OpenRouter cost caps do not match the approved contract")
+        raise PairedReplayConfigError("OpenAI cost caps do not match the approved contract")
 
 
 def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
     pricing = _mapping(document["pricing"], "pricing", _PRICE_FIELDS)
     usage_mapping = _mapping(document["usage_mapping"], "usage_mapping", _USAGE_MAPPING_FIELDS)
-    provider_routing = _provider_routing(document["provider_routing"])
     candidate_ids = document["candidate_ids"]
     if not isinstance(candidate_ids, list) or any(
         not isinstance(candidate_id, str) for candidate_id in candidate_ids
@@ -717,6 +684,11 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
     induced_policy = document["induced_policy"]
     if unsupported_policy != "terminate_pair" or induced_policy != "include_in_codec_cost":
         raise PairedReplayConfigError("paired replay policies are invalid")
+    cache_write_field = usage_mapping["cache_write_field"]
+    if cache_write_field is not None and (
+        not isinstance(cache_write_field, str) or not cache_write_field.strip()
+    ):
+        raise PairedReplayConfigError("cache_write_field must be a non-empty string or null")
     return PairedReplayConfig(
         epoch_digest=_required_text(document, "epoch_digest"),
         epoch_path=_absolute_path(document, "epoch_path"),
@@ -730,7 +702,6 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
         credential_environment=_required_text(document, "credential_environment"),
         privacy_boundary=_required_text(document, "privacy_boundary"),
         model=_required_text(document, "model"),
-        provider_routing=provider_routing,
         decoding_parameters=cast(dict[str, JsonScalar], decoding_parameters),
         seed_supported=seed_supported,
         seed=seed,
@@ -749,7 +720,7 @@ def _config_from_document(document: dict[str, object]) -> PairedReplayConfig:
         usage_mapping=UsageMapping(
             _required_text(usage_mapping, "input_field"),
             _required_text(usage_mapping, "cache_read_field"),
-            _required_text(usage_mapping, "cache_write_field"),
+            cache_write_field,
             _required_text(usage_mapping, "output_field"),
             _required_bool(usage_mapping, "input_includes_cache"),
         ),
@@ -827,18 +798,6 @@ def _interaction_receipts(value: object) -> tuple[InteractionReceiptBinding, ...
             )
         )
     return tuple(bindings)
-
-
-def _provider_routing(value: object) -> ProviderRouting:
-    routing = _mapping(value, "provider_routing", _PROVIDER_ROUTING_FIELDS)
-    only = routing["only"]
-    if not isinstance(only, list) or any(not isinstance(provider, str) for provider in only):
-        raise PairedReplayConfigError("provider routing only must be an array of strings")
-    allow_fallbacks = routing["allow_fallbacks"]
-    require_parameters = routing["require_parameters"]
-    if not isinstance(allow_fallbacks, bool) or not isinstance(require_parameters, bool):
-        raise PairedReplayConfigError("provider routing flags must be booleans")
-    return ProviderRouting(tuple(only), allow_fallbacks, require_parameters)
 
 
 def _non_negative_decimal(value: str, field_name: str) -> Decimal:
@@ -1002,7 +961,6 @@ _USAGE_MAPPING_FIELDS = frozenset(
         "output_field",
     }
 )
-_PROVIDER_ROUTING_FIELDS = frozenset({"allow_fallbacks", "only", "require_parameters"})
 
 
 _DOCUMENT_FIELDS = frozenset(
@@ -1035,7 +993,6 @@ _DOCUMENT_FIELDS = frozenset(
         "unsupported_policy",
         "usage_mapping",
         "pricing_source",
-        "provider_routing",
     }
 )
 
