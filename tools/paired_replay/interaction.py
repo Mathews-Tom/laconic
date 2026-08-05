@@ -317,6 +317,23 @@ class InteractionActionResolution:
 
 
 @dataclass(frozen=True, slots=True)
+class ReceiptToolProjection:
+    """One provider-visible function definition derived from the current receipt action."""
+
+    native_index: int
+    name: str
+    input_schema: ToolInputSchema
+
+    def __post_init__(self) -> None:
+        if self.native_index < 0:
+            raise InteractionReceiptError(
+                "receipt tool projection native_index must be non-negative"
+            )
+        if not self.name.strip():
+            raise InteractionReceiptError("receipt tool projection name must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class _RecordedAction:
     event: InteractionEvent
     input: dict[str, JsonValue]
@@ -360,6 +377,20 @@ class InteractionActionResolver:
     def terminated(self) -> bool:
         """Return whether an unsupported action has stopped this interaction."""
         return self._terminated
+
+    @property
+    def next_tool(self) -> ReceiptToolProjection | None:
+        """Return the sole provider-visible tool definition for the current receipt position."""
+        if self._terminated or self._position == len(self._actions):
+            return None
+        event = self._actions[self._position].event
+        if event.tool_name is None or event.input_schema is None:
+            raise InteractionReceiptError("interaction receipt has incomplete tool definition")
+        return ReceiptToolProjection(
+            event.native_index,
+            event.tool_name,
+            ToolInputSchema(event.input_schema.to_document()),
+        )
 
     def resolve(self, name: str, tool_input: dict[str, JsonValue]) -> InteractionActionResolution:
         """Resolve one current action or terminate without advancing on a mismatch."""
@@ -451,6 +482,11 @@ class InteractionRenderer:
     def terminated(self) -> bool:
         """Return whether an unsupported tool action has terminated rendering."""
         return self._resolver.terminated
+
+    @property
+    def next_tool(self) -> ReceiptToolProjection | None:
+        """Return the current receipt-derived provider projection without granting authority."""
+        return self._resolver.next_tool
 
     def resolve_tool(
         self, name: str, tool_input: dict[str, JsonValue]

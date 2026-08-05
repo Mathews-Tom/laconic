@@ -23,6 +23,8 @@ from tools.paired_replay.interaction import (
     InteractionActionResolver,
     InteractionReceipt,
     InteractionReceiptError,
+    InteractionRenderer,
+    ReceiptToolProjection,
     ToolInputSchema,
     build_interaction_receipt,
     derive_interaction_receipt,
@@ -59,6 +61,48 @@ def _session() -> NativeSession:
                 tool_result=ToolResult("call-1", {"text": "print('safe')\n"}),
             ),
             NativeEvent(3, "2026-08-01T00:03:00Z", "user_prompt", text="summarize"),
+        ),
+    )
+
+
+def _multi_tool_session() -> NativeSession:
+    return NativeSession(
+        candidate_id="redesign-1",
+        provider="omp",
+        parser="omp-jsonl-v1",
+        source_path=Path("/private/redesign-1.jsonl"),
+        source_sha256="a" * 64,
+        model="openai-codex/gpt-5.6-terra",
+        events=(
+            NativeEvent(0, "2026-08-01T00:00:00Z", "user_prompt", text="inspect source"),
+            NativeEvent(
+                1,
+                "2026-08-01T00:01:00Z",
+                "assistant",
+                text="",
+                tool_calls=(ToolCall("call-1", "Read", {"path": "src/main.py"}),),
+            ),
+            NativeEvent(
+                2,
+                "2026-08-01T00:02:00Z",
+                "tool_result",
+                tool_result=ToolResult("call-1", {"text": "source"}),
+            ),
+            NativeEvent(3, "2026-08-01T00:03:00Z", "user_prompt", text="search symbols"),
+            NativeEvent(
+                4,
+                "2026-08-01T00:04:00Z",
+                "assistant",
+                text="",
+                tool_calls=(ToolCall("call-2", "Read", {"path": "src/other.py", "line": 3}),),
+            ),
+            NativeEvent(
+                5,
+                "2026-08-01T00:05:00Z",
+                "tool_result",
+                tool_result=ToolResult("call-2", {"text": "other source"}),
+            ),
+            NativeEvent(6, "2026-08-01T00:06:00Z", "user_prompt", text="summarize"),
         ),
     )
 
@@ -239,6 +283,49 @@ def test_private_renderer_exposes_only_authenticated_prompts_and_tool_authority(
     ]
     assert resolution.disposition == "recorded"
     assert resolution.output == {"text": "print('ok')"}
+
+
+def test_renderer_projects_only_the_current_receipt_tool_without_authority() -> None:
+    session = _multi_tool_session()
+    receipt = derive_interaction_receipt(
+        session,
+        epoch_digest="b" * 64,
+        manifest_digest="c" * 64,
+        eligibility_ledger_digest="d" * 64,
+        environment_ledger_digest="e" * 64,
+        audit_head_digest="f" * 64,
+        environment_digest="1" * 64,
+        environment_mode="recorded_tool",
+    )
+    renderer = InteractionRenderer(receipt, session)
+
+    first = renderer.next_tool
+
+    assert isinstance(first, ReceiptToolProjection)
+    assert first.native_index == 1
+    assert first.name == "Read"
+    assert first.input_schema.document == {
+        "additionalProperties": False,
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "type": "object",
+    }
+    assert renderer.resolve_tool("Read", {"path": "src/main.py"}).disposition == "recorded"
+
+    second = renderer.next_tool
+
+    assert isinstance(second, ReceiptToolProjection)
+    assert second.native_index == 4
+    assert second.name == "Read"
+    assert second.input_schema.document == {
+        "additionalProperties": False,
+        "properties": {"line": {"type": "integer"}, "path": {"type": "string"}},
+        "required": ["line", "path"],
+        "type": "object",
+    }
+    assert renderer.resolve_tool("mcp__tessera_stats", {}).disposition == "unsupported"
+    assert renderer.terminated
+    assert renderer.next_tool is None
 
 
 def test_receipt_preserves_non_content_chronology_and_tool_linkage() -> None:
