@@ -46,17 +46,20 @@ from tools.paired_replay.manifest import (
 from tools.paired_replay.pricing import BillableResponseUsage, cost_usage, normalize_usage
 from tools.paired_replay.report import (
     PairedReportError,
+    _receipt_document_arms,
     build_paired_report,
     verify_paired_report,
     write_paired_report,
 )
 from tools.paired_replay.runner import (
+    PairedPairReceipt,
     PairedReplayAdmissionError,
     PairedReplayCostCapError,
     PairedReplayError,
     PairedReplayRequest,
     PairedReplayResponse,
     PairedResponseTurn,
+    PairedRunReceipt,
     PairedWorkload,
     admit_paired_workloads,
     run_paired_replay,
@@ -1202,6 +1205,35 @@ def test_unsupported_turn_terminates_only_its_pair_and_preserves_artifacts(
     assert "snapshot has no matching tool call" in terminated.raw.artifact_path.read_text(
         encoding="utf-8"
     )
+
+
+def _codec_unsupported_receipt(tmp_path: Path) -> PairedRunReceipt:
+    config, workload = _workload(tmp_path)
+    return run_paired_replay(
+        config,
+        _OutcomeClient(
+            (_turn(),),
+            (_turn("unsupported", unsupported_reason="provider rejected tool call"),),
+        ),
+        run_id="run-codec-unsupported",
+    )
+
+
+def test_completed_pair_rejects_unsupported_turns(tmp_path: Path) -> None:
+    terminated = _codec_unsupported_receipt(tmp_path).terminated_pairs[0]
+    assert terminated.codec is not None
+
+    with pytest.raises(PairedReplayError, match="completed pair cannot contain unsupported"):
+        PairedPairReceipt(terminated.raw, terminated.codec)
+
+
+def test_report_receipt_rejects_unsupported_completed_pair(tmp_path: Path) -> None:
+    document = _codec_unsupported_receipt(tmp_path).to_document()
+    document["pairs"] = document["terminated_pairs"]
+    document["terminated_pairs"] = []
+
+    with pytest.raises(PairedReportError, match="completed paired receipt contains unsupported"):
+        _receipt_document_arms(document)
 
 
 def test_runner_rejects_induced_raw_turns_and_nonterminal_unsupported_turns(

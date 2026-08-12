@@ -512,6 +512,8 @@ def _receipt_document_arms(receipt: dict[str, object]) -> tuple[dict[str, object
                 raise PairedReportError("paired receipt pair has invalid fields")
             raw = _required_object(pair_document, "raw")
             _validate_receipt_arm(raw)
+            if field_name == "pairs" and _document_turn_count(raw, "unsupported_turn_count"):
+                raise PairedReportError("completed paired receipt contains unsupported turns")
             arms.append(raw)
             codec = pair_document["codec"]
             if codec is None:
@@ -520,6 +522,8 @@ def _receipt_document_arms(receipt: dict[str, object]) -> tuple[dict[str, object
                 continue
             codec_arm = _object(codec, "paired receipt codec")
             _validate_receipt_arm(codec_arm)
+            if field_name == "pairs" and _document_turn_count(codec_arm, "unsupported_turn_count"):
+                raise PairedReportError("completed paired receipt contains unsupported turns")
             arms.append(codec_arm)
     if not arms:
         raise PairedReportError("paired receipt has no arms")

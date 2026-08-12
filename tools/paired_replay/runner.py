@@ -318,6 +318,8 @@ class PairedPairReceipt:
         )
         if any(getattr(raw, field) != getattr(codec, field) for field in shared):
             raise PairedReplayError("raw and codec receipts do not share one declared workload")
+        if any(arm.turn_accounting.unsupported_turn_count for arm in (self.raw, self.codec)):
+            raise PairedReplayError("completed pair cannot contain unsupported turns")
         if raw.arm != "raw" or codec.arm != "codec":
             raise PairedReplayError("paired receipt must contain one raw and one codec arm")
 
@@ -508,25 +510,26 @@ def run_paired_replay(
                 total_cost += raw.cost_usd
                 continue
             codec = _run_arm(config, workload, client, run_id, "codec", repeat_index)
-            pair = PairedPairReceipt(raw, codec)
-            if pair.cost_usd > Decimal(config.cost_cap_per_pair_usd):
+            pair_cost = raw.cost_usd + codec.cost_usd
+            if pair_cost > Decimal(config.cost_cap_per_pair_usd):
                 raise PairedReplayCostCapError(
-                    f"pair for {workload.candidate.candidate_id!r} spent ${pair.cost_usd}, "
+                    f"pair for {workload.candidate.candidate_id!r} spent ${pair_cost}, "
                     f"past the ${config.cost_cap_per_pair_usd} pair cap"
                 )
-            if total_cost + pair.cost_usd > Decimal(config.cost_cap_run_usd):
+            if total_cost + pair_cost > Decimal(config.cost_cap_run_usd):
                 raise PairedReplayCostCapError(
-                    f"run {run_id!r} spent ${total_cost + pair.cost_usd}, "
+                    f"run {run_id!r} spent ${total_cost + pair_cost}, "
                     f"past the ${config.cost_cap_run_usd} run cap"
                 )
             if codec.turn_accounting.unsupported_turn_count:
                 if config.unsupported_policy != "terminate_pair":
                     raise PairedReplayError("unsupported policy does not terminate pairs")
                 terminated_pairs.append(PairedTerminatedPairReceipt(raw, codec))
-                total_cost += pair.cost_usd
+                total_cost += pair_cost
                 continue
+            pair = PairedPairReceipt(raw, codec)
             pairs.append(pair)
-            total_cost += pair.cost_usd
+            total_cost += pair_cost
     return PairedRunReceipt(
         config.epoch_digest,
         config.digest,
