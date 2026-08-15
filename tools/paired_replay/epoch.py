@@ -390,10 +390,14 @@ def _validate_epoch_locations(
     ``approved_roots`` mixes two categories: the private artifact root that Laconic
     writes the manifest/epoch/audit into (and every later persistent receipt/report),
     and read-only source-containment roots for real native session storage that
-    Laconic never writes into (R-17/H-61). Only the parent directories Laconic
-    actually writes into must be mode 0700; a source-containment root is authorized
-    purely by path containment, not by its filesystem mode.
+    Laconic never writes into. Only the parent directories Laconic actually writes
+    into must be mode 0700; a source-containment root is authorized purely by path
+    containment, not by its filesystem mode, but every declared root must still be
+    an existing directory so a mistyped or missing root fails loudly at seal time.
     """
+    for root in epoch.approved_roots:
+        if not root.is_dir():
+            raise EpochError(f"approved root must be an existing directory: {root}")
     artifact_paths = (
         ("manifest_path", _normalize_path(manifest_path)),
         ("epoch_path", _normalize_path(epoch_path)),

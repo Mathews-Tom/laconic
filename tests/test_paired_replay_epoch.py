@@ -409,3 +409,24 @@ def test_epoch_still_rejects_source_outside_every_declared_root(tmp_path: Path) 
             epoch_id="k1-20260731",
             created_at="2026-07-31T11:00:00Z",
         )
+
+
+def test_epoch_rejects_nonexistent_approved_root(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    os.chmod(private, 0o700)
+    redesign = _candidate(private, "redesign-a", split="redesign")
+    holdout = _candidate(private, "holdout-a", split="holdout")
+    manifest_path = private / "manifest.json"
+    write_manifest(manifest_path, Manifest((redesign, holdout)))
+    missing = tmp_path / "does-not-exist"
+
+    with pytest.raises(EpochError, match="approved root must be an existing directory"):
+        create_epoch(
+            manifest_path,
+            private / "epoch.json",
+            audit_path=private / "access-audit.json",
+            approved_roots=(private, missing),
+            epoch_id="k1-20260731",
+            created_at="2026-07-31T11:00:00Z",
+        )
