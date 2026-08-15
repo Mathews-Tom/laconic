@@ -269,6 +269,102 @@ def test_private_receipt_integration_revalidates_redesign_only_chain(
     assert "verified paired replay interaction receipt" in capsys.readouterr().out
 
 
+def test_interaction_cli_build_materializes_receipt_and_verifies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    epoch, manifest, eligibility, environment, receipt_path, holdout_source = (
+        _private_receipt_inputs(tmp_path)
+    )
+
+    assert (
+        main(
+            [
+                "interaction",
+                "build",
+                "--epoch",
+                str(epoch),
+                "--manifest",
+                str(manifest),
+                "--eligibility-ledger",
+                str(eligibility),
+                "--environment-ledger",
+                str(environment),
+                "--candidate-id",
+                "redesign",
+                "--receipt",
+                str(receipt_path),
+            ]
+        )
+        == EXIT_OK
+    )
+    written = read_interaction_receipt(receipt_path)
+    out = capsys.readouterr().out
+    assert f"candidate=redesign, digest {written.digest}" in out
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert not holdout_source.exists()
+    assert written.candidate_id == "redesign"
+
+    assert (
+        main(
+            [
+                "interaction",
+                "verify",
+                "--receipt",
+                str(receipt_path),
+                "--epoch",
+                str(epoch),
+                "--manifest",
+                str(manifest),
+                "--eligibility-ledger",
+                str(eligibility),
+                "--environment-ledger",
+                str(environment),
+                "--split",
+                "redesign",
+            ]
+        )
+        == EXIT_OK
+    )
+
+
+def test_interaction_cli_build_rejects_holdout_candidate_without_source_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    epoch, manifest, eligibility, environment, receipt_path, holdout_source = (
+        _private_receipt_inputs(tmp_path)
+    )
+
+    exit_code = main(
+        [
+            "interaction",
+            "build",
+            "--epoch",
+            str(epoch),
+            "--manifest",
+            str(manifest),
+            "--eligibility-ledger",
+            str(eligibility),
+            "--environment-ledger",
+            str(environment),
+            "--candidate-id",
+            "holdout",
+            "--receipt",
+            str(receipt_path),
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == EXIT_PRIVATE_ARTIFACT
+    assert (
+        "paired-replay interaction build: candidate 'holdout' is sealed holdout "
+        "and cannot enter chronological" in err
+    )
+    assert not holdout_source.exists()
+    assert not receipt_path.exists()
+    audit = json.loads((epoch.parent / "access-audit.json").read_text(encoding="utf-8"))
+    assert all(record["candidate_id"] != "holdout" for record in audit["records"])
+
+
 def test_private_renderer_exposes_only_authenticated_prompts_and_tool_authority(
     tmp_path: Path,
 ) -> None:

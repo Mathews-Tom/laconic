@@ -28,7 +28,11 @@ from tools.paired_replay.environment_ledger import (
     write_environment_ledger,
 )
 from tools.paired_replay.epoch import EpochError, create_epoch, verify_epoch, verify_epoch_manifest
-from tools.paired_replay.interaction import InteractionReceiptError, verify_interaction_receipt
+from tools.paired_replay.interaction import (
+    InteractionReceiptError,
+    build_interaction_receipt,
+    verify_interaction_receipt,
+)
 from tools.paired_replay.manifest import ManifestError, verify_manifest
 from tools.paired_replay.openai_responses import OpenAIResponsesClient
 from tools.paired_replay.report import (
@@ -284,11 +288,53 @@ def build_parser() -> argparse.ArgumentParser:
 
     private_interaction = private_subcommands.add_parser(
         "interaction",
-        help="verify a private chronological interaction receipt",
+        help="build and verify a private chronological interaction receipt",
     )
     private_interaction_subcommands = private_interaction.add_subparsers(
         dest="private_interaction_command"
     )
+    private_interaction_build = private_interaction_subcommands.add_parser(
+        "build",
+        help="materialize one redesign candidate's chronological interaction receipt",
+    )
+    private_interaction_build.add_argument(
+        "--epoch",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private sealed paired replay epoch",
+    )
+    private_interaction_build.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private frozen paired replay manifest",
+    )
+    private_interaction_build.add_argument(
+        "--eligibility-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private M2 eligibility ledger",
+    )
+    private_interaction_build.add_argument(
+        "--environment-ledger",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="private M3 environment ledger",
+    )
+    private_interaction_build.add_argument(
+        "--candidate-id",
+        required=True,
+        metavar="ID",
+        help="redesign manifest candidate to materialize",
+    )
+    private_interaction_build.add_argument(
+        "--receipt", type=Path, required=True, metavar="FILE", help="private interaction receipt"
+    )
+    private_interaction_build.set_defaults(handler=_private_interaction_build)
     private_interaction_verify = private_interaction_subcommands.add_parser(
         "verify",
         help="verify receipt chronology, environment bindings, and audit provenance",
@@ -570,6 +616,26 @@ def _private_environment_verify(args: argparse.Namespace) -> int:
         f"verified paired replay environment ledger {args.ledger}: "
         f"{len(ledger.records)} candidate(s), valid={counts['valid']}, "
         f"unsupported={counts['unsupported']}, unavailable={counts['unavailable']}"
+    )
+    return EXIT_OK
+
+
+def _private_interaction_build(args: argparse.Namespace) -> int:
+    try:
+        receipt = build_interaction_receipt(
+            args.epoch,
+            args.manifest,
+            args.eligibility_ledger,
+            args.environment_ledger,
+            args.candidate_id,
+            args.receipt,
+        )
+    except InteractionReceiptError as error:
+        print(f"paired-replay interaction build: {error}", file=sys.stderr)
+        return EXIT_PRIVATE_ARTIFACT
+    print(
+        f"wrote paired replay interaction receipt {args.receipt}: "
+        f"candidate={receipt.candidate_id}, digest {receipt.digest}"
     )
     return EXIT_OK
 
