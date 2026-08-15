@@ -250,7 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="DIRECTORY",
-        help="approved private root; repeat for multiple roots",
+        help=(
+            "approved private artifact root or read-only native source-containment "
+            "root; repeat for multiple roots"
+        ),
     )
     private_epoch_create.add_argument(
         "--epoch-id", required=True, help="new private epoch identifier"

@@ -356,3 +356,77 @@ def test_epoch_rejects_nonprivate_nested_artifact_directory(tmp_path: Path) -> N
             epoch_id="k1-20260731",
             created_at="2026-07-31T11:00:00Z",
         )
+
+
+def test_epoch_accepts_nonprivate_source_containment_root(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    os.chmod(private, 0o700)
+    sources = tmp_path / "sources"
+    sources.mkdir(mode=0o755)
+    os.chmod(sources, 0o755)
+    redesign = _candidate(sources, "redesign-a", split="redesign")
+    holdout = _candidate(sources, "holdout-a", split="holdout")
+    manifest_path = private / "manifest.json"
+    write_manifest(manifest_path, Manifest((redesign, holdout)))
+    epoch_path = private / "epoch.json"
+
+    epoch = create_epoch(
+        manifest_path,
+        epoch_path,
+        audit_path=private / "access-audit.json",
+        approved_roots=(private, sources),
+        epoch_id="k1-20260731",
+        created_at="2026-07-31T11:00:00Z",
+    )
+
+    assert stat.S_IMODE(sources.stat().st_mode) == 0o755
+    verified = verify_epoch(epoch_path, manifest_path)
+    assert verified.digest == epoch.digest
+
+
+def test_epoch_still_rejects_source_outside_every_declared_root(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    os.chmod(private, 0o700)
+    sources = tmp_path / "sources"
+    sources.mkdir(mode=0o755)
+    os.chmod(sources, 0o755)
+    unapproved = tmp_path / "unapproved"
+    unapproved.mkdir(mode=0o755)
+    os.chmod(unapproved, 0o755)
+    redesign = _candidate(sources, "redesign-a", split="redesign")
+    stray = _candidate(unapproved, "holdout-a", split="holdout")
+    manifest_path = private / "manifest.json"
+    write_manifest(manifest_path, Manifest((redesign, stray)))
+
+    with pytest.raises(EpochError, match="outside approved roots"):
+        create_epoch(
+            manifest_path,
+            private / "epoch.json",
+            audit_path=private / "access-audit.json",
+            approved_roots=(private, sources),
+            epoch_id="k1-20260731",
+            created_at="2026-07-31T11:00:00Z",
+        )
+
+
+def test_epoch_rejects_nonexistent_approved_root(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    os.chmod(private, 0o700)
+    redesign = _candidate(private, "redesign-a", split="redesign")
+    holdout = _candidate(private, "holdout-a", split="holdout")
+    manifest_path = private / "manifest.json"
+    write_manifest(manifest_path, Manifest((redesign, holdout)))
+    missing = tmp_path / "does-not-exist"
+
+    with pytest.raises(EpochError, match="approved root must be an existing directory"):
+        create_epoch(
+            manifest_path,
+            private / "epoch.json",
+            audit_path=private / "access-audit.json",
+            approved_roots=(private, missing),
+            epoch_id="k1-20260731",
+            created_at="2026-07-31T11:00:00Z",
+        )
