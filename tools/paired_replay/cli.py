@@ -35,6 +35,7 @@ from tools.paired_replay.interaction import (
 )
 from tools.paired_replay.manifest import ManifestError, verify_manifest
 from tools.paired_replay.openai_responses import OpenAIResponsesClient
+from tools.paired_replay.openrouter import OpenRouterChatCompletionsClient
 from tools.paired_replay.report import (
     PairedReportError,
     build_paired_report,
@@ -42,6 +43,7 @@ from tools.paired_replay.report import (
     write_paired_report,
 )
 from tools.paired_replay.runner import (
+    PairedReplayClient,
     PairedReplayError,
     require_process_credential,
     run_paired_replay,
@@ -437,6 +439,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="private output configuration",
     )
+    private_replay_create_config.add_argument(
+        "--provider",
+        choices=["openai", "openrouter"],
+        default="openai",
+        help="approved execution contract to build (default: openai)",
+    )
     private_replay_create_config.set_defaults(handler=_private_replay_create_config)
     private_replay_verify_config = private_replay_subcommands.add_parser(
         "verify-config",
@@ -669,6 +677,7 @@ def _private_replay_create_config(args: argparse.Namespace) -> int:
             artifact_root=args.artifact_root,
             interaction_receipt_paths=args.interaction_receipt,
             config_path=args.config,
+            provider=args.provider,
         )
     except PairedReplayConfigError as error:
         print(f"paired-replay replay create-config: {error}", file=sys.stderr)
@@ -699,7 +708,13 @@ def _private_replay_run(args: argparse.Namespace) -> int:
         config = read_paired_config(args.config)
         verify_provider_contract(config)
         require_process_credential(config.credential_environment)
-        receipt = run_paired_replay(config, OpenAIResponsesClient(), run_id=args.run_id)
+        if config.provider == "openai":
+            client: PairedReplayClient = OpenAIResponsesClient()
+        elif config.provider == "openrouter":
+            client = OpenRouterChatCompletionsClient()
+        else:
+            raise PairedReplayConfigError(f"unknown provider {config.provider!r}")
+        receipt = run_paired_replay(config, client, run_id=args.run_id)
         epoch, _ = verify_epoch_manifest(config.epoch_path, config.manifest_path)
         report_path = args.report or (config.artifact_root / args.run_id / "paired-report.json")
         report = build_paired_report(config.epoch_path, config.manifest_path, config, receipt)
