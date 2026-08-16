@@ -111,6 +111,8 @@ def _config(tmp_path: Path) -> PairedReplayConfig:
             True,
         ),
         cost_cap_per_pair_usd="0.20",
+        provider_routing=None,
+        containment_mechanism="provider_allowed_tools",
         cost_cap_run_usd="0.80",
         unsupported_policy="terminate_pair",
         induced_policy="include_in_codec_cost",
@@ -342,6 +344,8 @@ def test_private_paired_config_round_trip_integrity_checks_every_setting(tmp_pat
         "split",
         "unsupported_policy",
         "usage_mapping",
+        "provider_routing",
+        "containment_mechanism",
     }
     cache_semantics_changed = replace(
         config,
