@@ -32,13 +32,14 @@ Hooks are the intended primary runtime surface. The CLI is the primary operator,
 - Package version: `0.8.0` (`pyproject.toml`).
 - Core codec, CLI, replay/gate harness, renderer, and K3 dry-run harness are released.
 - Laconic Observe (`laconic.observe`, `laconic observe install/remove/status/report`) is released: a local, content-free automatic measurement surface for Claude Code and OMP. It is not a codec transform and does not touch K1 status; no hook is installed automatically, only via an explicit operator command.
+- K1 Stage A metadata feasibility screening (`laconic k1 stage-a scan`, `docs/k1-stage-a-cli.md`) is released: a body-free ledger of historical Claude Code/Codex/OMP session files under two explicitly owner-authorized source roots. A real run reported 1063 admitted sessions across 61 distinct project lineages and all three providers, disposition `proceed_to_stage_b_request` -- Stage A's own recommendation only, not a Stage B authorization. It reads no transcript body, prompt, tool result, source file, credential, or title, and does not itself change K1 status.
 - `uv run laconic gates --corpus tests/corpus --format json` reports K1 net savings of **8.53%**; the pre-registered kill threshold is **15%**.
 - The same gate run reports K2 action equivalence **100%**, K4 overhead **26.8 tokens**, K5 difference **0.0pp**, and K3 as manual/not evaluated.
 - Hook/MCP *codec* deployment is blocked. The committed corpus validates the gate pipeline but is not a real-world savings benchmark.
 
 ## Stated limitations
 
-- No representative paired codec-on corpus, privacy/consent protocol, lineage split, or authorized counterfactual collection method exists; representative K1 is not currently feasible.
+- No representative paired codec-on corpus, privacy/consent protocol, lineage split, or authorized counterfactual collection method exists; representative K1 is not currently feasible. Stage A screening shows the metadata population is sufficient in principle (61 lineages, 3 providers), but Stage B (corpus-design freeze) and Stage C (paired-evidence collection) each require a separate, explicit owner authorization not yet given.
 - No K3 participant protocol, trace-material approval, recruitment plan, consent, or data-handling plan exists.
 - Prospective capture V1 is local and provisional. It does not authorize real session capture, provider activity, remote sealing, or K1/M4E progression.
 
