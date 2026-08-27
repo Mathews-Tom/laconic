@@ -371,17 +371,16 @@ Action equivalence is judged structurally first — same tool, same target, same
 
 ### 2.7 CLI (`src/laconic/cli.py`)
 
-```
-laconic install                 register hooks or MCP proxy
-laconic measure [PATH ...]      channel decomposition of real sessions
+```text
+laconic measure [PATH ...]      channel decomposition and cost split
 laconic replay [--codec on|off] counterfactual cost and action equivalence
+laconic gates                   run K1, K2, K4, K5 and print pass/fail
 laconic view --turns A-B        rendered human view of a trace
 laconic expand F3[:61-94]       resolve a handle to raw content
-laconic status                  ledger size, residency, projected break-even
-laconic gates                   run K1, K2, K4, K5 and print pass/fail
+laconic study dry-run           validate the K3 study harness with simulated data
 ```
 
-`laconic measure` is deliberately the first verb a user runs. If someone's own sessions show a different channel decomposition than ours, we want them to find that out before installing anything.
+`laconic measure` is deliberately the first verb a user runs. The CLI is the primary operator, measurement, replay, inspection, and decision surface. Hook installation is the intended primary runtime surface and MCP is secondary, but neither command is exposed until a representative K1 result clears their deployment gate. If a user's own sessions show a different channel decomposition than ours, we want that discovered before any intervention is considered.
 
 ---
 
