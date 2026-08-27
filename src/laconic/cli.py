@@ -18,6 +18,15 @@ from laconic.costs import CostBreakdown, ModelUsage, session_cost, unpriced_mode
 from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.reasoning_accuracy import ReasoningAccuracyFixtureError
 from laconic.gates.runner import UnknownGateError, run_gates
+from laconic.k1corpus.report import (
+    AUTHORIZED_PROVIDERS,
+    DEFAULT_LEDGER_PATH,
+    Disposition,
+    StageAReport,
+    scan_all_providers,
+    write_ledger,
+)
+from laconic.k1corpus.stage_a import AUTHORIZED_ROOTS
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
 from laconic.observe.audit import DEFAULT_AUDIT_PATH
 from laconic.observe.contracts import ClientId
@@ -113,6 +122,7 @@ EXIT_STUDY_OUTPUT_ERROR = 18
 EXIT_STUDY_INSUFFICIENT_PARTICIPANTS = 19
 EXIT_OBSERVE_CONFIG_PARSE_ERROR = 20
 EXIT_OBSERVE_OWNERSHIP_CONFLICT = 21
+EXIT_K1_STAGE_A_STOP = 22
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -393,6 +403,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     observe_report.add_argument("--format", choices=["text", "json"], default="text")
     observe_report.set_defaults(handler=_observe_report)
+
+    k1 = subcommands.add_parser("k1", help="K1 representative-corpus governance tooling")
+    k1_subcommands = k1.add_subparsers(dest="k1_command")
+    k1_stage_a = k1_subcommands.add_parser("stage-a", help="Stage A metadata feasibility screening")
+    k1_stage_a_subcommands = k1_stage_a.add_subparsers(dest="k1_stage_a_command")
+    k1_stage_a_scan = k1_stage_a_subcommands.add_parser(
+        "scan",
+        help="scan authorized providers/roots and write a body-free metadata ledger",
+        description=(
+            "Enumerate historical Claude Code, Codex, and OMP session files under the "
+            "two source roots authorized in .docs/DEVELOPMENT_PLAN_HISTORY.md H-53, "
+            "admit only closed, unambiguously in-scope files, and write a body-free "
+            "ledger plus a Stage A stop-condition disposition. Never reads a transcript "
+            "body, prompt, tool result, assistant response, source file, credential, "
+            "or title. A PROCEED_TO_STAGE_B_REQUEST disposition is not itself a Stage B "
+            "authorization -- that remains a separate, explicit owner decision."
+        ),
+    )
+    k1_stage_a_scan.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help=f"default: {DEFAULT_LEDGER_PATH}",
+    )
+    k1_stage_a_scan.set_defaults(handler=_k1_stage_a_scan)
     return parser
 
 
@@ -1150,6 +1185,44 @@ def _observe_report(args: argparse.Namespace) -> int:
         for key, count in sorted(counts.items()):
             print(f"    {key}: {count}")
     return EXIT_OK
+
+
+def _k1_stage_a_scan(args: argparse.Namespace) -> int:
+    out_path = args.out if args.out is not None else DEFAULT_LEDGER_PATH
+    report = scan_all_providers()
+    write_ledger(report, out_path)
+    _report_k1_stage_a(report, out_path)
+    if report.disposition is Disposition.PROCEED_TO_STAGE_B_REQUEST:
+        return EXIT_OK
+    return EXIT_K1_STAGE_A_STOP
+
+
+def _report_k1_stage_a(report: StageAReport, out_path: Path) -> None:
+    print(
+        f"K1 Stage A scan -- {len(report.records)} admitted session(s) across "
+        f"{len(AUTHORIZED_ROOTS)} authorized root(s) and {len(AUTHORIZED_PROVIDERS)} "
+        "authorized provider(s)."
+    )
+    print(f"Ledger written to {out_path}")
+    print()
+    print("Exclusions:")
+    any_excluded = False
+    for provider, reasons in sorted(report.exclusions.items()):
+        total = sum(reasons.values())
+        if total == 0:
+            continue
+        any_excluded = True
+        breakdown = ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
+        print(f"  {provider:12} {total:>5}  ({breakdown})")
+    if not any_excluded:
+        print("  none")
+    print()
+    print("Stop conditions:")
+    for condition in report.conditions:
+        marker = "FIRED" if condition.fired else "ok"
+        print(f"  [{marker:5}] {condition.name}: {condition.detail}")
+    print()
+    print(f"Disposition: {report.disposition.value}")
 
 
 def _turn_range(value: str) -> tuple[int, int]:

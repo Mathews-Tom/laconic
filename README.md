@@ -22,6 +22,7 @@ laconic --help
 | [`docs/system-design.md`](docs/system-design.md) | Architecture, components, data model, and the evaluation harness             |
 | [`docs/observe-design.md`](docs/observe-design.md) | Laconic Observe: the automatic, content-free measurement surface design    |
 | [`docs/observe-cli.md`](docs/observe-cli.md)     | `laconic observe` operator guide: install/remove/status/report              |
+| [`docs/k1-stage-a-cli.md`](docs/k1-stage-a-cli.md) | `laconic k1 stage-a scan` operator guide: metadata feasibility screen        |
 
 ## Start with evidence
 
