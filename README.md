@@ -20,6 +20,8 @@ laconic --help
 | [`docs/pitch.md`](docs/pitch.md)                 | The short version: the problem, the measurement, what is and isn't claimed   |
 | [`docs/overview.md`](docs/overview.md)           | What Laconic is, why, the evidence, prior work, and the pre-registered gates |
 | [`docs/system-design.md`](docs/system-design.md) | Architecture, components, data model, and the evaluation harness             |
+| [`docs/observe-design.md`](docs/observe-design.md) | Laconic Observe: the automatic, content-free measurement surface design    |
+| [`docs/observe-cli.md`](docs/observe-cli.md)     | `laconic observe` operator guide: install/remove/status/report              |
 
 ## Start with evidence
 
