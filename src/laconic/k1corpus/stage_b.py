@@ -13,6 +13,8 @@ for Stage A.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -205,3 +207,23 @@ def _validate_totals(
         raise TotalsMismatchError(
             f"session-level totals disagree with H-59's frozen totals: {detail}"
         )
+
+
+def write_session_manifest(
+    entries: tuple[ManifestEntry, ...], path: Path = DEFAULT_SESSION_MANIFEST_PATH
+) -> None:
+    """Atomically write ``entries`` to ``path`` under a mode-restricted
+    directory (`0o700`) and file (`0o600`), mirroring Stage A's ledger
+    writer and H-59's `corpus_manifest.json` writer."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".session_manifest_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump([entry.to_json() for entry in entries], handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise

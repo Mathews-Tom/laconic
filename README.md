@@ -23,6 +23,7 @@ laconic --help
 | [`docs/observe-design.md`](docs/observe-design.md) | Laconic Observe: the automatic, content-free measurement surface design    |
 | [`docs/observe-cli.md`](docs/observe-cli.md)     | `laconic observe` operator guide: install/remove/status/report              |
 | [`docs/k1-stage-a-cli.md`](docs/k1-stage-a-cli.md) | `laconic k1 stage-a scan` operator guide: metadata feasibility screen        |
+| [`docs/k1-stage-b-manifest-cli.md`](docs/k1-stage-b-manifest-cli.md) | `laconic k1 stage-b build-manifest` operator guide: session-level manifest |
 
 ## Start with evidence
 
