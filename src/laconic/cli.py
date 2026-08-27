@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -18,6 +19,20 @@ from laconic.gates.protocol import GateSuiteResult
 from laconic.gates.reasoning_accuracy import ReasoningAccuracyFixtureError
 from laconic.gates.runner import UnknownGateError, run_gates
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
+from laconic.observe.audit import DEFAULT_AUDIT_PATH
+from laconic.observe.contracts import ClientId
+from laconic.observe.installer import (
+    ConfigParseError,
+    OwnershipConflictError,
+    apply_claude_code_install,
+    apply_claude_code_remove,
+    apply_omp_install,
+    apply_omp_remove,
+    preview_claude_code,
+    preview_omp,
+)
+from laconic.observe.preview import InstallPlan
+from laconic.observe.status import compute_report, compute_status
 from laconic.render.narrate import (
     NarrationConfig,
     NarrationConfigurationError,
@@ -96,6 +111,8 @@ EXIT_NARRATION_CONFIG = 16
 EXIT_NARRATION_RESPONSE = 17
 EXIT_STUDY_OUTPUT_ERROR = 18
 EXIT_STUDY_INSUFFICIENT_PARTICIPANTS = 19
+EXIT_OBSERVE_CONFIG_PARSE_ERROR = 20
+EXIT_OBSERVE_OWNERSHIP_CONFLICT = 21
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -312,6 +329,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="output path for the analysis-ready dataset (JSON)",
     )
     study_dry_run.set_defaults(handler=_study_dry_run)
+
+    observe = subcommands.add_parser(
+        "observe",
+        help="local, content-free hook receipts and audit (docs/observe-design.md)",
+    )
+    observe_subcommands = observe.add_subparsers(dest="observe_command")
+
+    observe_install = observe_subcommands.add_parser(
+        "install",
+        help="preview or write Observe's owned hook entry/extension file",
+        description=(
+            "Preview, or atomically write, a single Observe-owned hook entry "
+            "(Claude Code) or extension file (OMP). Never enables the codec, "
+            "changes K1 status, or contacts a provider."
+        ),
+    )
+    observe_install.add_argument("--client", choices=["claude-code", "omp"], required=True)
+    observe_install.add_argument("--scope", choices=["project", "user"], default="project")
+    observe_install.add_argument("--dry-run", action="store_true", help="preview only; never write")
+    observe_install.add_argument(
+        "--user-dir",
+        type=Path,
+        help="override the user-scope target (required for a non-default OMP profile)",
+    )
+    observe_install.add_argument(
+        "--python", help="interpreter path installed hooks invoke (default: this interpreter)"
+    )
+    observe_install.add_argument("--format", choices=["text", "json"], default="text")
+    observe_install.set_defaults(handler=_observe_install)
+
+    observe_remove = observe_subcommands.add_parser(
+        "remove",
+        help="preview or remove Observe's owned hook entry/extension file",
+    )
+    observe_remove.add_argument("--client", choices=["claude-code", "omp"], required=True)
+    observe_remove.add_argument("--scope", choices=["project", "user"], default="project")
+    observe_remove.add_argument("--dry-run", action="store_true", help="preview only; never write")
+    observe_remove.add_argument("--user-dir", type=Path, help="override the user-scope target")
+    observe_remove.add_argument("--format", choices=["text", "json"], default="text")
+    observe_remove.set_defaults(handler=_observe_remove)
+
+    observe_status = observe_subcommands.add_parser(
+        "status", help="local receipt count and audit-chain integrity"
+    )
+    observe_status.add_argument(
+        "--audit-path",
+        type=Path,
+        default=None,
+        help=f"default: {DEFAULT_AUDIT_PATH}",
+    )
+    observe_status.add_argument("--format", choices=["text", "json"], default="text")
+    observe_status.set_defaults(handler=_observe_status)
+
+    observe_report = observe_subcommands.add_parser(
+        "report", help="local receipt breakdown by adapter/category/result"
+    )
+    observe_report.add_argument(
+        "--audit-path",
+        type=Path,
+        default=None,
+        help=f"default: {DEFAULT_AUDIT_PATH}",
+    )
+    observe_report.add_argument("--format", choices=["text", "json"], default="text")
+    observe_report.set_defaults(handler=_observe_report)
     return parser
 
 
@@ -925,6 +1006,150 @@ def _report_study_dry_run(result: DryRunResult) -> None:
     )
     verdict = "equivalent" if detection.equivalent else "not equivalent"
     print(f"  human-study verdict (dry run, simulated data): {verdict}")
+
+
+def _claude_code_settings_path(scope: str) -> Path:
+    if scope == "user":
+        return Path.home() / ".claude" / "settings.json"
+    return Path.cwd() / ".claude" / "settings.json"
+
+
+def _omp_extensions_dir(scope: str, *, user_dir: Path | None) -> Path:
+    """Resolve OMP's extensions directory for ``scope``.
+
+    OMP's own user-scope resolution is profile- and
+    ``PI_CODING_AGENT_DIR``-aware in ways this installer cannot fully
+    replicate without invoking ``omp`` itself: it checks
+    ``PI_CODING_AGENT_DIR`` first, falls back to ``~/.omp/agent``, and
+    never guesses a ``--profile`` name. Pass ``--user-dir`` explicitly
+    on a non-default profile rather than relying on this fallback.
+    """
+    if scope == "project":
+        return Path.cwd() / ".omp" / "extensions"
+    if user_dir is not None:
+        return user_dir
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    if override:
+        return Path(override) / "extensions"
+    return Path.home() / ".omp" / "agent" / "extensions"
+
+
+def _observe_target_path(args: argparse.Namespace) -> Path:
+    client = ClientId(args.client)
+    if client is ClientId.CLAUDE_CODE:
+        if args.scope == "user" and args.user_dir is not None:
+            return Path(args.user_dir)
+        return _claude_code_settings_path(args.scope)
+    return _omp_extensions_dir(args.scope, user_dir=args.user_dir)
+
+
+def _print_plan(plan: InstallPlan, fmt: str, *, applied: bool) -> None:
+    if fmt == "json":
+        print(
+            json.dumps(
+                {
+                    "client": plan.client.value,
+                    "mechanism": plan.mechanism.value,
+                    "applied": applied,
+                    "actions": [
+                        {"kind": action.kind, "description": action.description}
+                        for action in plan.actions
+                    ],
+                    "preserved": list(plan.preserved),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    state = "applied" if applied else "preview"
+    print(f"laconic observe ({state}): {plan.client.value} via {plan.mechanism.value}")
+    for action in plan.actions:
+        print(f"  [{action.kind}] {action.description}")
+    for item in plan.preserved:
+        print(f"  [preserved] {item}")
+
+
+def _observe_install(args: argparse.Namespace) -> int:
+    client = ClientId(args.client)
+    target = _observe_target_path(args)
+    if args.dry_run:
+        plan = (
+            preview_claude_code(target) if client is ClientId.CLAUDE_CODE else preview_omp(target)
+        )
+        _print_plan(plan, args.format, applied=False)
+        return EXIT_OK
+    try:
+        if client is ClientId.CLAUDE_CODE:
+            result = apply_claude_code_install(target, python=args.python)
+        else:
+            result = apply_omp_install(target, python=args.python)
+    except ConfigParseError as error:
+        print(f"laconic observe install: {error}", file=sys.stderr)
+        return EXIT_OBSERVE_CONFIG_PARSE_ERROR
+    except OwnershipConflictError as error:
+        print(f"laconic observe install: {error}", file=sys.stderr)
+        return EXIT_OBSERVE_OWNERSHIP_CONFLICT
+    _print_plan(result.plan, args.format, applied=result.applied)
+    return EXIT_OK
+
+
+def _observe_remove(args: argparse.Namespace) -> int:
+    client = ClientId(args.client)
+    target = _observe_target_path(args)
+    if args.dry_run:
+        plan = (
+            preview_claude_code(target, remove=True)
+            if client is ClientId.CLAUDE_CODE
+            else preview_omp(target, remove=True)
+        )
+        _print_plan(plan, args.format, applied=False)
+        return EXIT_OK
+    try:
+        if client is ClientId.CLAUDE_CODE:
+            result = apply_claude_code_remove(target)
+        else:
+            result = apply_omp_remove(target)
+    except ConfigParseError as error:
+        print(f"laconic observe remove: {error}", file=sys.stderr)
+        return EXIT_OBSERVE_CONFIG_PARSE_ERROR
+    _print_plan(result.plan, args.format, applied=result.applied)
+    return EXIT_OK
+
+
+def _observe_status(args: argparse.Namespace) -> int:
+    path = args.audit_path if args.audit_path is not None else DEFAULT_AUDIT_PATH
+    status = compute_status(path)
+    if args.format == "json":
+        print(json.dumps(status.to_json(), indent=2, sort_keys=True))
+        return EXIT_OK
+    print(f"laconic observe status: {status.path}")
+    print(f"  exists: {status.exists}")
+    print(f"  entries: {status.entry_count}")
+    print(f"  chain valid: {status.chain_valid}")
+    if status.integrity_error is not None:
+        print(f"  integrity error: {status.integrity_error}")
+    return EXIT_OK
+
+
+def _observe_report(args: argparse.Namespace) -> int:
+    path = args.audit_path if args.audit_path is not None else DEFAULT_AUDIT_PATH
+    report = compute_report(path)
+    if args.format == "json":
+        print(json.dumps(report.to_json(), indent=2, sort_keys=True))
+        return EXIT_OK
+    print(f"laconic observe report: {report.path} ({report.entry_count} entries)")
+    for label, counts in (
+        ("adapter", report.by_adapter),
+        ("tool category", report.by_tool_category),
+        ("result class", report.by_result_class),
+        ("argument size", report.by_argument_size),
+        ("result size", report.by_result_size),
+    ):
+        print(f"  by {label}:")
+        for key, count in sorted(counts.items()):
+            print(f"    {key}: {count}")
+    return EXIT_OK
 
 
 def _turn_range(value: str) -> tuple[int, int]:
