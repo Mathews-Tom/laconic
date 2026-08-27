@@ -49,12 +49,23 @@ class InstallPlan:
     preserved: tuple[str, ...]
 
 
+def _is_owned_handler(handler: dict[str, Any]) -> bool:
+    """A handler is Observe-owned if the marker appears in its `command`
+    (M1's original fixture shape, kept for backward compatibility) or its
+    `statusMessage` (M3's real installed shape -- the marker cannot live
+    inside `command`/`args` without corrupting the entrypoint's own
+    argument parsing; see H-50)."""
+    return CLAUDE_CODE_OWNED_MARKER in str(
+        handler.get("command", "")
+    ) or CLAUDE_CODE_OWNED_MARKER in str(handler.get("statusMessage", ""))
+
+
 def _claude_code_owned_handlers(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         handler
         for group in groups
         for handler in group.get("hooks", [])
-        if CLAUDE_CODE_OWNED_MARKER in str(handler.get("command", ""))
+        if _is_owned_handler(handler)
     ]
 
 
@@ -63,8 +74,21 @@ def _claude_code_foreign_handlers(groups: list[dict[str, Any]]) -> list[dict[str
         handler
         for group in groups
         for handler in group.get("hooks", [])
-        if CLAUDE_CODE_OWNED_MARKER not in str(handler.get("command", ""))
+        if not _is_owned_handler(handler)
     ]
+
+
+#: Public alias of the three Claude Code events Observe installs a hook
+#: entry for -- exported so `laconic.observe.render` shares one source of
+#: truth for "which events" rather than redeclaring the tuple.
+CLAUDE_CODE_EVENTS = _CLAUDE_CODE_EVENTS
+
+
+def claude_code_event_is_owned(existing_settings: dict[str, Any], event: str) -> bool:
+    """Return whether ``event`` already carries an Observe-owned handler
+    in ``existing_settings``."""
+    groups = existing_settings.get("hooks", {}).get(event, [])
+    return bool(_claude_code_owned_handlers(groups))
 
 
 def preview_claude_code_install(existing_settings: dict[str, Any]) -> InstallPlan:
