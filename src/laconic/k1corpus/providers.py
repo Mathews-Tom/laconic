@@ -28,6 +28,7 @@ from laconic.k1corpus.stage_a import (
     AUTHORIZED_ROOTS,
     STAGE_A_SCAN_LINE_BOUND,
     ExclusionReason,
+    FileMeta,
     Provider,
     SessionRecord,
     SourceRoot,
@@ -122,17 +123,21 @@ def scan_cwd(file_path: Path, *, line_bound: int = STAGE_A_SCAN_LINE_BOUND) -> s
     return None
 
 
-def admit_file(
+def admit_file_with_meta(
     provider: Provider,
     file_path: Path,
     *,
     now: float,
     roots: tuple[SourceRoot, ...] = AUTHORIZED_ROOTS,
-) -> SessionRecord | ExclusionReason:
+) -> tuple[SessionRecord, FileMeta] | ExclusionReason:
     """Run one candidate file through the full Stage A admission
     pipeline -- filesystem checks, session-ID extraction, the bounded
-    `cwd` scan, and allowlist containment -- in that order. Returns a
-    `SessionRecord` on success, or the `ExclusionReason` that fired."""
+    `cwd` scan, and allowlist containment -- in that order. Returns the
+    admitted `SessionRecord` together with its underlying `FileMeta`
+    (carrying exact `age_seconds`) on success, or the `ExclusionReason`
+    that fired. `admit_file` is a thin wrapper that discards the
+    `FileMeta`; callers that need precise ordering (e.g. Stage B's
+    most-recent-first cap selection) use this function directly."""
     meta = stat_admission(file_path, now=now)
     if isinstance(meta, ExclusionReason):
         return meta
@@ -151,13 +156,57 @@ def admit_file(
     root = containing_root(cwd_path, roots)
     if root is None:
         return ExclusionReason.OUTSIDE_ALLOWLIST
-    return build_session_record(
+    record = build_session_record(
         provider=provider,
         session_id=session_id,
         resolved_cwd=cwd_path.expanduser().resolve(),
         file_path=file_path,
         file_meta=meta,
     )
+    return record, meta
+
+
+def admit_file(
+    provider: Provider,
+    file_path: Path,
+    *,
+    now: float,
+    roots: tuple[SourceRoot, ...] = AUTHORIZED_ROOTS,
+) -> SessionRecord | ExclusionReason:
+    """Run one candidate file through the full Stage A admission
+    pipeline -- filesystem checks, session-ID extraction, the bounded
+    `cwd` scan, and allowlist containment -- in that order. Returns a
+    `SessionRecord` on success, or the `ExclusionReason` that fired."""
+    result = admit_file_with_meta(provider, file_path, now=now, roots=roots)
+    if isinstance(result, ExclusionReason):
+        return result
+    record, _meta = result
+    return record
+
+
+def enumerate_provider_with_meta(
+    provider: Provider,
+    *,
+    home: Path | None = None,
+    now: float | None = None,
+    roots: tuple[SourceRoot, ...] = AUTHORIZED_ROOTS,
+) -> tuple[list[tuple[SessionRecord, FileMeta]], Counter[ExclusionReason]]:
+    """Discover every session file for ``provider`` and admit each one,
+    keeping each admitted record's `FileMeta` alongside it. Returns the
+    admitted `(SessionRecord, FileMeta)` pairs and a counter of every
+    exclusion reason -- every rejected file is counted, never silently
+    dropped. `enumerate_provider` is a thin wrapper that discards the
+    `FileMeta`."""
+    scan_time = now if now is not None else time.time()
+    admitted: list[tuple[SessionRecord, FileMeta]] = []
+    exclusions: Counter[ExclusionReason] = Counter()
+    for file_path in discover_session_files(provider, home=home):
+        result = admit_file_with_meta(provider, file_path, now=scan_time, roots=roots)
+        if isinstance(result, ExclusionReason):
+            exclusions[result] += 1
+        else:
+            admitted.append(result)
+    return admitted, exclusions
 
 
 def enumerate_provider(
@@ -171,13 +220,6 @@ def enumerate_provider(
     ``home``-relative test) storage root and admit each one. Returns the
     admitted records and a counter of every exclusion reason -- every
     rejected file is counted, never silently dropped."""
-    scan_time = now if now is not None else time.time()
-    records: list[SessionRecord] = []
-    exclusions: Counter[ExclusionReason] = Counter()
-    for file_path in discover_session_files(provider, home=home):
-        result = admit_file(provider, file_path, now=scan_time, roots=roots)
-        if isinstance(result, SessionRecord):
-            records.append(result)
-        else:
-            exclusions[result] += 1
+    admitted, exclusions = enumerate_provider_with_meta(provider, home=home, now=now, roots=roots)
+    records = [record for record, _meta in admitted]
     return records, exclusions
