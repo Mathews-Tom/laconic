@@ -211,3 +211,6 @@ __marimo__/
 
 # Private K1 remeasurement manifests and receipts
 .laconic/k1/
+
+# Local Observe receipts and hash-chained audit log
+.laconic/observe/
