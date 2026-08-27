@@ -27,6 +27,14 @@ from laconic.k1corpus.report import (
     write_ledger,
 )
 from laconic.k1corpus.stage_a import AUTHORIZED_ROOTS
+from laconic.k1corpus.stage_b import (
+    DEFAULT_CORPUS_MANIFEST_PATH,
+    DEFAULT_SESSION_MANIFEST_PATH,
+    FrozenCorpus,
+    TotalsMismatchError,
+    build_session_manifest,
+    write_session_manifest,
+)
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
 from laconic.observe.audit import DEFAULT_AUDIT_PATH
 from laconic.observe.contracts import ClientId
@@ -123,6 +131,7 @@ EXIT_STUDY_INSUFFICIENT_PARTICIPANTS = 19
 EXIT_OBSERVE_CONFIG_PARSE_ERROR = 20
 EXIT_OBSERVE_OWNERSHIP_CONFLICT = 21
 EXIT_K1_STAGE_A_STOP = 22
+EXIT_K1_STAGE_B_TOTALS_MISMATCH = 23
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -428,6 +437,36 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"default: {DEFAULT_LEDGER_PATH}",
     )
     k1_stage_a_scan.set_defaults(handler=_k1_stage_a_scan)
+
+    k1_stage_b = k1_subcommands.add_parser(
+        "stage-b", help="Stage B session-level manifest construction"
+    )
+    k1_stage_b_subcommands = k1_stage_b.add_subparsers(dest="k1_stage_b_command")
+    k1_stage_b_build_manifest = k1_stage_b_subcommands.add_parser(
+        "build-manifest",
+        help="rebuild the session-level manifest from H-59's frozen lineage-level decision",
+        description=(
+            "Re-derive the specific sessions belonging to H-59's frozen design and "
+            "confirmatory lineages, anchored to the freeze timestamp (never wall-clock "
+            "time), and validate against H-59's recorded totals before writing anything. "
+            "A totals mismatch is a hard stop, not a warning. Never reads a transcript "
+            "body, prompt, tool result, assistant response, source file, credential, or "
+            "title, and performs no live replay, provider call, or Stage C action."
+        ),
+    )
+    k1_stage_b_build_manifest.add_argument(
+        "--corpus-manifest",
+        type=Path,
+        default=None,
+        help=f"default: {DEFAULT_CORPUS_MANIFEST_PATH}",
+    )
+    k1_stage_b_build_manifest.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help=f"default: {DEFAULT_SESSION_MANIFEST_PATH}",
+    )
+    k1_stage_b_build_manifest.set_defaults(handler=_k1_stage_b_build_manifest)
     return parser
 
 
@@ -1223,6 +1262,35 @@ def _report_k1_stage_a(report: StageAReport, out_path: Path) -> None:
         print(f"  [{marker:5}] {condition.name}: {condition.detail}")
     print()
     print(f"Disposition: {report.disposition.value}")
+
+
+def _k1_stage_b_build_manifest(args: argparse.Namespace) -> int:
+    corpus_manifest_path = (
+        args.corpus_manifest if args.corpus_manifest is not None else DEFAULT_CORPUS_MANIFEST_PATH
+    )
+    out_path = args.out if args.out is not None else DEFAULT_SESSION_MANIFEST_PATH
+    try:
+        frozen = FrozenCorpus.load(corpus_manifest_path)
+    except OSError as error:
+        print(
+            f"laconic k1 stage-b build-manifest: cannot read {corpus_manifest_path}: {error}",
+            file=sys.stderr,
+        )
+        return EXIT_K1_STAGE_B_TOTALS_MISMATCH
+    try:
+        entries = build_session_manifest(frozen)
+    except TotalsMismatchError as error:
+        print(f"laconic k1 stage-b build-manifest: {error}", file=sys.stderr)
+        return EXIT_K1_STAGE_B_TOTALS_MISMATCH
+    write_session_manifest(entries, out_path)
+    design_count = sum(1 for entry in entries if entry.set.value == "design")
+    confirmatory_count = len(entries) - design_count
+    print(
+        f"K1 Stage B session manifest -- {len(entries)} session(s): "
+        f"{design_count} design, {confirmatory_count} confirmatory."
+    )
+    print(f"Manifest written to {out_path}")
+    return EXIT_OK
 
 
 def _turn_range(value: str) -> tuple[int, int]:
