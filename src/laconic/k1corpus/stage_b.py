@@ -125,10 +125,12 @@ def build_session_manifest(
     anchor = as_of if as_of is not None else frozen.frozen_at
     admitted = _admitted_with_meta(home=home, roots=roots, anchor=anchor)
 
+    window_seconds = frozen.time_window_days * 86400
     eligible = [
         (record, meta)
         for record, meta in admitted
         if record.size_band.value not in frozen.excluded_size_bands
+        and meta.age_seconds <= window_seconds
     ]
 
     by_lineage: dict[str, list[tuple[SessionRecord, FileMeta]]] = {}

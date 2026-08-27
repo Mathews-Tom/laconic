@@ -124,6 +124,59 @@ def test_build_session_manifest_only_includes_frozen_lineages(tmp_path: Path) ->
     assert entries[0].record.project_lineage_id == included_lineage
 
 
+def test_build_session_manifest_excludes_sessions_outside_time_window(tmp_path: Path) -> None:
+    # Regression test: build_session_manifest must apply frozen.time_window_days,
+    # not just the size-band exclusion. A session older than the window is
+    # excluded from "eligible" entirely, even though it would otherwise admit.
+    anchor = time.time()
+    home = tmp_path / "home"
+    root = SourceRoot.resolve("root_a", tmp_path / "AetherForge")
+    root.path.mkdir(parents=True)
+
+    within_window_project = root.path / "laconic"
+    outside_window_project = root.path / "archex"
+
+    within_path = _write_session(
+        home,
+        (".claude", "projects", "laconic"),
+        f"{_UUID_A}.jsonl",
+        str(within_window_project),
+    )
+    outside_path = _write_session(
+        home,
+        (".claude", "projects", "archex"),
+        f"{_UUID_B}.jsonl",
+        str(outside_window_project),
+    )
+    _age_file(within_path, seconds_old=7 * 86400, anchor=anchor)  # 7 days old: in window
+    _age_file(outside_path, seconds_old=200 * 86400, anchor=anchor)  # 200 days old: out of window
+
+    from laconic.k1corpus.stage_a import project_lineage_id
+
+    within_lineage = project_lineage_id(within_window_project.resolve())
+    outside_lineage = project_lineage_id(outside_window_project.resolve())
+
+    frozen = _frozen_corpus(
+        frozen_at=anchor,
+        design_set=frozenset(),
+        # Both lineages are in the frozen confirmatory set; the outside-window
+        # one must still be excluded by the window rule, never guessed in.
+        confirmatory_set=frozenset({within_lineage, outside_lineage}),
+        totals={
+            "eligible_lineages": 1,
+            "eligible_sessions_precap": 1,
+            "design_lineages": 0,
+            "design_sessions_postcap": 0,
+            "confirmatory_lineages": 1,
+            "confirmatory_sessions_postcap": 1,
+        },
+    )
+
+    entries = build_session_manifest(frozen, home=home, roots=(root,), as_of=anchor)
+    assert len(entries) == 1
+    assert entries[0].record.project_lineage_id == within_lineage
+
+
 def test_build_session_manifest_respects_per_lineage_cap_most_recent_first(tmp_path: Path) -> None:
     anchor = time.time()
     home = tmp_path / "home"
