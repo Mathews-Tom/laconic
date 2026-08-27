@@ -76,6 +76,8 @@ F3 src/auth/tokens.py  1,284 lines  sha 4a9c21e8
 
 **Not a 44% saving.** We will publish the net session-level number the replay harness produces, including any follow-up reads the codec induces. If it comes in under 15%, we will say the codec is not worth its complexity.
 
+**Not deployment-ready.** The executable K1 gate currently measures 8.53% net savings on the committed fixture corpus, below the 15% kill threshold. Hook-based deployment is the intended first runtime surface and MCP is secondary, but both remain blocked. The fixture validates the gate pipeline rather than real-world savings magnitude; a representative-corpus K1 decision is the only path that can reopen integration.
+
 **Not the biggest lever available.** Model and scaffold choice spans >100× in cost at comparable accuracy on public leaderboards. Laconic is orthogonal to that and will not pretend otherwise.
 
 **Not free.** A codec that adds more input tokens than it saves is a tax. Our gate is under 500 added tokens per turn, and we test for it.

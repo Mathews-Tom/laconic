@@ -176,6 +176,22 @@ def _choice(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return {"message": message}
 
 
+def test_openrouter_payload_uses_chat_completions_text_content_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chat Completions blocks must use `text`, not the Responses `input_text` type."""
+    client = RecordingOpenRouterClient(
+        [_response([_choice({"role": "assistant", "content": None, "tool_calls": None})])]
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-credential")
+
+    client.respond(_request(tmp_path))
+
+    assert client.payloads[0]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "inspect source"}]}
+    ]
+
+
 def test_openrouter_client_declares_only_current_tool_never_full_session_universe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -293,7 +309,7 @@ def test_openrouter_client_declares_only_current_tool_never_full_session_univers
     assert "tools" not in client.payloads[2]
     assert "tool_choice" not in client.payloads[2]
     assert client.payloads[2]["messages"] == [
-        {"content": [{"text": "inspect source", "type": "input_text"}], "role": "user"},
+        {"role": "user", "content": [{"type": "text", "text": "inspect source"}]},
         {
             "role": "assistant",
             "content": None,
@@ -309,7 +325,7 @@ def test_openrouter_client_declares_only_current_tool_never_full_session_univers
             ],
         },
         {"role": "tool", "tool_call_id": "call-1", "content": '{"text":"source"}'},
-        {"content": [{"text": "now write a summary", "type": "input_text"}], "role": "user"},
+        {"role": "user", "content": [{"type": "text", "text": "now write a summary"}]},
         {
             "role": "assistant",
             "content": None,
@@ -331,7 +347,7 @@ def test_openrouter_client_declares_only_current_tool_never_full_session_univers
             "tool_call_id": "call-2",
             "content": '{"bytes_written":14}',
         },
-        {"content": [{"text": "done", "type": "input_text"}], "role": "user"},
+        {"role": "user", "content": [{"type": "text", "text": "done"}]},
     ]
 
 

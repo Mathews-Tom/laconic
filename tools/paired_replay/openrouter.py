@@ -27,7 +27,7 @@ from laconic.ledger import Ledger
 from tools.paired_replay.config import ProviderRouting
 from tools.paired_replay.evidence import JsonValue
 from tools.paired_replay.interaction import ReceiptToolProjection
-from tools.paired_replay.openai_responses import _prompt_schedule, _user_input_items
+from tools.paired_replay.openai_responses import _prompt_schedule
 from tools.paired_replay.runner import (
     PairedReplayError,
     PairedReplayRequest,
@@ -67,7 +67,7 @@ class OpenRouterChatCompletionsClient:
         if not initial_prompts:
             raise PairedReplayError("OpenRouter replay requires an initial user prompt")
         response_turns: list[PairedResponseTurn] = []
-        messages: list[dict[str, JsonValue]] = list(_user_input_items(initial_prompts))
+        messages: list[dict[str, JsonValue]] = _user_message_items(initial_prompts)
         with tempfile.TemporaryDirectory(
             prefix="laconic-paired-replay-", dir=request.config.artifact_root
         ) as temporary:
@@ -197,7 +197,7 @@ class OpenRouterChatCompletionsClient:
                     messages.append(
                         {"role": "tool", "tool_call_id": tool_call_id, "content": output}
                     )
-                    messages.extend(_user_input_items(follow_up_prompts[follow_up_index]))
+                    messages.extend(_user_message_items(follow_up_prompts[follow_up_index]))
                     follow_up_index += 1
             finally:
                 ledger.close()
@@ -229,6 +229,11 @@ class OpenRouterChatCompletionsClient:
         if not isinstance(document, dict):
             raise PairedReplayError("OpenRouter response must be an object")
         return cast(dict[str, JsonValue], document)
+
+
+def _user_message_items(prompts: tuple[str, ...]) -> list[dict[str, JsonValue]]:
+    """Build Chat Completions user messages for the OpenRouter endpoint."""
+    return [{"role": "user", "content": [{"type": "text", "text": prompt}]} for prompt in prompts]
 
 
 def _request_payload(
