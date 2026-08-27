@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-27
+
+### Added
+
+- Laconic Observe (`laconic.observe`): a local, content-free automatic measurement surface for Claude Code and OMP, governed by `docs/observe-design.md`. It is not a compression hook and does not enable codec deployment; K1 remains 8.53% on the fixture corpus, below the 15% kill threshold, and Observe does not change that disposition.
+  - Independently versioned client adapters (`laconic.observe.claude_code`, `laconic.observe.omp`): verified event/output/configuration contracts for each client's completed-tool-result and session-close events, with an explicit GO/NO-GO compatibility matrix (`laconic.observe.report`) and cited findings (`docs/observe-compat-claude-code.md`, `docs/observe-compat-omp.md`).
+  - Content-free local receipts (`laconic.observe.receipt`): every field is drawn from a fixed privacy allowlist — opaque session id, adapter identity, a closed tool-category bucket (never a raw tool or MCP server name), coarse argument/result size bands (never an exact byte count), a success/error/session-close class, and a timestamp. A dedicated validator (`laconic.observe.privacy`) enforces the same allowlist independently of the receipt's own shape.
+  - A local, hash-chained audit log (`laconic.observe.audit`): tamper- and gap-evident, append-only, never a remote or distributed guarantee.
+  - A bounded hook subprocess entrypoint (`python -m laconic.observe.entrypoint --client claude-code|omp`): reads one JSON event on stdin, builds and privacy-validates a receipt, appends it to the audit log, and always exits 0 with empty stdout — on success, malformed input, an unsupported event, or a storage failure — so a client never sees agent-visible output from Observe.
+  - `laconic observe install|remove --client claude-code|omp [--scope project|user] [--dry-run]`: idempotent, atomic, unrelated-configuration-preserving installation of a single owned hook entry (Claude Code, JSON settings merge) or extension file (OMP, content-marked file drop). Refuses to overwrite a foreign file occupying the owned OMP path.
+  - `laconic observe status` / `laconic observe report`: local-only views over the audit log — entry count, hash-chain integrity, and a breakdown by adapter, tool category, result class, and size bands. Never contact a provider or read a real client configuration.
+  - `docs/observe-cli.md`: the operator guide, including the documented limitation that OMP's profile-scoped user directory cannot be fully auto-resolved and `--user-dir` should be passed explicitly on a non-default profile.
+
 ## [0.7.0] — 2026-07-29
 
 ### Added
@@ -74,7 +87,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Initial packaging, lint, strict typing, test, and CI surface, with an importable `laconic` package and a `laconic` console script exposing `--version` and `--help`.
 
-[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.5.0...v0.7.0
 [0.5.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.3.0...v0.4.0
