@@ -29,11 +29,12 @@ Hooks are the intended primary runtime surface. The CLI is the primary operator,
 
 ## Current state, as measured
 
-- Package version: `0.7.0` (`pyproject.toml`).
+- Package version: `0.8.0` (`pyproject.toml`).
 - Core codec, CLI, replay/gate harness, renderer, and K3 dry-run harness are released.
+- Laconic Observe (`laconic.observe`, `laconic observe install/remove/status/report`) is released: a local, content-free automatic measurement surface for Claude Code and OMP. It is not a codec transform and does not touch K1 status; no hook is installed automatically, only via an explicit operator command.
 - `uv run laconic gates --corpus tests/corpus --format json` reports K1 net savings of **8.53%**; the pre-registered kill threshold is **15%**.
 - The same gate run reports K2 action equivalence **100%**, K4 overhead **26.8 tokens**, K5 difference **0.0pp**, and K3 as manual/not evaluated.
-- Hooks and MCP are blocked. The committed corpus validates the gate pipeline but is not a real-world savings benchmark.
+- Hook/MCP *codec* deployment is blocked. The committed corpus validates the gate pipeline but is not a real-world savings benchmark.
 
 ## Stated limitations
 
