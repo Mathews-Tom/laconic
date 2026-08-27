@@ -1,6 +1,6 @@
 # Laconic – Compress what a coding agent carries, not what it says.
 
-> **Status: research and evaluation package, v0.7.0.** The reversible codec core, replay/gate harness, and human-study harness are released. Hook integration is the intended primary runtime surface and MCP is secondary, but both are blocked: K1 measures 8.53% net savings on the committed fixture corpus, below the 15% kill threshold. That corpus validates the gate machinery, not real-world deployment economics.
+> **Status: research and evaluation package, v0.8.0.** The reversible codec core, replay/gate harness, and human-study harness are released. Laconic Observe (`laconic observe`) is also released: a local, content-free automatic measurement surface for Claude Code and OMP, gated entirely behind an operator-run CLI command. Hook/MCP *codec* integration is a separate, still-blocked surface: K1 measures 8.53% net savings on the committed fixture corpus, below the 15% kill threshold. That corpus validates the gate machinery, not real-world deployment economics, and Observe does not change this disposition.
 
 Laconic is a codec for the machine-to-machine traffic of coding agents: it re-encodes observations and actions at the tool boundary, keeps every elision recoverable, and renders prose for a human only on demand.
 
