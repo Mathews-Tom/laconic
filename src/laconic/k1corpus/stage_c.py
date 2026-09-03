@@ -17,6 +17,7 @@ from laconic.k1corpus.resolve import resolve_session_path
 from laconic.k1corpus.stage_a import Provider
 from laconic.k1corpus.stage_b import ManifestSet
 from laconic.observe.audit import append_to_file
+from laconic.replay.corpus import MalformedRecordError
 from laconic.replay.engine import (
     CostCapExceededError,
     LiveReplayConfig,
@@ -214,15 +215,20 @@ def run_untracked_batch(
     resolver: Callable[[Provider, str], Path | None] = resolve_session_path,
     model_resolver: Callable[[Path], str] = resolve_original_model,
 ) -> tuple[BatchSessionResult, ...]:
-    """Run entries until a realized-cost overage stops the next session.
+    """Run entries with state-free, deterministic batch accounting.
 
-    This is the deterministic, state-free core. PR-2 adds durable completion
-    state and audit hooks around it; neither a missing path nor an unresolved
-    model reaches ``runner``.
+    This is the pre-ledger test seam. The durable runner adds the audit and
+    restart contract; both variants isolate malformed baselines before client
+    invocation and never dispatch a zero-budget session.
     """
     spend = BatchSpend(cap_usd=spend_cap_usd)
     results: list[BatchSessionResult] = []
     for entry in entries:
+        if spend.remaining_usd <= 0:
+            results.append(
+                BatchSessionResult(session_id=entry.session_id, outcome="batch_cap_exceeded")
+            )
+            break
         resolved_path = resolver(entry.provider, entry.session_id)
         if resolved_path is None:
             results.append(
@@ -236,6 +242,11 @@ def run_untracked_batch(
                 BatchSessionResult(session_id=entry.session_id, outcome="model_unresolved")
             )
             continue
+        except (MalformedRecordError, OSError):
+            results.append(
+                BatchSessionResult(session_id=entry.session_id, outcome="baseline_malformed")
+            )
+            continue
         session = ResolvedStageCSession(entry=entry, baseline=resolved_path, model=model)
         realized_cost = runner.run(session, cost_cap_usd=spend.remaining_usd)
         spend = spend.record(realized_cost)
@@ -246,7 +257,7 @@ def run_untracked_batch(
                 realized_cost_usd=realized_cost,
             )
         )
-        if spend.exceeded:
+        if spend.remaining_usd <= 0:
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="batch_cap_exceeded")
             )
@@ -346,6 +357,7 @@ class StageCLedger:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._charges: list[ChargedAttempt] = []
+        self._unaccounted_sessions: set[str] = set()
         self._completed = self._load()
 
     @property
@@ -355,6 +367,11 @@ class StageCLedger:
     @property
     def charges(self) -> tuple[ChargedAttempt, ...]:
         return tuple(self._charges)
+
+    @property
+    def unaccounted_sessions(self) -> frozenset[str]:
+        """Session IDs that cannot safely be retried without a cost receipt."""
+        return frozenset(self._unaccounted_sessions)
 
     @property
     def realized_cost_usd(self) -> float:
@@ -372,6 +389,12 @@ class StageCLedger:
         self._charges.append(charge)
         self._write()
 
+    def record_unaccounted_session(self, session_id: str) -> None:
+        if not session_id:
+            raise ValueError("unaccounted session ID must not be empty")
+        self._unaccounted_sessions.add(session_id)
+        self._write()
+
     def _load(self) -> dict[str, CompletedSession]:
         if not self._path.exists():
             return {}
@@ -385,7 +408,12 @@ class StageCLedger:
             raise StageCManifestError(f"Stage C ledger {self._path} has an unsupported schema")
         raw_completed = payload.get("completed")
         raw_charges = payload.get("charges", [])
-        if not isinstance(raw_completed, list) or not isinstance(raw_charges, list):
+        raw_unaccounted = payload.get("unaccounted_sessions", [])
+        if (
+            not isinstance(raw_completed, list)
+            or not isinstance(raw_charges, list)
+            or not isinstance(raw_unaccounted, list)
+        ):
             raise StageCManifestError(f"Stage C ledger {self._path} has malformed entries")
         completed: dict[str, CompletedSession] = {}
         for index, row in enumerate(raw_completed):
@@ -403,7 +431,12 @@ class StageCLedger:
                 raise StageCManifestError(f"Stage C ledger charge {index} is not an object")
             charge = _parse_charge(row, index=index)
             charges.append(charge)
+        if not all(isinstance(session_id, str) and session_id for session_id in raw_unaccounted):
+            raise StageCManifestError(f"Stage C ledger {self._path} has malformed unaccounted IDs")
+        if len(set(raw_unaccounted)) != len(raw_unaccounted):
+            raise StageCManifestError(f"Stage C ledger {self._path} repeats unaccounted IDs")
         self._charges = charges
+        self._unaccounted_sessions = set(raw_unaccounted)
         return completed
 
     def _write(self) -> None:
@@ -415,6 +448,7 @@ class StageCLedger:
                 completion.to_json() for _, completion in sorted(self._completed.items())
             ],
             "charges": [charge.to_json() for charge in self._charges],
+            "unaccounted_sessions": sorted(self._unaccounted_sessions),
         }
         temporary = self._path.with_name(f".{self._path.name}.tmp")
         try:
@@ -510,6 +544,10 @@ class DurableSessionRunner(Protocol):
         ...
 
 
+class IncompletePairedEvidenceError(ValueError):
+    """A baseline has no replayable observations and cannot form a K1 pair."""
+
+
 @runtime_checkable
 class _CloseableReplayClient(Protocol):
     """The M1 client lifecycle hook, kept optional for external clients."""
@@ -533,10 +571,14 @@ class LiveStageCSessionRunner:
         self._observation_builder = observation_builder
 
     def run(self, session: ResolvedStageCSession, *, cost_cap_usd: float) -> SessionExecution:
+        observations = self._observation_builder(session.baseline)
+        if not observations:
+            raise IncompletePairedEvidenceError(
+                f"{session.entry.session_id}: no replayable observations for paired evidence"
+            )
         artifact = self._artifact_path(session)
         client = self._client_factory()
         try:
-            observations = self._observation_builder(session.baseline)
             replayed = replay_live(
                 session.baseline,
                 LiveReplayConfig(
@@ -690,6 +732,14 @@ def run_resumable_batch(
                 )
             )
             continue
+        if entry.session_id in ledger.unaccounted_sessions:
+            results.append(
+                BatchSessionResult(
+                    session_id=entry.session_id,
+                    outcome="unaccounted_cost_requires_manual_reconciliation",
+                )
+            )
+            break
         if spend.remaining_usd <= 0:
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="batch_cap_exceeded")
@@ -708,6 +758,12 @@ def run_resumable_batch(
             _audit_outcome(audit, entry, outcome="model_unresolved", error=error)
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="model_unresolved")
+            )
+            continue
+        except (MalformedRecordError, OSError) as error:
+            _audit_outcome(audit, entry, outcome="baseline_malformed", error=error)
+            results.append(
+                BatchSessionResult(session_id=entry.session_id, outcome="baseline_malformed")
             )
             continue
         resolved = ResolvedStageCSession(entry=entry, baseline=baseline, model=model)
@@ -740,11 +796,22 @@ def run_resumable_batch(
             )
             break
         except CostCapExceededError as error:
+            ledger.record_unaccounted_session(entry.session_id)
             _audit_outcome(audit, entry, model=model, outcome="cost_cap_exceeded", error=error)
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="cost_cap_exceeded")
             )
             break
+        except IncompletePairedEvidenceError as error:
+            _audit_outcome(
+                audit, entry, model=model, outcome="incomplete_paired_evidence", error=error
+            )
+            results.append(
+                BatchSessionResult(
+                    session_id=entry.session_id, outcome="incomplete_paired_evidence"
+                )
+            )
+            continue
         except Exception as error:
             _audit_outcome(audit, entry, model=model, outcome="client_error", error=error)
             results.append(BatchSessionResult(session_id=entry.session_id, outcome="client_error"))

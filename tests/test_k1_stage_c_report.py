@@ -6,6 +6,8 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
+
 from laconic import cli
 from laconic.k1corpus.stage_a import Provider
 from laconic.k1corpus.stage_b import ManifestSet
@@ -306,3 +308,60 @@ def test_live_session_runner_uses_fake_client_and_persists_mode_restricted_artif
     assert artifact.is_file()
     assert stat.S_IMODE((tmp_path / "artifacts").stat().st_mode) == 0o700
     assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+
+
+def test_live_session_runner_rejects_empty_observation_evidence(tmp_path: Path) -> None:
+    baseline = tmp_path / "empty-observations.jsonl"
+    baseline.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-5",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "first",
+                            "name": "Read",
+                            "input": {"path": "a.py"},
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 20,
+                        "output_tokens": 10,
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        def respond(self, **_kwargs: object) -> tuple[ReplayTurnCapture, ...]:
+            raise AssertionError("empty evidence must fail before a client call")
+
+        def close(self) -> None:
+            return None
+
+    factory_called = False
+
+    def client_factory() -> FakeClient:
+        nonlocal factory_called
+        factory_called = True
+        return FakeClient()
+
+    runner = LiveStageCSessionRunner(
+        client_factory=client_factory,
+        artifact_dir=tmp_path / "artifacts",
+        observation_builder=lambda _baseline: {},
+    )
+    with pytest.raises(ValueError, match="no replayable observations"):
+        runner.run(
+            ResolvedStageCSession(entry=_entry(), baseline=baseline, model="claude-sonnet-5"),
+            cost_cap_usd=1.0,
+        )
+    assert factory_called is False
