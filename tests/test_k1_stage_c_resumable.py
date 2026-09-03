@@ -14,6 +14,7 @@ from laconic.k1corpus.stage_b import ManifestSet
 from laconic.k1corpus.stage_c import (
     ChargedAttempt,
     CompletedSession,
+    IncompletePairedEvidenceError,
     PartialSessionCostError,
     ResolvedStageCSession,
     SessionExecution,
@@ -23,6 +24,8 @@ from laconic.k1corpus.stage_c import (
     run_resumable_batch,
 )
 from laconic.observe.audit import read_chain, verify_chain
+from laconic.replay.corpus import MalformedRecordError
+from laconic.replay.engine import CostCapExceededError
 
 
 @dataclass
@@ -167,8 +170,104 @@ def test_client_error_is_isolated_and_next_session_completes(tmp_path: Path) -> 
     assert [outcome.outcome for outcome in outcomes] == ["client_error", "completed"]
     assert runner.calls == [entry.session_id for entry in entries]
     assert set(StageCLedger(ledger_path).completed) == {entries[1].session_id}
+
     receipts = [entry.receipt for entry in read_chain(audit_path)]
     assert [receipt["error_class"] for receipt in receipts] == ["RuntimeError", None]
+
+
+def test_malformed_baseline_is_isolated_before_client_invocation(tmp_path: Path) -> None:
+    entries = _entries()[:2]
+    runner = FakeDurableRunner()
+    ledger_path = tmp_path / "ledger.json"
+    audit_path = tmp_path / "audit.jsonl"
+
+    def model_resolver(path: Path) -> str:
+        if path.name == "0.jsonl":
+            raise MalformedRecordError("synthetic malformed usage")
+        return "claude-sonnet-5"
+
+    outcomes = run_resumable_batch(
+        entries,
+        spend_cap_usd=1.0,
+        runner=runner,
+        ledger=StageCLedger(ledger_path),
+        audit=StageCAudit(audit_path),
+        resolver=_resolve(tmp_path),
+        model_resolver=model_resolver,
+    )
+
+    assert [result.outcome for result in outcomes] == ["baseline_malformed", "completed"]
+    assert runner.calls == [entries[1].session_id]
+    assert [entry.receipt["error_class"] for entry in read_chain(audit_path)] == [
+        "MalformedRecordError",
+        None,
+    ]
+
+
+def test_incomplete_paired_evidence_is_not_persisted_as_completed(tmp_path: Path) -> None:
+    entry = _entries()[0]
+
+    class IncompleteRunner:
+        def run(self, session: ResolvedStageCSession, *, cost_cap_usd: float) -> SessionExecution:
+            raise IncompletePairedEvidenceError("synthetic missing observation")
+
+    ledger_path = tmp_path / "ledger.json"
+    audit_path = tmp_path / "audit.jsonl"
+    outcomes = run_resumable_batch(
+        (entry,),
+        spend_cap_usd=1.0,
+        runner=IncompleteRunner(),
+        ledger=StageCLedger(ledger_path),
+        audit=StageCAudit(audit_path),
+        resolver=_resolve(tmp_path),
+        model_resolver=lambda _path: "claude-sonnet-5",
+    )
+
+    assert [result.outcome for result in outcomes] == ["incomplete_paired_evidence"]
+    assert StageCLedger(ledger_path).completed == {}
+    assert read_chain(audit_path)[0].receipt["outcome"] == "incomplete_paired_evidence"
+
+
+def test_unaccounted_cap_error_blocks_retry_before_second_client_call(tmp_path: Path) -> None:
+    entry = _entries()[0]
+
+    @dataclass
+    class UnknownCostRunner:
+        calls: list[str] = field(default_factory=list)
+
+        def run(self, session: ResolvedStageCSession, *, cost_cap_usd: float) -> SessionExecution:
+            self.calls.append(session.entry.session_id)
+            raise CostCapExceededError("synthetic paid call without cost receipt")
+
+    runner = UnknownCostRunner()
+    ledger_path = tmp_path / "ledger.json"
+    audit_path = tmp_path / "audit.jsonl"
+    first = run_resumable_batch(
+        (entry,),
+        spend_cap_usd=1.0,
+        runner=runner,
+        ledger=StageCLedger(ledger_path),
+        audit=StageCAudit(audit_path),
+        resolver=_resolve(tmp_path),
+        model_resolver=lambda _path: "claude-sonnet-5",
+    )
+    reloaded = StageCLedger(ledger_path)
+    resumed = run_resumable_batch(
+        (entry,),
+        spend_cap_usd=1.0,
+        runner=runner,
+        ledger=reloaded,
+        audit=StageCAudit(audit_path),
+        resolver=_resolve(tmp_path),
+        model_resolver=lambda _path: "claude-sonnet-5",
+    )
+
+    assert [result.outcome for result in first] == ["cost_cap_exceeded"]
+    assert reloaded.unaccounted_sessions == {entry.session_id}
+    assert [result.outcome for result in resumed] == [
+        "unaccounted_cost_requires_manual_reconciliation"
+    ]
+    assert runner.calls == [entry.session_id]
 
 
 def test_partial_session_charge_stops_batch_without_losing_realized_spend(tmp_path: Path) -> None:

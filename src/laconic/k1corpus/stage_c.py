@@ -8,16 +8,26 @@ The concrete provider client remains outside the package boundary.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 from laconic.k1corpus.resolve import resolve_session_path
 from laconic.k1corpus.stage_a import Provider
 from laconic.k1corpus.stage_b import ManifestSet
 from laconic.observe.audit import append_to_file
-from laconic.replay.engine import CostCapExceededError, iter_turns
+from laconic.replay.corpus import MalformedRecordError
+from laconic.replay.engine import (
+    CostCapExceededError,
+    LiveReplayConfig,
+    RecordedResponseSession,
+    ReplayClient,
+    iter_turns,
+    net_cost,
+    replay_live,
+)
+from laconic.replay.equivalence import compare_session
 
 #: Private root for all Stage C mutable state and derived artifacts.
 DEFAULT_STAGE_C_ROOT = Path(".laconic/k1/stage_c")
@@ -205,15 +215,20 @@ def run_untracked_batch(
     resolver: Callable[[Provider, str], Path | None] = resolve_session_path,
     model_resolver: Callable[[Path], str] = resolve_original_model,
 ) -> tuple[BatchSessionResult, ...]:
-    """Run entries until a realized-cost overage stops the next session.
+    """Run entries with state-free, deterministic batch accounting.
 
-    This is the deterministic, state-free core. PR-2 adds durable completion
-    state and audit hooks around it; neither a missing path nor an unresolved
-    model reaches ``runner``.
+    This is the pre-ledger test seam. The durable runner adds the audit and
+    restart contract; both variants isolate malformed baselines before client
+    invocation and never dispatch a zero-budget session.
     """
     spend = BatchSpend(cap_usd=spend_cap_usd)
     results: list[BatchSessionResult] = []
     for entry in entries:
+        if spend.remaining_usd <= 0:
+            results.append(
+                BatchSessionResult(session_id=entry.session_id, outcome="batch_cap_exceeded")
+            )
+            break
         resolved_path = resolver(entry.provider, entry.session_id)
         if resolved_path is None:
             results.append(
@@ -227,6 +242,11 @@ def run_untracked_batch(
                 BatchSessionResult(session_id=entry.session_id, outcome="model_unresolved")
             )
             continue
+        except (MalformedRecordError, OSError):
+            results.append(
+                BatchSessionResult(session_id=entry.session_id, outcome="baseline_malformed")
+            )
+            continue
         session = ResolvedStageCSession(entry=entry, baseline=resolved_path, model=model)
         realized_cost = runner.run(session, cost_cap_usd=spend.remaining_usd)
         spend = spend.record(realized_cost)
@@ -237,12 +257,49 @@ def run_untracked_batch(
                 realized_cost_usd=realized_cost,
             )
         )
-        if spend.exceeded:
+        if spend.remaining_usd <= 0:
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="batch_cap_exceeded")
             )
             break
     return tuple(results)
+
+
+@dataclass(frozen=True, slots=True)
+class PairedSessionMetrics:
+    """Body-free K1/K2 measurements from one complete paired replay."""
+
+    baseline_cost_usd: float
+    codec_on_cost_usd: float
+    induced_turn_count: int
+    induced_turn_cost_usd: float
+    equivalent_turn_count: int
+    compared_turn_count: int
+
+    def __post_init__(self) -> None:
+        if any(
+            value < 0
+            for value in (
+                self.baseline_cost_usd,
+                self.codec_on_cost_usd,
+                self.induced_turn_cost_usd,
+            )
+        ):
+            raise ValueError("paired costs must not be negative")
+        if self.induced_turn_count < 0 or self.equivalent_turn_count < 0:
+            raise ValueError("paired turn counts must not be negative")
+        if self.compared_turn_count < self.equivalent_turn_count:
+            raise ValueError("equivalent turns cannot exceed compared turns")
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "baseline_cost_usd": self.baseline_cost_usd,
+            "codec_on_cost_usd": self.codec_on_cost_usd,
+            "induced_turn_count": self.induced_turn_count,
+            "induced_turn_cost_usd": self.induced_turn_cost_usd,
+            "equivalent_turn_count": self.equivalent_turn_count,
+            "compared_turn_count": self.compared_turn_count,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,12 +309,14 @@ class CompletedSession:
     session_id: str
     realized_cost_usd: float
     artifact_name: str
+    metrics: PairedSessionMetrics | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
             "session_id": self.session_id,
             "realized_cost_usd": self.realized_cost_usd,
             "artifact_name": self.artifact_name,
+            "metrics": None if self.metrics is None else self.metrics.to_json(),
         }
 
 
@@ -298,6 +357,7 @@ class StageCLedger:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._charges: list[ChargedAttempt] = []
+        self._unaccounted_sessions: set[str] = set()
         self._completed = self._load()
 
     @property
@@ -307,6 +367,11 @@ class StageCLedger:
     @property
     def charges(self) -> tuple[ChargedAttempt, ...]:
         return tuple(self._charges)
+
+    @property
+    def unaccounted_sessions(self) -> frozenset[str]:
+        """Session IDs that cannot safely be retried without a cost receipt."""
+        return frozenset(self._unaccounted_sessions)
 
     @property
     def realized_cost_usd(self) -> float:
@@ -324,6 +389,12 @@ class StageCLedger:
         self._charges.append(charge)
         self._write()
 
+    def record_unaccounted_session(self, session_id: str) -> None:
+        if not session_id:
+            raise ValueError("unaccounted session ID must not be empty")
+        self._unaccounted_sessions.add(session_id)
+        self._write()
+
     def _load(self) -> dict[str, CompletedSession]:
         if not self._path.exists():
             return {}
@@ -337,7 +408,12 @@ class StageCLedger:
             raise StageCManifestError(f"Stage C ledger {self._path} has an unsupported schema")
         raw_completed = payload.get("completed")
         raw_charges = payload.get("charges", [])
-        if not isinstance(raw_completed, list) or not isinstance(raw_charges, list):
+        raw_unaccounted = payload.get("unaccounted_sessions", [])
+        if (
+            not isinstance(raw_completed, list)
+            or not isinstance(raw_charges, list)
+            or not isinstance(raw_unaccounted, list)
+        ):
             raise StageCManifestError(f"Stage C ledger {self._path} has malformed entries")
         completed: dict[str, CompletedSession] = {}
         for index, row in enumerate(raw_completed):
@@ -355,7 +431,12 @@ class StageCLedger:
                 raise StageCManifestError(f"Stage C ledger charge {index} is not an object")
             charge = _parse_charge(row, index=index)
             charges.append(charge)
+        if not all(isinstance(session_id, str) and session_id for session_id in raw_unaccounted):
+            raise StageCManifestError(f"Stage C ledger {self._path} has malformed unaccounted IDs")
+        if len(set(raw_unaccounted)) != len(raw_unaccounted):
+            raise StageCManifestError(f"Stage C ledger {self._path} repeats unaccounted IDs")
         self._charges = charges
+        self._unaccounted_sessions = set(raw_unaccounted)
         return completed
 
     def _write(self) -> None:
@@ -367,6 +448,7 @@ class StageCLedger:
                 completion.to_json() for _, completion in sorted(self._completed.items())
             ],
             "charges": [charge.to_json() for charge in self._charges],
+            "unaccounted_sessions": sorted(self._unaccounted_sessions),
         }
         temporary = self._path.with_name(f".{self._path.name}.tmp")
         try:
@@ -384,6 +466,7 @@ def _parse_completed(row: dict[object, object], *, index: int) -> CompletedSessi
     session_id = row.get("session_id")
     cost = row.get("realized_cost_usd")
     artifact_name = row.get("artifact_name")
+    metrics = _parse_metrics(row.get("metrics"), index=index)
     if not isinstance(session_id, str) or not isinstance(cost, (int, float)):
         raise StageCManifestError(f"Stage C ledger completion {index} has malformed identity/cost")
     if not isinstance(artifact_name, str) or Path(artifact_name).name != artifact_name:
@@ -394,6 +477,32 @@ def _parse_completed(row: dict[object, object], *, index: int) -> CompletedSessi
         session_id=session_id,
         realized_cost_usd=float(cost),
         artifact_name=artifact_name,
+        metrics=metrics,
+    )
+
+
+def _parse_metrics(value: object, *, index: int) -> PairedSessionMetrics | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StageCManifestError(f"Stage C ledger completion {index} has malformed metrics")
+    numeric_fields = (
+        "baseline_cost_usd",
+        "codec_on_cost_usd",
+        "induced_turn_cost_usd",
+    )
+    count_fields = ("induced_turn_count", "equivalent_turn_count", "compared_turn_count")
+    if any(not isinstance(value.get(field), (int, float)) for field in numeric_fields):
+        raise StageCManifestError(f"Stage C ledger completion {index} has malformed metric costs")
+    if any(not isinstance(value.get(field), int) for field in count_fields):
+        raise StageCManifestError(f"Stage C ledger completion {index} has malformed metric counts")
+    return PairedSessionMetrics(
+        baseline_cost_usd=float(value["baseline_cost_usd"]),
+        codec_on_cost_usd=float(value["codec_on_cost_usd"]),
+        induced_turn_count=value["induced_turn_count"],
+        induced_turn_cost_usd=float(value["induced_turn_cost_usd"]),
+        equivalent_turn_count=value["equivalent_turn_count"],
+        compared_turn_count=value["compared_turn_count"],
     )
 
 
@@ -414,6 +523,7 @@ class SessionExecution:
     artifact_name: str
     turn_count: int
     induced_turn_count: int
+    metrics: PairedSessionMetrics | None = None
 
     def __post_init__(self) -> None:
         if self.realized_cost_usd < 0:
@@ -422,6 +532,8 @@ class SessionExecution:
             raise ValueError("session artifact name must not contain a path")
         if self.turn_count < 0 or self.induced_turn_count < 0:
             raise ValueError("session turn counts must not be negative")
+        if self.metrics is not None and self.metrics.induced_turn_count != self.induced_turn_count:
+            raise ValueError("execution and paired metric induced-turn counts differ")
 
 
 class DurableSessionRunner(Protocol):
@@ -430,6 +542,112 @@ class DurableSessionRunner(Protocol):
     def run(self, session: ResolvedStageCSession, *, cost_cap_usd: float) -> SessionExecution:
         """Run one session and return only its content-free result summary."""
         ...
+
+
+class IncompletePairedEvidenceError(ValueError):
+    """A baseline has no replayable observations and cannot form a K1 pair."""
+
+
+@runtime_checkable
+class _CloseableReplayClient(Protocol):
+    """The M1 client lifecycle hook, kept optional for external clients."""
+
+    def close(self) -> None:
+        """Tear down the one-session client process."""
+
+
+class LiveStageCSessionRunner:
+    """Run one resolved baseline using a fresh M1-compatible client instance."""
+
+    def __init__(
+        self,
+        *,
+        client_factory: Callable[[], ReplayClient],
+        artifact_dir: Path,
+        observation_builder: Callable[[Path], Mapping[int, str]],
+    ) -> None:
+        self._client_factory = client_factory
+        self._artifact_dir = artifact_dir
+        self._observation_builder = observation_builder
+
+    def run(self, session: ResolvedStageCSession, *, cost_cap_usd: float) -> SessionExecution:
+        observations = self._observation_builder(session.baseline)
+        if not observations:
+            raise IncompletePairedEvidenceError(
+                f"{session.entry.session_id}: no replayable observations for paired evidence"
+            )
+        artifact = self._artifact_path(session)
+        client = self._client_factory()
+        try:
+            replayed = replay_live(
+                session.baseline,
+                LiveReplayConfig(
+                    model=session.model,
+                    cost_cap_usd=cost_cap_usd,
+                    client=client,
+                ),
+                artifact_path=artifact,
+                observations=observations,
+            )
+        except CostCapExceededError as error:
+            partial = RecordedResponseSession(
+                baseline=session.baseline,
+                fixture=artifact,
+                turns=tuple(iter_turns(artifact)),
+            )
+            raise PartialSessionCostError(
+                realized_cost_usd=partial.cost.cost.total,
+                artifact_name=artifact.name,
+            ) from error
+        finally:
+            if isinstance(client, _CloseableReplayClient):
+                client.close()
+        metrics = _paired_metrics(session.baseline, replayed, observations)
+        return SessionExecution(
+            realized_cost_usd=metrics.codec_on_cost_usd,
+            artifact_name=artifact.name,
+            turn_count=replayed.cost.turns,
+            induced_turn_count=metrics.induced_turn_count,
+            metrics=metrics,
+        )
+
+    def _artifact_path(self, session: ResolvedStageCSession) -> Path:
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        self._artifact_dir.chmod(0o700)
+        artifact = (
+            self._artifact_dir / f"{session.entry.session_id.replace(':', '-')}.codec-on.jsonl"
+        )
+        artifact.touch(mode=0o600, exist_ok=True)
+        artifact.chmod(0o600)
+        return artifact
+
+
+def _paired_metrics(
+    baseline: Path, replayed: RecordedResponseSession, observations: Mapping[int, str]
+) -> PairedSessionMetrics:
+    report = net_cost(baseline, replayed)
+    baseline_actions = tuple(
+        turn.actions[-1]
+        for turn in iter_turns(baseline)
+        if turn.actions and turn.index in observations
+    )
+    proposed_actions = replayed.non_induced_actions
+    if len(baseline_actions) != len(proposed_actions):
+        raise ValueError(
+            f"{baseline}: baseline has {len(baseline_actions)} replayable actions, "
+            f"but replay returned {len(proposed_actions)} terminal actions"
+        )
+    equivalence = compare_session(baseline_actions, proposed_actions)
+    return PairedSessionMetrics(
+        baseline_cost_usd=report.baseline.cost.total,
+        codec_on_cost_usd=report.codec_on.cost.total,
+        induced_turn_count=report.induced_turns,
+        induced_turn_cost_usd=report.induced_cost_usd,
+        equivalent_turn_count=sum(
+            comparison.is_equivalent for comparison in equivalence.comparisons
+        ),
+        compared_turn_count=len(baseline_actions),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +695,12 @@ class StageCAudit:
         self._path.chmod(0o600)
 
 
+def audit_retailogists_exclusions(manifest: LoadedStageCManifest, audit: StageCAudit) -> None:
+    """Record each fixed manifest exclusion without reading a transcript body."""
+    for entry in manifest.excluded_retailogists:
+        _audit_outcome(audit, entry, outcome="excluded_retailogists")
+
+
 def run_resumable_batch(
     entries: Sequence[StageCManifestEntry],
     *,
@@ -508,6 +732,14 @@ def run_resumable_batch(
                 )
             )
             continue
+        if entry.session_id in ledger.unaccounted_sessions:
+            results.append(
+                BatchSessionResult(
+                    session_id=entry.session_id,
+                    outcome="unaccounted_cost_requires_manual_reconciliation",
+                )
+            )
+            break
         if spend.remaining_usd <= 0:
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="batch_cap_exceeded")
@@ -526,6 +758,12 @@ def run_resumable_batch(
             _audit_outcome(audit, entry, outcome="model_unresolved", error=error)
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="model_unresolved")
+            )
+            continue
+        except (MalformedRecordError, OSError) as error:
+            _audit_outcome(audit, entry, outcome="baseline_malformed", error=error)
+            results.append(
+                BatchSessionResult(session_id=entry.session_id, outcome="baseline_malformed")
             )
             continue
         resolved = ResolvedStageCSession(entry=entry, baseline=baseline, model=model)
@@ -558,11 +796,22 @@ def run_resumable_batch(
             )
             break
         except CostCapExceededError as error:
+            ledger.record_unaccounted_session(entry.session_id)
             _audit_outcome(audit, entry, model=model, outcome="cost_cap_exceeded", error=error)
             results.append(
                 BatchSessionResult(session_id=entry.session_id, outcome="cost_cap_exceeded")
             )
             break
+        except IncompletePairedEvidenceError as error:
+            _audit_outcome(
+                audit, entry, model=model, outcome="incomplete_paired_evidence", error=error
+            )
+            results.append(
+                BatchSessionResult(
+                    session_id=entry.session_id, outcome="incomplete_paired_evidence"
+                )
+            )
+            continue
         except Exception as error:
             _audit_outcome(audit, entry, model=model, outcome="client_error", error=error)
             results.append(BatchSessionResult(session_id=entry.session_id, outcome="client_error"))
@@ -571,6 +820,7 @@ def run_resumable_batch(
             session_id=entry.session_id,
             realized_cost_usd=execution.realized_cost_usd,
             artifact_name=execution.artifact_name,
+            metrics=execution.metrics,
         )
         ledger.record_completed(completed)
         _audit_outcome(audit, entry, model=model, outcome="completed", execution=execution)

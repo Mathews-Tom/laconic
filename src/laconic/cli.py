@@ -7,7 +7,7 @@ import importlib
 import json
 import os
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -31,10 +31,22 @@ from laconic.k1corpus.stage_b import (
     DEFAULT_CORPUS_MANIFEST_PATH,
     DEFAULT_SESSION_MANIFEST_PATH,
     FrozenCorpus,
+    ManifestSet,
     TotalsMismatchError,
     build_session_manifest,
     write_session_manifest,
 )
+from laconic.k1corpus.stage_c import (
+    DEFAULT_STAGE_C_ROOT,
+    LiveStageCSessionRunner,
+    StageCAudit,
+    StageCLedger,
+    StageCManifestError,
+    audit_retailogists_exclusions,
+    load_stage_c_manifest,
+    run_resumable_batch,
+)
+from laconic.k1corpus.stage_c_report import generate_stage_c_report
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
 from laconic.observe.audit import DEFAULT_AUDIT_PATH
 from laconic.observe.contracts import ClientId
@@ -132,6 +144,7 @@ EXIT_OBSERVE_CONFIG_PARSE_ERROR = 20
 EXIT_OBSERVE_OWNERSHIP_CONFLICT = 21
 EXIT_K1_STAGE_A_STOP = 22
 EXIT_K1_STAGE_B_TOTALS_MISMATCH = 23
+EXIT_K1_STAGE_C_INCOMPLETE = 24
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -467,6 +480,40 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"default: {DEFAULT_SESSION_MANIFEST_PATH}",
     )
     k1_stage_b_build_manifest.set_defaults(handler=_k1_stage_b_build_manifest)
+
+    k1_stage_c = k1_subcommands.add_parser(
+        "stage-c",
+        help="run the explicitly authorized, resumable bounded live-replay batch",
+    )
+    k1_stage_c_subcommands = k1_stage_c.add_subparsers(dest="k1_stage_c_command")
+    k1_stage_c_run = k1_stage_c_subcommands.add_parser(
+        "run",
+        help="run one selected Stage C manifest set and emit its protocol report",
+        description=(
+            "Runs only a user-selected frozen-manifest set through an explicitly supplied "
+            "client. It records body-free ledger and audit state beneath --state-dir. "
+            "This command does not authorize a live provider run."
+        ),
+    )
+    k1_stage_c_run.add_argument(
+        "--manifest",
+        type=Path,
+        default=DEFAULT_SESSION_MANIFEST_PATH,
+        help=f"default: {DEFAULT_SESSION_MANIFEST_PATH}",
+    )
+    k1_stage_c_run.add_argument(
+        "--set", dest="selected_set", choices=["design", "confirmatory"], required=True
+    )
+    k1_stage_c_run.add_argument("--spend-cap", type=float, required=True)
+    k1_stage_c_run.add_argument("--client", required=True, help="local MODULE:ATTR client factory")
+    k1_stage_c_run.add_argument(
+        "--state-dir",
+        type=Path,
+        default=DEFAULT_STAGE_C_ROOT,
+        help=f"default: {DEFAULT_STAGE_C_ROOT}",
+    )
+    k1_stage_c_run.add_argument("--format", choices=["text", "json"], default="text")
+    k1_stage_c_run.set_defaults(handler=_k1_stage_c_run)
     return parser
 
 
@@ -740,6 +787,25 @@ def _score_session(
     return (baseline, report, equivalence)
 
 
+def _load_client_factory(spec: str) -> Callable[[], ReplayClient]:
+    """Resolve a local zero-argument ReplayClient factory without invoking it."""
+    module_name, sep, attr_name = spec.partition(":")
+    if not sep:
+        raise ValueError(f"expected MODULE:ATTR, got {spec!r}")
+    module = importlib.import_module(module_name)
+    factory = getattr(module, attr_name)
+    if not callable(factory):
+        raise ValueError(f"{spec!r} resolved to a non-callable {factory!r}")
+
+    def create() -> ReplayClient:
+        client: ReplayClient = factory()
+        if not callable(getattr(client, "respond", None)):
+            raise ValueError(f"{spec!r} did not return a ReplayClient (no callable .respond)")
+        return client
+
+    return create
+
+
 def _load_client(spec: str) -> ReplayClient:
     """Resolve ``"module.path:attr"`` to a zero-arg callable and call it.
 
@@ -748,17 +814,7 @@ def _load_client(spec: str) -> ReplayClient:
     opt-in); this is how a caller wires their own without laconic needing
     a network SDK dependency of its own.
     """
-    module_name, sep, attr_name = spec.partition(":")
-    if not sep:
-        raise ValueError(f"expected MODULE:ATTR, got {spec!r}")
-    module = importlib.import_module(module_name)
-    factory = getattr(module, attr_name)
-    if not callable(factory):
-        raise ValueError(f"{spec!r} resolved to a non-callable {factory!r}")
-    client: ReplayClient = factory()
-    if not callable(getattr(client, "respond", None)):
-        raise ValueError(f"{spec!r} did not return a ReplayClient (no callable .respond)")
-    return client
+    return _load_client_factory(spec)()
 
 
 def _tool_results_by_id(path: Path) -> dict[str, str]:
@@ -1290,6 +1346,66 @@ def _k1_stage_b_build_manifest(args: argparse.Namespace) -> int:
         f"{design_count} design, {confirmatory_count} confirmatory."
     )
     print(f"Manifest written to {out_path}")
+    return EXIT_OK
+
+
+def _k1_stage_c_run(args: argparse.Namespace) -> int:
+    try:
+        selected_set = ManifestSet(args.selected_set)
+        if args.spend_cap <= 0:
+            raise ValueError(f"--spend-cap must be positive, got {args.spend_cap}")
+        manifest = load_stage_c_manifest(args.manifest, selected_set=selected_set)
+    except (OSError, StageCManifestError, ValueError) as error:
+        print(f"laconic k1 stage-c run: {error}", file=sys.stderr)
+        return EXIT_LIVE_CONFIG_ERROR
+    try:
+        client_factory = _load_client_factory(args.client)
+        preflight_client = client_factory()
+        close = getattr(preflight_client, "close", None)
+        if callable(close):
+            close()
+    except (ImportError, AttributeError, TypeError, ValueError) as error:
+        print(
+            f"laconic k1 stage-c run: cannot load --client {args.client!r}: {error}",
+            file=sys.stderr,
+        )
+        return EXIT_CLIENT_IMPORT_ERROR
+
+    state_dir = args.state_dir
+    ledger = StageCLedger(state_dir / "ledger.json")
+    audit = StageCAudit(state_dir / "audit.jsonl")
+    audit_retailogists_exclusions(manifest, audit)
+    runner = LiveStageCSessionRunner(
+        client_factory=client_factory,
+        artifact_dir=state_dir / "artifacts",
+        observation_builder=lambda baseline: _build_observations(baseline, codec="on"),
+    )
+    run_resumable_batch(
+        manifest.entries,
+        spend_cap_usd=args.spend_cap,
+        runner=runner,
+        ledger=ledger,
+        audit=audit,
+    )
+    report = generate_stage_c_report(manifest, selected_set=selected_set, ledger=ledger)
+    payload = report.to_json()
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        composition = report.corpus_composition
+        k1 = report.k1
+        print(
+            "K1 Stage C "
+            f"{composition['set']} -- {composition['completed_sessions']}/"
+            f"{composition['selected_sessions']} complete; "
+            f"K1={k1['value_pct']}; disposition={k1['disposition']}"
+        )
+    completed = ledger.completed
+    if any(
+        entry.session_id not in completed or completed[entry.session_id].metrics is None
+        for entry in manifest.entries
+    ):
+        return EXIT_K1_STAGE_C_INCOMPLETE
     return EXIT_OK
 
 
