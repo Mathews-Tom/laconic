@@ -3,12 +3,550 @@
 // Middleware position: Laconic transforms the result produced by handlers
 // registered before it and returns only a content override.
 
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@oh-my-pi/pi-coding-agent";
 
 export const LACONIC_PYTHON = "__LACONIC_PYTHON__";
 export const LACONIC_ENTRYPOINT = ["-I", "-m", "laconic.runtime"] as const;
 export const LACONIC_DATA_DIRECTORY = "__LACONIC_DATA_DIRECTORY__";
+export const LACONIC_PROTOCOL_VERSION = 1;
+export const LACONIC_REQUEST_TIMEOUT_MS = 250;
+export const LACONIC_BREAKER_FAILURES = 3;
+
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+export type RuntimeOperation =
+  | "initialize"
+  | "encode_observation"
+  | "expand"
+  | "shutdown";
+export type SupervisorState =
+  | "stopped"
+  | "starting"
+  | "ready"
+  | "degraded"
+  | "open"
+  | "paused";
+
+export interface RuntimePolicy {
+  span_budget: number;
+  keep_head: number;
+  keep_tail: number;
+  max_errors: number;
+}
+
+export interface RuntimeStartOptions {
+  command: readonly string[];
+  sessionId: string;
+  workingDirectory: string;
+  dataDirectory: string;
+  policy: RuntimePolicy;
+  requestTimeoutMs: number;
+}
+
+export interface RuntimeProcess {
+  request(operation: RuntimeOperation, fields?: JsonObject): Promise<JsonObject>;
+  shutdown(): Promise<void>;
+}
+
+export interface RuntimeSupervisorOptions {
+  command?: readonly string[];
+  dataDirectory?: string;
+  policy?: RuntimePolicy;
+  requestTimeoutMs?: number;
+  createProcess?: (options: RuntimeStartOptions) => Promise<RuntimeProcess>;
+}
+
+export interface SupervisorSnapshot {
+  state: SupervisorState;
+  sessionId: string | null;
+  consecutiveFailures: number;
+  breakerOpen: boolean;
+}
+
+export class RuntimeProtocolError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RuntimeProtocolError";
+  }
+}
+
+interface PendingRequest {
+  operation: RuntimeOperation;
+  resolve: (result: JsonObject) => void;
+  reject: (error: Error) => void;
+  timer: Timer;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function asString(value: unknown, field: string, allowEmpty = false): string {
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0)) {
+    throw new RuntimeProtocolError("invalid_frame", `${field} must be a string`);
+  }
+  return value;
+}
+
+function inheritedEnvironment(): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      environment[key] = value;
+    }
+  }
+  environment.PYTHONUNBUFFERED = "1";
+  return environment;
+}
+
+function safeError(value: unknown, fallback: string): Error {
+  return value instanceof Error ? value : new RuntimeProtocolError("transport_failure", fallback);
+}
+
+export class JsonlRuntimeProcess implements RuntimeProcess {
+  private readonly child: Bun.PipedSubprocess;
+  private readonly pending = new Map<string, PendingRequest>();
+  private readonly expired = new Set<string>();
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private readonly requestTimeoutMs: number;
+  private readonly sessionId: string;
+  private readonly requestNamespace = randomUUID();
+  private writeChain: Promise<void> = Promise.resolve();
+  private buffer = "";
+  private nextRequest = 1;
+  private closed = false;
+
+  private constructor(
+    command: readonly string[],
+    workingDirectory: string,
+    sessionId: string,
+    requestTimeoutMs: number,
+  ) {
+    this.sessionId = sessionId;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.child = Bun.spawn({
+      cmd: [...command],
+      cwd: workingDirectory,
+      env: inheritedEnvironment(),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+    });
+    void this.readStdout();
+    void this.drainStderr();
+    void this.watchExit();
+  }
+
+  static async start(options: RuntimeStartOptions): Promise<JsonlRuntimeProcess> {
+    if (options.command.length === 0 || options.command.some((part) => part.length === 0)) {
+      throw new RuntimeProtocolError("invalid_command", "runtime command must not be empty");
+    }
+    const runtime = new JsonlRuntimeProcess(
+      options.command,
+      options.workingDirectory,
+      options.sessionId,
+      options.requestTimeoutMs,
+    );
+    try {
+      const result = await runtime.request("initialize", {
+        session_id: options.sessionId,
+        working_directory: options.workingDirectory,
+        data_directory: options.dataDirectory,
+        policy: { ...options.policy },
+      });
+      if (!hasExactKeys(result, ["session_id"]) || result.session_id !== options.sessionId) {
+        throw new RuntimeProtocolError("invalid_frame", "initialize response session mismatch");
+      }
+      return runtime;
+    } catch (error) {
+      runtime.terminate(safeError(error, "runtime initialization failed"));
+      throw error;
+    }
+  }
+
+  request(operation: RuntimeOperation, fields: JsonObject = {}): Promise<JsonObject> {
+    if (this.closed) {
+      return Promise.reject(new RuntimeProtocolError("runtime_unavailable", "runtime is not available"));
+    }
+    const requestId = `laconic-${this.requestNamespace}-${this.nextRequest++}`;
+    const frame = `${JSON.stringify({
+      protocol_version: LACONIC_PROTOCOL_VERSION,
+      request_id: requestId,
+      operation,
+      ...fields,
+    })}\n`;
+    return new Promise<JsonObject>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(requestId);
+        if (pending === undefined) {
+          return;
+        }
+        this.pending.delete(requestId);
+        this.rememberExpired(requestId);
+        pending.reject(new RuntimeProtocolError("timeout", "runtime request exceeded its deadline"));
+      }, this.requestTimeoutMs);
+      this.pending.set(requestId, { operation, resolve, reject, timer });
+      this.writeChain = this.writeChain.then(async () => {
+        if (this.closed) {
+          throw new RuntimeProtocolError("runtime_unavailable", "runtime is not available");
+        }
+        this.child.stdin.write(frame);
+        await this.child.stdin.flush();
+      });
+      void this.writeChain.catch((error: unknown) => {
+        this.rejectPending(requestId, safeError(error, "runtime request write failed"));
+      });
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    try {
+      const result = await this.request("shutdown");
+      if (
+        !hasExactKeys(result, ["session_id"]) ||
+        result.session_id !== this.sessionId
+      ) {
+        throw new RuntimeProtocolError("invalid_frame", "shutdown response session mismatch");
+      }
+    } finally {
+      this.closed = true;
+      this.child.stdin.end();
+      const exited = await Promise.race([
+        this.child.exited.then(() => true),
+        Bun.sleep(this.requestTimeoutMs).then(() => false),
+      ]);
+      if (!exited && this.child.exitCode === null) {
+        this.child.kill("SIGKILL");
+      }
+      this.failAll(new RuntimeProtocolError("runtime_stopped", "runtime has stopped"));
+    }
+  }
+
+  private async readStdout(): Promise<void> {
+    const reader = this.child.stdout.getReader();
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+        this.buffer += this.decoder.decode(chunk.value, { stream: true });
+        if (this.buffer.length > 16 * 1024 * 1024) {
+          throw new RuntimeProtocolError("frame_too_large", "runtime response exceeds the byte limit");
+        }
+        this.consumeLines();
+      }
+      this.buffer += this.decoder.decode();
+      if (this.buffer.length > 0) {
+        this.consumeFrame(this.buffer.endsWith("\r") ? this.buffer.slice(0, -1) : this.buffer);
+        this.buffer = "";
+      }
+    } catch (error) {
+      this.terminate(safeError(error, "runtime response read failed"));
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  private async drainStderr(): Promise<void> {
+    const reader = this.child.stderr.getReader();
+    try {
+      while (!(await reader.read()).done) {
+        // Drain without retaining or logging runtime content.
+      }
+    } catch (error) {
+      this.terminate(safeError(error, "runtime diagnostics drain failed"));
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  private async watchExit(): Promise<void> {
+    const exitCode = await this.child.exited;
+    if (!this.closed) {
+      this.terminate(
+        new RuntimeProtocolError("runtime_exited", `runtime exited before shutdown (${exitCode})`),
+      );
+    }
+  }
+
+  private consumeLines(): void {
+    let newline = this.buffer.indexOf("\n");
+    while (newline !== -1) {
+      let line = this.buffer.slice(0, newline);
+      this.buffer = this.buffer.slice(newline + 1);
+      if (line.endsWith("\r")) {
+        line = line.slice(0, -1);
+      }
+      this.consumeFrame(line);
+      newline = this.buffer.indexOf("\n");
+    }
+  }
+
+  private consumeFrame(line: string): void {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(line);
+    } catch {
+      throw new RuntimeProtocolError("invalid_json", "runtime returned invalid JSON");
+    }
+    if (!isObject(payload)) {
+      throw new RuntimeProtocolError("invalid_frame", "runtime response must be an object");
+    }
+    const requestId = asString(payload.request_id, "request_id");
+    if (this.expired.delete(requestId)) {
+      return;
+    }
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) {
+      throw new RuntimeProtocolError("invalid_frame", "runtime returned an unknown request id");
+    }
+    this.pending.delete(requestId);
+    clearTimeout(pending.timer);
+    try {
+      const result = this.validateResponse(payload, requestId, pending.operation);
+      pending.resolve(result);
+    } catch (error) {
+      pending.reject(safeError(error, "runtime response validation failed"));
+    }
+  }
+
+  private validateResponse(
+    payload: Record<string, unknown>,
+    requestId: string,
+    operation: RuntimeOperation,
+  ): JsonObject {
+    if (payload.protocol_version !== LACONIC_PROTOCOL_VERSION) {
+      throw new RuntimeProtocolError("unsupported_version", "runtime protocol version mismatch");
+    }
+    if (payload.request_id !== requestId || payload.operation !== operation) {
+      throw new RuntimeProtocolError("invalid_frame", "runtime response correlation mismatch");
+    }
+    if (payload.status === "error") {
+      if (!hasExactKeys(payload, ["protocol_version", "request_id", "operation", "status", "error"])) {
+        throw new RuntimeProtocolError("invalid_frame", "runtime error response is malformed");
+      }
+      if (!isObject(payload.error) || !hasExactKeys(payload.error, ["code", "message"])) {
+        throw new RuntimeProtocolError("invalid_frame", "runtime error payload is malformed");
+      }
+      throw new RuntimeProtocolError(
+        asString(payload.error.code, "error.code"),
+        asString(payload.error.message, "error.message"),
+      );
+    }
+    if (payload.status !== "ok") {
+      throw new RuntimeProtocolError("invalid_frame", "runtime response status is unsupported");
+    }
+    if (!hasExactKeys(payload, ["protocol_version", "request_id", "operation", "status", "result"])) {
+      throw new RuntimeProtocolError("invalid_frame", "runtime success response is malformed");
+    }
+    if (!isObject(payload.result)) {
+      throw new RuntimeProtocolError("invalid_frame", "runtime result must be an object");
+    }
+    return payload.result as JsonObject;
+  }
+
+  private rejectPending(requestId: string, error: Error): void {
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) {
+      return;
+    }
+    this.pending.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  private rememberExpired(requestId: string): void {
+    this.expired.add(requestId);
+    if (this.expired.size > 128) {
+      const oldest = this.expired.values().next().value;
+      if (oldest !== undefined) {
+        this.expired.delete(oldest);
+      }
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const [requestId, pending] of this.pending) {
+      this.pending.delete(requestId);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private terminate(error: Error): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.failAll(error);
+    this.child.stdin.end();
+    if (this.child.exitCode === null) {
+      this.child.kill("SIGKILL");
+    }
+  }
+}
+
+const DEFAULT_POLICY: RuntimePolicy = {
+  span_budget: 120,
+  keep_head: 40,
+  keep_tail: 40,
+  max_errors: 20,
+};
+
+export class RuntimeSupervisor {
+  private readonly options: Required<RuntimeSupervisorOptions>;
+  private runtime: RuntimeProcess | null = null;
+  private state: SupervisorState = "stopped";
+  private sessionId: string | null = null;
+  private consecutiveFailures = 0;
+  private breakerOpen = false;
+
+  constructor(options: RuntimeSupervisorOptions = {}) {
+    this.options = {
+      command: options.command ?? [LACONIC_PYTHON, ...LACONIC_ENTRYPOINT],
+      dataDirectory: options.dataDirectory ?? LACONIC_DATA_DIRECTORY,
+      policy: options.policy ?? DEFAULT_POLICY,
+      requestTimeoutMs: options.requestTimeoutMs ?? LACONIC_REQUEST_TIMEOUT_MS,
+      createProcess: options.createProcess ?? JsonlRuntimeProcess.start,
+    };
+  }
+
+  snapshot(): SupervisorSnapshot {
+    return {
+      state: this.state,
+      sessionId: this.sessionId,
+      consecutiveFailures: this.consecutiveFailures,
+      breakerOpen: this.breakerOpen,
+    };
+  }
+
+  async bind(ctx: ExtensionContext): Promise<void> {
+    await this.stopRuntime();
+    this.sessionId = ctx.sessionManager.getSessionId();
+    this.consecutiveFailures = 0;
+    this.breakerOpen = false;
+    this.state = "starting";
+    try {
+      this.runtime = await this.options.createProcess({
+        command: this.options.command,
+        sessionId: this.sessionId,
+        workingDirectory: ctx.cwd,
+        dataDirectory: this.options.dataDirectory,
+        policy: this.options.policy,
+        requestTimeoutMs: this.options.requestTimeoutMs,
+      });
+      this.state = "ready";
+    } catch {
+      this.runtime = null;
+      this.recordFailure();
+    }
+  }
+
+  async invoke(operation: RuntimeOperation, fields: JsonObject = {}): Promise<JsonObject> {
+    if (this.state === "paused") {
+      throw new RuntimeProtocolError("paused", "Laconic runtime is paused");
+    }
+    if (this.breakerOpen) {
+      throw new RuntimeProtocolError("circuit_open", "Laconic runtime circuit breaker is open");
+    }
+    if (this.runtime === null) {
+      this.recordFailure();
+      throw new RuntimeProtocolError("runtime_unavailable", "Laconic runtime is unavailable");
+    }
+    try {
+      const result = await this.runtime.request(operation, fields);
+      this.consecutiveFailures = 0;
+      this.state = "ready";
+      return result;
+    } catch (error) {
+      this.recordFailure();
+      throw error;
+    }
+  }
+
+  async pause(): Promise<void> {
+    await this.stopRuntime();
+    this.state = "paused";
+  }
+
+  async resume(ctx: ExtensionContext): Promise<void> {
+    await this.bind(ctx);
+  }
+
+  async shutdown(): Promise<void> {
+    await this.stopRuntime();
+    this.state = "stopped";
+    this.sessionId = null;
+  }
+
+  preserveSession(): void {
+    // OMP branch and tree navigation retain the active session identity.
+  }
+
+  private recordFailure(): void {
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= LACONIC_BREAKER_FAILURES) {
+      this.breakerOpen = true;
+      this.state = "open";
+      void this.stopRuntime();
+    } else {
+      this.state = "degraded";
+    }
+  }
+
+  private async stopRuntime(): Promise<void> {
+    const runtime = this.runtime;
+    this.runtime = null;
+    if (runtime === null) {
+      return;
+    }
+    try {
+      await runtime.shutdown();
+    } catch {
+      // Teardown is bounded by the transport and never blocks the OMP host.
+    }
+  }
+}
+
+export function attachRuntimeLifecycle(
+  pi: ExtensionAPI,
+  options: RuntimeSupervisorOptions = {},
+): RuntimeSupervisor {
+  const supervisor = new RuntimeSupervisor(options);
+  pi.on("session_start", async (_event, ctx) => supervisor.bind(ctx));
+  pi.on("session_switch", async (_event, ctx) => supervisor.bind(ctx));
+  pi.on("session_branch", () => supervisor.preserveSession());
+  pi.on("session_tree", () => supervisor.preserveSession());
+  pi.on("session_shutdown", async () => supervisor.shutdown());
+  return supervisor;
+}
 
 export default function laconicRuntime(pi: ExtensionAPI): void {
   pi.setLabel("Laconic runtime");
+  attachRuntimeLifecycle(pi);
 }
