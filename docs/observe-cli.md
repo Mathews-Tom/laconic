@@ -106,10 +106,8 @@ boundary), so a report never contains a file path, command, or tool result.
 
 ## What this CLI does not do
 
-- It does not enable hooks or MCP as a codec-transformation surface.
-- It does not clear the K1 8.53% deployment block.
-- It does not read a real session, contact a provider, or collect a
-  representative corpus.
-- `status`/`report` reflect only local receipts already written by an
-  installed hook actually firing -- they are not a substitute for the
-  representative K1 study (`.docs/K1_REPRESENTATIVE_CORPUS_PROTOCOL.md`).
+- It does not enable or exercise the OMP codec-transformation surface.
+- It does not change the committed fixture's 8.53% K1 result, and that research result is no longer the runtime beta's release gate.
+- It does not prove token, cost, cache, or behavior savings.
+- It does not read a real session, contact a provider, or collect a representative corpus.
+- `status` and `report` reflect only content-free local receipts written by an installed Observe hook. They do not satisfy the runtime beta's exact-recovery, fail-open, latency, or real-OMP qualification criteria.

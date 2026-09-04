@@ -1,8 +1,8 @@
 # Laconic – Compress what a coding agent carries, not what it says.
 
-> **Status: research and evaluation package, v0.8.0.** The reversible codec core, replay/gate harness, and human-study harness are released. Laconic Observe (`laconic observe`) is also released: a local, content-free automatic measurement surface for Claude Code and OMP, gated entirely behind an operator-run CLI command. Hook/MCP *codec* integration is a separate, still-blocked surface: K1 measures 8.53% net savings on the committed fixture corpus, below the 15% kill threshold. That corpus validates the gate machinery, not real-world deployment economics, and Observe does not change this disposition.
+> **Status: runtime product in development, package v0.8.0.** The deterministic codec, recovery ledger, replay/gate harness, renderer, and Observe diagnostics are released. No live codec integration ships in 0.8.0. The first integration is a planned opt-in OMP extension backed by a session-owned Python engine and gated by exact recovery, fail-open behavior, bounded latency, operator control, packaging, and real OMP use.
 
-Laconic is a codec for the machine-to-machine traffic of coding agents: it re-encodes observations and actions at the tool boundary, keeps every elision recoverable, and renders prose for a human only on demand.
+Laconic is a private, local runtime codec for existing coding agents. It reduces eligible model-visible tool observations while preserving exact, on-demand access to omitted content. It integrates with agents rather than replacing them.
 
 > **[`docs/grounding.md`](docs/grounding.md) is the authoritative statement of what Laconic is, what it deliberately is not, and how to detect strategy drift.** Read it before proposing or reviewing changes.
 
@@ -15,26 +15,37 @@ laconic --help
 
 ## Documentation
 
-| Document                                         | What's in it                                                                 |
-| ------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [`docs/pitch.md`](docs/pitch.md)                 | The short version: the problem, the measurement, what is and isn't claimed   |
-| [`docs/overview.md`](docs/overview.md)           | What Laconic is, why, the evidence, prior work, and the pre-registered gates |
-| [`docs/system-design.md`](docs/system-design.md) | Architecture, components, data model, and the evaluation harness             |
-| [`docs/observe-design.md`](docs/observe-design.md) | Laconic Observe: the automatic, content-free measurement surface design    |
-| [`docs/observe-cli.md`](docs/observe-cli.md)     | `laconic observe` operator guide: install/remove/status/report              |
-| [`docs/k1-stage-a-cli.md`](docs/k1-stage-a-cli.md) | `laconic k1 stage-a scan` operator guide: metadata feasibility screen        |
-| [`docs/k1-stage-b-manifest-cli.md`](docs/k1-stage-b-manifest-cli.md) | `laconic k1 stage-b build-manifest` operator guide: session-level manifest |
+| Document | What's in it |
+| --- | --- |
+| [`docs/grounding.md`](docs/grounding.md) | Product boundary, invariants, runtime gate, and drift checks |
+| [`docs/research-disposition.md`](docs/research-disposition.md) | Prior evidence, terminal research outcomes, and claims that remain unproven |
+| [`docs/pitch.md`](docs/pitch.md) | The short version: problem, measured channel opportunity, product boundary, and limitations |
+| [`docs/overview.md`](docs/overview.md) | Full what/why/how, measurements, positioning, and separated product/research gates |
+| [`docs/system-design.md`](docs/system-design.md) | OMP-first runtime architecture, recovery, protocol boundaries, and supporting components |
+| [`docs/observe-design.md`](docs/observe-design.md) | Observe as a released, automatic, content-free diagnostic surface |
+| [`docs/observe-cli.md`](docs/observe-cli.md) | `laconic observe` operator guide: install/remove/status/report |
+| [`docs/k1-stage-a-cli.md`](docs/k1-stage-a-cli.md) | `laconic k1 stage-a scan` metadata feasibility guide |
+| [`docs/k1-stage-b-manifest-cli.md`](docs/k1-stage-b-manifest-cli.md) | `laconic k1 stage-b build-manifest` guide |
 
-## Start with evidence
+## Current package
 
-Run the current measurement and gate surfaces before considering deployment:
+Install version 0.8.0 to inspect the released codec, evaluation, rendering, and Observe surfaces:
 
 ```bash
 uv run laconic measure tests/corpus --expect tests/corpus/expected.json
 uv run laconic gates --corpus tests/corpus --format json
+laconic --help
 ```
 
-The K1 fixture verdict blocks live hook/MCP integration. A representative-corpus K1 decision is the next product gate; it is not a reason to tune the codec or relax thresholds after observing the fixture result.
+The committed fixture reports K1 net savings of 8.53% against its pre-registered 15% research threshold. It validates the gate machinery but is not representative deployment evidence. That result does not block the bounded OMP beta, and the beta will not claim general token, cost, cache, or behavior savings from character reduction.
+
+## Product roadmap
+
+1. Build a transport-neutral session engine with namespaced exact recovery and strict-smaller decisions.
+2. Package an ownership-safe OMP extension with a 250 ms deadline, fail-open behavior, expansion, and operator controls.
+3. Qualify the built package through at least 10 completed real OMP sessions across 3 repositories and at least 100 eligible observations.
+4. Release the opt-in OMP beta only when every safety criterion passes.
+5. Design the Claude Code adapter separately after the protocol survives OMP dogfood. MCP, action rewriting, and history compaction remain deferred.
 
 ## License
 

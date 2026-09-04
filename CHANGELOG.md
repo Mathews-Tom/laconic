@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- Refocused the public product roadmap on an opt-in OMP runtime codec backed by the existing Python engine and recovery ledger. The runtime beta is governed by exact recovery, fail-open behavior, bounded latency, operator control, packaging, and real OMP qualification.
+- Separated the runtime product gate from representative replay research. The committed fixture's 8.53% K1 result remains valid for that fixture and continues to bound general savings claims, but no longer blocks a safety-gated beta.
+- Reclassified Laconic Observe as supporting content-free diagnostics rather than the primary product surface, and recorded the terminal K1 Stage C replay disposition without authorizing another run or provider spend.
+
 ## [0.8.0] — 2026-08-27
 
 ### Added

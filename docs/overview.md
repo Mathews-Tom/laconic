@@ -2,7 +2,7 @@
 
 ## 1. What Laconic Is
 
-Laconic is a **context-loop codec for coding agents**. It changes the representation an agent uses to perceive its environment and to act on it, so the agent carries less weight through every turn of a session, and renders human-readable prose from that compact representation only when a human actually looks.
+Laconic is a **private, local runtime codec for existing coding agents**. It changes the representation used for eligible tool observations so the agent carries less through later turns, while preserving exact on-demand access to omitted content.
 
 The insight is not that models talk too much. It is that **almost nothing in an agent's context window is written for a human, and almost none of it is written efficiently**.
 
@@ -27,13 +27,15 @@ Laconic operates on that traffic:
 
 The codec is lossy in presentation and **lossless in reach**: every elision is addressable and expandable. That invariant is what makes the compression safe, and it is the thing the harness exists to verify.
 
+**Current status:** version 0.8.0 ships the codec, ledger, evaluation, rendering, and Observe diagnostic surfaces, but no live codec integration. The approved first product integration is an opt-in OMP extension backed by a session-owned Python engine. It replaces only successful supported textual results whose complete recovery-bearing envelope is strictly smaller. Claude Code follows after OMP dogfood; action rewriting, history compaction, and MCP are deferred.
+
 ### What Laconic is NOT
 
 - **Not a model router.** It does not choose models. Model and scaffold choice is a larger cost lever than anything here (>100× spread on public leaderboards); Laconic is orthogonal to it and says so.
 - **Not a prompt optimizer.** It does not rewrite what you ask for.
 - **Not a fine-tune.** Both the cloud model and the local renderer are used off the shelf.
 - **Not an output-style prompt.** Laconic v1 was. It is not any more, and §9 explains why.
-- **Not a replacement for your agent.** It sits under Claude Code (or any tool-calling client) at the tool boundary.
+- **Not a replacement for your agent.** The first integration sits inside OMP at the tool-result boundary.
 
 ---
 
@@ -98,16 +100,15 @@ The top 10% of reads carry 47.3% of all Read volume; the largest single read is 
 
 So the two real levers are:
 
-1. **Span scoping** — a 40,000-character file read to answer a question about one function should not put 40,000 characters into the context permanently. This is a first-emission saving that compounds into a residency saving forever after.
-2. **Residency management** — observations that are no longer in focus should collapse to a handle and stop being re-billed on every turn, while remaining expandable.
-
+1. **First-emission scoping** — a 40,000-character file read to answer a question about one function should not put 40,000 characters into the context permanently. This is the observation-only beta's target.
+2. **Later residency management** — observations that are no longer in focus could collapse to a handle and stop being re-billed on every turn, but rewriting history is deferred until runtime evidence and host control justify the cache and correctness risk.
 Redundancy elimination is a cheap add-on, not the headline. We say so because we measured it.
 
 ### 2.4 Why now
 
 1. **Agentic sessions became the dominant workload.** In 2024 the shape of an AI coding interaction was a chat turn. In 2026 it is a 200,000-token tool loop. The cost structure inverted; the tooling did not follow.
 2. **Prompt caching made residency the meter.** Once a prefix is cached, you stop paying to *write* context and start paying, forever, to *carry* it. That changes the optimisation target from "emit fewer tokens" to "stay small".
-3. **Tool boundaries became standardized.** MCP and Claude Code hooks give a clean interception point at exactly the layer where observations enter the context — and, notably, neither MCP nor A2A specifies anything about payload content. That layer is unclaimed.
+3. **Tool boundaries became programmable.** OMP result middleware provides a direct interception point where built-in tool observations enter model context. Laconic starts there rather than relying on an MCP-only gateway that misses built-in tools.
 
 ---
 
@@ -115,34 +116,34 @@ Redundancy elimination is a cheap add-on, not the headline. We say so because we
 
 ### 3.1 The handle ledger
 
-Every observation that enters the context is registered in a content-addressed ledger and assigned a short, stable, human-typeable handle:
+Every observation selected by the runtime is registered in a session-scoped ledger and assigned a short, stable internal handle:
 
 ```
 F3  src/auth/tokens.py    sha 4a9c21e8   1,284 lines   read 47-92
 B7  pytest -q             exit 1         318 lines     err-salient
-S2  grep -rn "check_token" src/          14 hits
+S2  grep "check_token" src/              14 hits
 ```
 
-Handles are the vocabulary of the codec. The model refers to `F3:47-92` rather than restating content; the renderer resolves handles for a human; `laconic expand F3` recovers anything elided. The ledger is the mechanism that makes elision reversible, which is the invariant everything else depends on.
+Internal handles are the ledger vocabulary. Model-visible runtime references also identify the source OMP session, for example `<omp-session-id>/F3:47-92`, so resume and full-fork recovery cannot collide. `laconic_expand` resolves a full reference or span from the owning ledger.
 
 ### 3.2 Observation codec (attacks 63.24% of context, 38.1% of spend)
 
 **Reads** are encoded as a structural outline plus the requested span:
 
 ```
-F3 src/auth/tokens.py  1,284 lines  sha 4a9c21e8
+<omp-session-id>/F3 src/auth/tokens.py  1,284 lines  sha 4a9c21e8
   outline: TokenError:12  decode_token:31-58  check_token:61-94  refresh:97-140  [+9 more]
   span 61-94:
     <verbatim source>
 ```
 
-A later read of an unchanged file resolves to `F3 unchanged`. A read after an edit resolves to a delta against the stored version. A span already shown resolves to `F3:61-94 (shown above)`. A read whose outline suffices never materialises the body at all.
+A later read of an unchanged file can resolve to `<omp-session-id>/F3 unchanged`. A span already shown can resolve to `<omp-session-id>/F3:61-94 (shown above)`. A read whose outline suffices need not materialise the body in model-visible context.
 
 **Bash** is encoded error-salient: exit status, stderr, the head and tail of stdout, and a summary of the stable middle, with duplicate lines counted rather than repeated. Known-shaped output (test runners, installers, build logs) gets a structured summary — pass/fail counts and failing entries only. Every elided region keeps an address.
 
 **Search results** are interned against a path prefix table and returned as a table rather than repeated lines of context.
 
-### 3.3 Residency management
+### 3.3 Residency management (deferred beyond the first beta)
 
 Append-only encoding is the default: new observations are compact, history is never rewritten, and the prompt cache is preserved perfectly.
 
@@ -160,7 +161,7 @@ N_turns  =  12.5 × P_new / Δ
 
 Laconic computes this before compacting and declines when the session will not last that long. A tool that silently busts your cache to save context is a tool that raises your bill; the honest version does the division first.
 
-### 3.4 Action codec (attacks 24.98% of context)
+### 3.4 Action codec (implemented core, deferred runtime)
 
 Tool arguments are the second-largest channel, and they are dominated by content restatement:
 
@@ -182,12 +183,14 @@ Rendering is a **view**, not a wire format. The human reads it because they aske
 
 ### 3.6 Fidelity harness
 
-The codec is only worth shipping if it is behaviourally invisible to the agent and honest to the human. Two measurements, run continuously:
+The observation-only beta is releasable when runtime evidence shows exact recovery, fail-open behavior, bounded latency, correct result mutation, private storage, operator control, and successful real OMP use.
 
-- **Action equivalence.** Replay a real session's tool loop with and without the codec. Does the agent take the same next action given the compressed observation as given the raw one? Cheap, automatable, runs at scale over the existing transcript corpus.
-- **Human round-trip.** Given the rendered view versus the raw trace, does a developer catch the same bugs, in the same time, with the same confidence?
+Broader research claims require separate measurements:
 
-The second one has never been run by anyone, on any output-compression system, in any published work. It is the reason this project is research and not just tooling.
+- **Action equivalence.** Does the agent take the same next action given the compressed observation as given the raw one?
+- **Human round-trip.** Does a developer catch the same bugs, in the same time, with the same confidence, when reading a rendered view instead of a raw trace?
+
+Neither claim is inferred from a safe runtime or from character reduction.
 
 ---
 
@@ -199,7 +202,7 @@ Three tensions are structural, and the design is shaped around them rather than 
 
 **Caching punishes rewriting.** The prompt cache is prefix-matched, so shrinking history costs a full cache write. §3.3's break-even formula is a hard gate, not a guideline.
 
-**Format constraints have a documented cost, and we sit next to it.** Prompt-level format instructions are the dominant source of format-induced accuracy loss — larger than constrained decoding's sampling bias (*The Format Tax*, arXiv:2604.03616) — and the penalty scales inversely with a model's spare capacity (*Capacity, Not Format*, arXiv:2606.09410; *Let Me Speak Freely?*, arXiv:2408.02442). Laconic's mitigation is architectural: **the codec constrains the tool boundary, not the model's generation.** Observations are re-encoded *before* they reach the model and *after* it emits them; the model is never asked to write in a schema while reasoning. That is the same "decouple reasoning from formatting" prescription the Format Tax paper arrives at, applied at the transport layer. Gate K5 (§6) verifies it holds on our stack rather than assuming it.
+**Format constraints have a documented cost, and we sit next to it.** Prompt-level format instructions are the dominant source of format-induced accuracy loss — larger than constrained decoding's sampling bias (*The Format Tax*, arXiv:2604.03616) — and the penalty scales inversely with a model's spare capacity (*Capacity, Not Format*, arXiv:2606.09410; *Let Me Speak Freely?*, arXiv:2408.02442). Laconic's mitigation is architectural: **the codec constrains the tool-result boundary, not the model's generation.** Observations are re-encoded after a tool returns and before the result reaches the model; the model is never asked to write in a schema while reasoning.
 
 ---
 
@@ -215,8 +218,8 @@ Honest placement, because the v1 documents got this wrong and the correction mat
 | **AgentPrune** (2410.02506), AgentTaxo | Multi-agent token cost is dominated by structural redundancy; graph-level pruning recovers 28–86% | Same diagnosis one layer up — cost lives in what gets re-transmitted, not in how tersely each message is written. Complementary; validates the residency framing |
 | **TOON** and format-efficiency work | ~42.6% token reduction vs JSON at matched retrieval accuracy | A drop-in encoding win for structured payloads, with no prompting risk. Laconic should adopt it inside the codec rather than compete with it |
 | **Chain of Draft** (2502.18600), **TALE** (2412.18547), **Sketch-of-Thought** (2503.05179) | Compress the reasoning scratchpad, 7.6–84% reductions | Frequently mistaken for validation of output compression. They compress a channel the user never sees. Their numbers do not transfer, and we do not cite them as support |
-| **MCP**, **A2A** | Standardize discovery, auth, lifecycle, transport | Neither specifies payload content style. Laconic is a content-layer convention that rides on top; this is confirmed white space |
-| **Chain of Thought Monitorability** (2507.11473) | Legible-English reasoning is a fragile safety asset | A boundary we guard explicitly: Laconic compresses the observation and action channels, never the model's reasoning trace. §8 |
+| **MCP**, **A2A** | Standardize discovery, auth, lifecycle, transport | Neither specifies payload content style, but an MCP-only gateway misses built-in tool results. Laconic defers MCP until the direct OMP runtime is proven |
+| **Chain of Thought Monitorability** (2507.11473) | Legible-English reasoning is a fragile safety asset | A boundary we guard explicitly: the first runtime compresses only tool observations, never the model's reasoning trace. §8 |
 
 ---
 
@@ -242,21 +245,25 @@ The last three are v1 results that survive the pivot. The injection-channel find
 
 Stated plainly, because v1's founding assumption went untested for six experimental runs:
 
-- That the channel composition of the *resident prefix* matches the channel composition of total volume. Approximation; the replay harness will measure it directly.
-- That span-scoped reads do not cause the agent to issue compensating follow-up reads that erase the saving. **This is the main way the design could fail**, and gate K1 measures net, not gross.
-- That the corpus (one operator, agentic workloads, terse-response conventions already in force) generalizes. Prose share is understated here relative to chat-style use; observation share is likely representative of agentic use generally.
+- That the channel composition of the *resident prefix* matches the channel composition of total volume. Approximation; future runtime receipts can measure the visible observation path directly.
+- That span-scoped reads do not cause compensating follow-up work that erases the reduction. Representative K1 is the research gate for a general net-economics claim, not the opt-in beta's safety gate.
+- That the corpus (one operator, agentic workloads, terse-response conventions already in force) generalizes. Prose share is understated here relative to chat-style use; observation share has not been established as universal.
 
-### 6.3 Pre-registered gates
+### 6.3 Runtime beta gate
+
+The OMP beta requires at least 10 completed Laconic-enabled sessions across 3 canonical Git repositories and at least 100 eligible observations. Every emitted reference must recover exactly, errors and unsupported content must pass through, every emitted envelope must be strictly smaller, failure and lifecycle paths must be exercised, and latency plus decision counts must be reported. The beta has no minimum aggregate savings percentage.
+
+### 6.4 Research claim gates
 
 | # | Gate | Threshold | Kill condition |
 |---|---|---|---|
-| K1 | Session-level **net** cost reduction on replayed real traces, including follow-up reads the codec induces | ≥ 25% | < 15% → complexity not justified |
-| K2 | Action equivalence, compressed vs raw observation | ≥ 95% | < 90% → codec is lossy where it matters |
-| K3 | Human bug-catch rate, rendered view vs raw trace | within 5pp | worse by > 10pp → compression harms verification; stop and publish the negative result |
-| K4 | Codec overhead in added input tokens per turn | < 500 | above → Caveman's net-negative trap, reproduced |
-| K5 | Exact-match reasoning benchmark, codec on vs off | within 2pp | beyond → format tax confirmed on our stack |
+| K1 | Session-level **net** cost reduction on representative replay, including follow-up work | ≥ 25% | < 15% means a general economics claim is not justified |
+| K2 | Action equivalence, compressed vs raw observation | ≥ 95% | < 90% means the codec is lossy where measured |
+| K3 | Human bug-catch rate, rendered view vs raw trace | within 5pp | worse by > 10pp means compression harms verification |
+| K4 | Codec overhead in added input tokens per turn | < 500 | above means structural overhead is excessive |
+| K5 | Exact-match reasoning benchmark, codec on vs off | within 2pp | beyond means the tested representation changes measured accuracy |
 
-K3 is the one nobody has run. If it comes back negative, that is a publishable result and the project has done its job.
+The committed fixture validates this machinery and reports its own bounded results. It is not representative product-economics evidence. Its 8.53% K1 result no longer blocks an opt-in runtime beta, and passing the beta gate does not satisfy these research gates.
 
 ---
 
@@ -264,7 +271,7 @@ K3 is the one nobody has run. If it comes back negative, that is a publishable r
 
 Two contributions, both grounded in confirmed absences in the literature:
 
-**C1 — The first compression scheme for the agent observation channel.** Every published context-compression method targets documents, retrieval payloads, or reasoning traces. None targets tool results in an agentic loop, despite that channel being 63% of context volume and ~38% of spend. Laconic supplies the codec, the residency arithmetic, and a replay-based evaluation over real session traces rather than synthetic benchmarks.
+**C1 — A compression scheme for the agent observation channel.** Published context-compression methods target documents, retrieval payloads, or reasoning traces rather than built-in coding-agent tool results. Laconic supplies a codec, recovery ledger, residency arithmetic, and fixture-backed replay harness. Representative multi-client evidence remains incomplete, so novelty and general benefit claims stay bounded accordingly.
 
 **C2 — The first human-outcome measurement of compressed AI output.** No published work — across prompt compression, output brevity, constrained decoding, notation design, or XAI — measures whether a developer reading compressed model output catches the same bugs as one reading prose. The adjacent HCI literature makes this urgent rather than optional: explanations increase acceptance of AI output independent of correctness (arXiv:2006.14779), and reduce over-reliance only when they genuinely lower verification cost (arXiv:2212.06823). K3 is that experiment.
 
@@ -278,13 +285,13 @@ A longer-term third target: a **bidirectional notation with semantic round-trip 
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Span scoping induces compensating re-reads, erasing the saving | **High** | High | K1 measures net cost on replayed real traces. This is the primary failure mode |
-| Compaction busts the prompt cache and raises the bill | Medium | High | Break-even formula computed before every compaction; append-only is the default |
-| Elision removes bytes the agent needed | Medium | High | Recoverability invariant: every elision is handle-addressable and expandable. K2 measures action equivalence |
-| Outline extraction is language-specific and brittle | High | Medium | Degrade to head/tail span scoping when no parser is available; never fail closed |
-| Format tax at the tool boundary | Low | High | Codec never constrains generation while the model reasons. K5 verifies |
-| Renderer hallucinates during expansion | Medium | Medium | Deterministic templates for structural facts; the local model only handles genuinely generative text; the raw trace is one keystroke away |
-| Provider changes cache semantics or hook APIs | Medium | Medium | Break-even arithmetic is re-derived from published pricing; hook interaction sits behind an adapter |
+| Span scoping induces compensating re-reads, erasing the reduction | **High** | High | Runtime receipts report expansions and character outcomes; representative K1 remains the later net-economics claim gate |
+| Compaction busts the prompt cache and raises the bill | Medium | High | Applied compaction is deferred beyond the first beta |
+| Elision removes bytes the agent needed | Medium | High | Exact full/span recovery, write-before-emit, fail-open handling, and real OMP qualification |
+| Outline extraction is language-specific and brittle | High | Medium | Runtime transforms only allowlisted tools and preserves the original on any encoding failure |
+| Format tax at the tool boundary | Low | High | Codec never constrains generation while the model reasons; K5 remains a separate research measure |
+| Renderer hallucinates during expansion | Medium | Medium | Runtime expansion reads exact ledger content; optional narration remains out of band |
+| OMP changes its extension or result middleware contracts | Medium | High | Pin and test the adapter contract independently; preserve original results on any mismatch |
 
 ### 8.2 Human-factor risk
 

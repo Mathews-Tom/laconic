@@ -52,35 +52,39 @@ The 44.6% was a correct measurement of the wrong channel. We published the corre
 
 ---
 
-## What Laconic does now
+## What the core can do and the first beta will ship
 
-**Scopes what enters the context.** A `Read` averages 6,147 characters, and the distribution is brutal: the largest 7% of reads carry 38.7% of all read volume; the top 10% carry 47.3%. Laconic returns a structural outline plus the span you actually asked about, with everything else one expansion away:
+Version 0.8.0 contains the deterministic codec and recovery ledger but no live codec integration. The first product integration is a planned opt-in OMP extension backed by a session-owned Python engine.
+
+**Scope what enters the context.** A `Read` averages 6,147 characters, and the distribution is brutal: the largest 7% of reads carry 38.7% of all read volume; the top 10% carry 47.3%. For supported successful textual results, the runtime will return a smaller recovery-bearing envelope only when the complete replacement is shorter than the raw result:
 
 ```
-F3 src/auth/tokens.py  1,284 lines  sha 4a9c21e8
+<omp-session-id>/F3 src/auth/tokens.py  1,284 lines  sha 4a9c21e8
   outline: TokenError:12  decode_token:31-58  check_token:61-94  refresh:97-140  [+9 more]
   span 61-94:
     def check_token(token_exp: float, now: float | None = None) -> bool:
         ...
 ```
 
-**Stops re-billing what is no longer in focus.** Observations collapse to handles (`F3`, `B7`) and expand on demand. Because rewriting a cached prefix costs a full cache write, Laconic does the arithmetic before it acts — compaction that shrinks the prefix by Δ down to `P_new` pays back only after `12.5 × P_new / Δ` turns, and Laconic declines when your session will not last that long.
+**Keep exact recovery local.** The beta stores the raw result in a private session ledger before emitting an envelope. A namespaced reference expands the full result or a line span on demand, including after resume or full fork.
 
-**Emits actions as deltas.** Tool arguments are 25% of context, dominated by content restatement — `Write` averages 5,624 characters per call, `Edit` 1,441. Edits become anchored patches against ledger handles instead of re-transmitted file regions.
+**Defer history rewriting.** Residency accounting exists, but rewriting an existing cached prefix can cost more than it saves and requires host control the first beta does not assume. Applied compaction remains future work.
 
-**Renders prose when you want it.** The compact trace is genuinely unreadable, which is exactly why rendering it earns its place. Structural facts render deterministically — they cannot be hallucinated. Only genuinely generative text touches a model, and the raw trace is always one keystroke away.
+**Defer action rewriting.** Tool arguments are 25% of measured context volume, but live edit transformation carries a larger correctness boundary. The first beta changes observations only.
+
+**Keep rendering out of band.** Existing deterministic rendering remains a supporting human view. Runtime expansion itself returns exact ledger content and does not invoke a model.
 
 ---
 
 ## What we are not claiming
 
-**Not a 44% saving.** We will publish the net session-level number the replay harness produces, including any follow-up reads the codec induces. If it comes in under 15%, we will say the codec is not worth its complexity.
+**Not a general savings result.** The beta may report observed raw and visible character counts for its own sessions. General token, cost, cache, and behavior claims require representative paired evidence, model-specific accounting, induced-work measurement, and behavior evaluation.
 
-**Not deployment-ready.** The executable K1 gate currently measures 8.53% net savings on the committed fixture corpus, below the 15% kill threshold. Hook-based deployment is the intended first runtime surface and MCP is secondary, but both remain blocked. The fixture validates the gate pipeline rather than real-world savings magnitude; a representative-corpus K1 decision is the only path that can reopen integration.
+**Not released as a runtime yet.** The current package is version 0.8.0. The planned OMP beta is gated by exact recovery, fail-open behavior, a 250 ms deadline, private local storage, operator control, correct packaging, and real OMP use. The committed fixture's 8.53% K1 result validates the research gate machinery but no longer blocks this bounded product gate.
 
-**Not the biggest lever available.** Model and scaffold choice spans >100× in cost at comparable accuracy on public leaderboards. Laconic is orthogonal to that and will not pretend otherwise.
+**Not the biggest lever available.** Model and scaffold choice spans >100× in cost at comparable accuracy on public leaderboards. Laconic is orthogonal to it and will not pretend otherwise.
 
-**Not free.** A codec that adds more input tokens than it saves is a tax. Our gate is under 500 added tokens per turn, and we test for it.
+**Not free.** The runtime replaces a result only when the complete model-visible envelope is strictly smaller than the raw input. Low aggregate reduction is reported rather than hidden or repaired by changing a threshold after results are visible.
 
 **Not a dedup tool.** We checked the obvious hypothesis first and it failed: byte-identical re-reads are 0.5% of read volume, duplicate Bash lines 4.2%. Agents don't repeat themselves — they over-fetch once and then carry it forever. The lever is residency, not redundancy.
 
@@ -118,7 +122,7 @@ Three findings from v1 survive the pivot and are useful whatever you are buildin
 
 **Outline extraction is language-specific.** Where no parser exists, Laconic degrades to head/tail span scoping rather than failing.
 
-**The main way this fails is compensating reads.** If scoping a read just makes the agent read three more times, the saving evaporates. That is why K1 measures net cost on replayed real traces, not gross bytes removed.
+**The main way a broad savings claim fails is compensating work.** If scoping one read causes three more reads or repeated expansions, the reduction can evaporate. Runtime receipts report those actions locally; representative K1 remains the separate research gate for a general net-economics claim.
 
 **Vendors will likely build this.** Native context compaction is an obvious roadmap item. If it ships, the codec's value transfers to whoever measured it properly — and K3 is the part that does not get built by default.
 
@@ -128,9 +132,11 @@ Three findings from v1 survive the pivot and are useful whatever you are buildin
 
 | Document | What's in it |
 |---|---|
-| `docs/overview.md` | Full what/why/how, measurements, positioning, prior work, gates |
-| `docs/system-design.md` | Architecture, handle ledger, codecs, replay harness, data model |
-| `scripts/measure_session_composition.py` | Every number in this document, reproducible on your own sessions |
+| `docs/grounding.md` | Product boundary, invariants, runtime gate, and drift checks |
+| `docs/research-disposition.md` | What prior research established, failed to establish, and no longer blocks |
+| `docs/overview.md` | Full what/why/how, measurements, positioning, and separated gates |
+| `docs/system-design.md` | OMP-first runtime architecture, recovery, protocol boundaries, and supporting components |
+| `scripts/measure_session_composition.py` | Reproducible source for the channel-composition figures |
 
 ---
 
