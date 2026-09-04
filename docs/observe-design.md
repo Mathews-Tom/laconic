@@ -1,7 +1,8 @@
 # Laconic Observe — Automatic Measurement Surface Design
 
-**Status:** approved design; implementation is not authorized.  
-**Authority:** `docs/grounding.md`; `.docs/DEVELOPMENT_PLAN_HISTORY.md` H-40 through H-42.
+**Status:** released supporting diagnostic surface in Laconic 0.8.0.
+
+**Authority:** `docs/grounding.md` and `docs/research-disposition.md`.
 
 ## Purpose
 
@@ -26,10 +27,11 @@ Every hook invocation writes no context augmentation, replacement tool result, d
 
 ## Product position
 
-- **Primary automatic surface:** observe-only hooks.
-- **Primary user surface:** CLI installation, status, report, and removal commands.
-- **Secondary future surface:** MCP, only for on-demand inspection after a separate design and evidence gate.
-- **Runtime codec transformation:** blocked by K1; Observe does not alter that disposition.
+- **First product surface:** planned OMP runtime codec, delivered under its separate safety and dogfood gate.
+- **Supporting diagnostic surface:** Observe's content-free hooks, CLI installation, status, report, and removal commands.
+- **Later host adapter:** Claude Code, after the canonical runtime protocol survives OMP dogfood.
+- **Deferred surface:** MCP, because it cannot intercept OMP's built-in tool results and is not needed for the first beta.
+- **Separation:** Observe records metadata only. It does not transform content, satisfy the runtime gate, or provide representative savings evidence.
 
 ## Client adapters
 
@@ -88,11 +90,11 @@ Install and remove must be idempotent, preserve unrelated client configuration, 
 
 Observe receipts do not:
 
-- enable hooks as codec transformation surfaces;
-- change K1’s 8.53% fixture verdict;
-- clear M12/M13 deployment blocks;
-- authorize provider replay, real-session corpus collection, remote WORM work, or prospective-capture successors;
-- supply K2 action equivalence or K3 human-study evidence.
+- enable or exercise the OMP codec-transformation surface;
+- change the committed fixture's 8.53% K1 result;
+- prove token, cost, cache, or behavior savings;
+- authorize provider replay, real-session corpus collection, external data, or prospective-capture successors;
+- supply K2 action equivalence, K3 human-study evidence, or the runtime beta's exact-recovery and fail-open proof.
 
 ## Verification contract
 
@@ -105,8 +107,8 @@ Implementation must prove:
 5. Receipts contain no prohibited content fields or values.
 6. Install/remove is idempotent and preserves unrelated client configuration.
 7. CLI status/report reflects local receipts without contacting a provider.
-8. No Observe command changes codec configuration, K1 status, or M4E/provider state.
+8. No Observe command changes codec configuration, research-gate status, runtime state, or provider state.
 
-## Implementation gate
+## Relationship to runtime delivery
 
-Review this design before creating an implementation plan. Implementation needs a new design gate and explicit authorization. No real hook installation or real session capture is authorized by this design.
+Observe's shipped adapter research and ownership-safe installer patterns are implementation inputs for the OMP runtime, not deployment authorization or runtime proof. The runtime gets its own extension, storage, operator controls, failure containment, and qualification evidence. Observe remains available as a separate content-free diagnostic after that integration ships.
