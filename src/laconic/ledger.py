@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
+from typing import Literal, cast
 
 import zstandard
 
@@ -42,11 +43,10 @@ COMPRESSION_LEVEL = 3
 
 #: Stamped into ``PRAGMA user_version`` so a database written by a later,
 #: structurally different schema is refused instead of silently half-matched.
-#: Version 2 added ``compactions.projected_turns``, ``.accepted``, and
-#: ``.reason``: version 1's six columns could not distinguish one decline
-#: from another, which contradicts both this table's purpose and
-#: ``DEVELOPMENT_PLAN.md`` §6 milestone's "declined attempts with reasons" scope.
-SCHEMA_VERSION = 2
+#: Version 2 added the complete compaction decision. Version 3 adds
+#: ``runtime_decisions`` so emitted candidates and pass-through outcomes are
+#: reconstructible without reading raw observations.
+SCHEMA_VERSION = 3
 
 #: ``docs/system-design.md`` §5.1. ``raw_chars`` and ``encoded_chars`` are
 #: stored rather than re-derived so realised compression is reportable without
@@ -88,9 +88,35 @@ CREATE TABLE IF NOT EXISTS compactions (
     projected_turns INTEGER,
     accepted        INTEGER NOT NULL DEFAULT 0,
     applied         INTEGER NOT NULL DEFAULT 0,
-    reason          TEXT    NOT NULL DEFAULT '',
+    reason          TEXT    NOT NULL,
     PRIMARY KEY (session_id, turn)
 );
+
+CREATE TABLE IF NOT EXISTS runtime_decisions (
+    session_id    TEXT    NOT NULL,
+    sequence      INTEGER NOT NULL,
+    request_id    TEXT    NOT NULL,
+    tool_name     TEXT    NOT NULL,
+    outcome       TEXT    NOT NULL,
+    reason        TEXT    NOT NULL,
+    candidate_reference TEXT,
+    raw_chars     INTEGER NOT NULL,
+    visible_chars INTEGER NOT NULL,
+    latency_ms    REAL    NOT NULL,
+    created_at    REAL    NOT NULL,
+    PRIMARY KEY (session_id, sequence),
+    UNIQUE (session_id, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_expansions (
+    session_id TEXT    NOT NULL,
+    request_id TEXT    NOT NULL,
+    reference  TEXT    NOT NULL,
+    span       INTEGER NOT NULL,
+    created_at REAL    NOT NULL,
+    PRIMARY KEY (session_id, request_id)
+);
+
 """
 
 #: Columns a version-1 database's ``compactions`` table predates. Added with
@@ -186,6 +212,25 @@ class TraceRecord:
     turn: int
 
 
+type RuntimeDecisionOutcome = Literal["emitted", "pass_through"]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDecision:
+    """One content-free runtime outcome persisted for audit and metrics."""
+
+    sequence: int
+    request_id: str
+    tool_name: str
+    outcome: RuntimeDecisionOutcome
+    reason: str
+    candidate_reference: str | None
+    raw_chars: int
+    visible_chars: int
+    latency_ms: float
+    created_at: float
+
+
 def compress_raw(raw: str) -> bytes:
     """Compress a raw payload for storage."""
     return zstandard.ZstdCompressor(level=COMPRESSION_LEVEL).compress(
@@ -226,6 +271,23 @@ def _record_from(row: sqlite3.Row) -> Record:
     )
 
 
+def _runtime_decision_from(row: sqlite3.Row) -> RuntimeDecision:
+    return RuntimeDecision(
+        sequence=int(row["sequence"]),
+        request_id=str(row["request_id"]),
+        tool_name=str(row["tool_name"]),
+        outcome=cast("RuntimeDecisionOutcome", str(row["outcome"])),
+        reason=str(row["reason"]),
+        candidate_reference=(
+            None if row["candidate_reference"] is None else str(row["candidate_reference"])
+        ),
+        raw_chars=int(row["raw_chars"]),
+        visible_chars=int(row["visible_chars"]),
+        latency_ms=float(row["latency_ms"]),
+        created_at=float(row["created_at"]),
+    )
+
+
 class SchemaVersionError(RuntimeError):
     """Raised when a database was written by a newer ledger schema."""
 
@@ -236,6 +298,14 @@ class DuplicateCompactionError(RuntimeError):
     One verdict per session and turn: a repeat must not silently overwrite
     an earlier decision's arithmetic.
     """
+
+
+class DuplicateRuntimeDecisionError(RuntimeError):
+    """Raised when a session repeats a runtime sequence or request id."""
+
+
+class DuplicateRuntimeExpansionError(RuntimeError):
+    """Raised when a session repeats an expansion request id."""
 
 
 class Ledger:
@@ -461,6 +531,144 @@ class Ledger:
             raise DuplicateCompactionError(
                 f"session {self._session!r} already logged a compaction decision for turn {turn}"
             ) from error
+
+    def record_runtime_decision(
+        self,
+        *,
+        sequence: int,
+        request_id: str,
+        tool_name: str,
+        outcome: RuntimeDecisionOutcome,
+        reason: str,
+        candidate_reference: str | None,
+        raw_chars: int,
+        visible_chars: int,
+        latency_ms: float,
+        created_at: float | None = None,
+    ) -> RuntimeDecision:
+        """Persist one emitted or pass-through outcome without raw content."""
+        if sequence < 0:
+            raise ValueError(f"sequence must not be negative: {sequence}")
+        if not request_id:
+            raise ValueError("request_id must not be empty")
+        if not tool_name:
+            raise ValueError("tool_name must not be empty")
+        if outcome not in ("emitted", "pass_through"):
+            raise ValueError(f"unsupported runtime outcome: {outcome}")
+        if not reason:
+            raise ValueError("reason must not be empty")
+        if raw_chars < 0 or visible_chars < 0:
+            raise ValueError(
+                f"character counts must not be negative: {raw_chars=}, {visible_chars=}"
+            )
+        if latency_ms < 0:
+            raise ValueError(f"latency_ms must not be negative: {latency_ms}")
+        if outcome == "emitted":
+            if candidate_reference is None:
+                raise ValueError("an emitted decision requires a candidate reference")
+            if visible_chars >= raw_chars:
+                raise ValueError("an emitted envelope must be strictly smaller than raw content")
+        elif visible_chars != raw_chars:
+            raise ValueError("a pass-through decision requires unchanged visible length")
+        for field, value in (
+            ("request_id", request_id),
+            ("tool_name", tool_name),
+            ("reason", reason),
+        ):
+            _require_storable(field, value)
+        if candidate_reference is not None:
+            _require_storable("candidate_reference", candidate_reference)
+        decision = RuntimeDecision(
+            sequence=sequence,
+            request_id=request_id,
+            tool_name=tool_name,
+            outcome=outcome,
+            reason=reason,
+            candidate_reference=candidate_reference,
+            raw_chars=raw_chars,
+            visible_chars=visible_chars,
+            latency_ms=latency_ms,
+            created_at=time.time() if created_at is None else created_at,
+        )
+        try:
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO runtime_decisions "
+                    "(session_id, sequence, request_id, tool_name, outcome, reason, "
+                    "candidate_reference, raw_chars, visible_chars, latency_ms, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self._session,
+                        decision.sequence,
+                        decision.request_id,
+                        decision.tool_name,
+                        decision.outcome,
+                        decision.reason,
+                        decision.candidate_reference,
+                        decision.raw_chars,
+                        decision.visible_chars,
+                        decision.latency_ms,
+                        decision.created_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise DuplicateRuntimeDecisionError(
+                f"session {self._session!r} already recorded sequence {sequence} "
+                f"or request {request_id!r}"
+            ) from error
+        return decision
+
+    def runtime_decisions(self) -> tuple[RuntimeDecision, ...]:
+        """Return this session's content-free outcomes in sequence order."""
+        rows = self._db.execute(
+            "SELECT * FROM runtime_decisions WHERE session_id = ? ORDER BY sequence",
+            (self._session,),
+        ).fetchall()
+        return tuple(_runtime_decision_from(row) for row in rows)
+
+    def record_runtime_expansion(
+        self,
+        *,
+        request_id: str,
+        reference: str,
+        span: bool,
+        created_at: float | None = None,
+    ) -> None:
+        """Persist one content-free full or span expansion event."""
+        if not request_id:
+            raise ValueError("request_id must not be empty")
+        if not reference:
+            raise ValueError("reference must not be empty")
+        _require_storable("request_id", request_id)
+        _require_storable("reference", reference)
+        try:
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO runtime_expansions "
+                    "(session_id, request_id, reference, span, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        self._session,
+                        request_id,
+                        reference,
+                        int(span),
+                        time.time() if created_at is None else created_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise DuplicateRuntimeExpansionError(
+                f"session {self._session!r} already recorded expansion request {request_id!r}"
+            ) from error
+
+    def runtime_expansion_counts(self) -> tuple[int, int]:
+        """Return persisted full and span expansion counts for this session."""
+        row = self._db.execute(
+            "SELECT count(*) - sum(span), sum(span) FROM runtime_expansions WHERE session_id = ?",
+            (self._session,),
+        ).fetchone()
+        full = 0 if row[0] is None else int(row[0])
+        spans = 0 if row[1] is None else int(row[1])
+        return full, spans
 
     def _find(self, subject: str, sha: str) -> Record | None:
         row = self._db.execute(
