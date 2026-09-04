@@ -15,7 +15,13 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
       - run: uv sync --locked
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy --strict src
