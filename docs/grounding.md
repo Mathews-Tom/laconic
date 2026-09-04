@@ -2,70 +2,83 @@
 
 ## The contract
 
-**Laconic is not a tool that promises to compress every coding-agent session. It is a private, evidence-first system that measures context economics and fidelity, then enables reversible tool-boundary compression only where the evidence says it is safe and worthwhile.**
+**Laconic is a private, local runtime codec for existing coding agents. It reduces model-visible tool observations while preserving exact, on-demand access to omitted content.**
 
-Inputs are local coding-agent observations, actions, and session traces. Outputs are recoverable encoded representations, auditable cost/fidelity measurements, and an explicit decision: measure-only, safe to test, not economically justified, or insufficient evidence.
+The primary product experience is automatic: an explicitly installed host adapter intercepts an eligible successful textual tool result, stores the exact raw result locally, and replaces it only when the complete recovery-bearing envelope is smaller. The agent can expand the full result or a line span. The operator can inspect, pause, disable, uninstall, and purge Laconic.
+
+The first product surface is an OMP extension backed by one canonical Python engine. Claude Code follows only after the protocol survives OMP dogfood. Observe, replay, gates, rendering, and K1 remain supporting diagnostics and research infrastructure.
 
 ## Explicit non-goals
 
 Laconic is not:
 
+- a replacement coding agent, model provider, model router, or agent orchestrator;
 - a prompt-style or prose-compression product;
-- a model router, generic agent orchestrator, project-state manager, or handoff system;
-- a system that enables hooks or MCP merely because an encoder exists;
-- a provenance, WORM-storage, or transcript-archive product;
-- a mechanism for changing K1 thresholds, corpus criteria, or codec behavior after results are visible.
+- a transcript archive, provenance platform, WORM store, project-state manager, or handoff system;
+- a monitoring dashboard whose only effect is reporting;
+- an MCP-only gateway that misses built-in tool results;
+- a history-rewriting residency compactor or action/edit rewriter in the first runtime beta;
+- a source of universal token, cost, cache, or behavior claims from character reduction.
 
-Hooks are the intended primary runtime surface. The CLI is the primary operator, measurement, replay, inspection, and decision surface. MCP is a secondary runtime surface that generalizes a proven hook design.
+## Product and research gates
+
+Two decisions have separate evidence requirements:
+
+1. **Product gate:** Is an opt-in local runtime safe enough for a bounded beta? This requires exact recovery, fail-open behavior, bounded latency, operator control, privacy, packaging, and successful use in real OMP sessions.
+2. **Research claim gate:** Does Laconic create general net token or cost savings without changing agent behavior? This requires representative paired evidence, model-specific tokenization and cost accounting, induced-work measurement, cache analysis, and behavior evaluation.
+
+The research claim gate does not block the opt-in beta. Passing the product gate does not satisfy the research claim gate.
 
 ## Invariants
 
-1. **Recoverability:** every elision remains addressable and expandable from the ledger.
-2. **Net, not gross:** a claimed saving includes induced follow-up work and cache effects.
-3. **Fail open:** a runtime codec passes raw content through on an error or latency breach.
-4. **Evidence before intervention:** a codec is not enabled for a surface without its predeclared cost and fidelity evidence.
-5. **No post-result tuning:** thresholds, corpus rules, and codec settings freeze before paired evidence is visible.
-6. **Human outcome is separate:** K3 is a participant study, never inferred from renderer quality or a simulated dry run.
+1. **Recoverability:** raw content commits before an envelope is emitted, and every emitted reference expands exactly.
+2. **Strictly smaller:** Laconic replaces a result only when the complete model-visible envelope is smaller than the original.
+3. **Fail open:** unsupported inputs, errors, storage failures, protocol failures, crashes, and latency breaches preserve the original tool result.
+4. **Local and private:** raw observations and recovery ledgers stay local; diagnostics and reports exclude content, subjects, tool arguments, prompts, credentials, and paths.
+5. **Operator control:** installation is explicit, status is inspectable, pause and uninstall restore native client behavior, and purge is separate and deliberate.
+6. **Claims match evidence:** character reduction is not renamed as token, cost, cache, or behavior improvement.
+7. **No post-result tuning:** beta criteria and research thresholds freeze before the evidence they judge is visible.
+8. **Human outcome is separate:** K3 remains a participant study and is never inferred from renderer quality or a simulated dry run.
 
 ## Current state, as measured
 
 - Package version: `0.8.0` (`pyproject.toml`).
-- Core codec, CLI, replay/gate harness, renderer, and K3 dry-run harness are released.
-- Laconic Observe (`laconic.observe`, `laconic observe install/remove/status/report`) is released: a local, content-free automatic measurement surface for Claude Code and OMP. It is not a codec transform and does not touch K1 status; no hook is installed automatically, only via an explicit operator command.
-- K1 Stage A metadata feasibility screening (`laconic k1 stage-a scan`, `docs/k1-stage-a-cli.md`) is released: a body-free ledger of historical Claude Code/Codex/OMP session files under two explicitly owner-authorized source roots. A real run reported 1063 admitted sessions across 61 distinct project lineages and all three providers, disposition `proceed_to_stage_b_request` -- Stage A's own recommendation only, not a Stage B authorization. It reads no transcript body, prompt, tool result, source file, credential, or title, and does not itself change K1 status.
-- `uv run laconic gates --corpus tests/corpus --format json` reports K1 net savings of **8.53%**; the pre-registered kill threshold is **15%**.
-- The same gate run reports K2 action equivalence **100%**, K4 overhead **26.8 tokens**, K5 difference **0.0pp**, and K3 as manual/not evaluated.
-- Hook/MCP *codec* deployment is blocked. The committed corpus validates the gate pipeline but is not a real-world savings benchmark.
+- The deterministic observation codec, session-scoped recovery ledger, action codec, residency decision accounting, replay/gate harness, renderer, and K3 dry-run harness are released as library, CLI, or research surfaces.
+- No live codec integration is released. OMP runtime delivery is planned; this charter does not claim it already exists.
+- Laconic Observe (`laconic.observe`, `laconic observe install/remove/status/report`) is released as a local, content-free diagnostic surface for Claude Code and OMP. It does not transform agent-visible tool results.
+- The committed fixture reports K1 net savings of **8.53%**, K2 action equivalence of **100%**, K4 overhead of **26.8 tokens**, K5 difference of **0.0pp**, and K3 as manual/not evaluated. The fixture validates the gate machinery; it is not representative product-economics evidence.
+- The source-mapped K1 Stage C replacement pilot ended before replay client construction. All 11 selected Codex and 13 selected OMP baselines produced zero replay-engine turns, actions, and observations because the historical parser accepts Claude-shaped tool-use records. No provider prompt, replay artifact, external annotation, or modeled spend resulted.
 
-## Stated limitations
+## Runtime beta gate
 
-- No representative paired codec-on corpus, privacy/consent protocol, lineage split, or authorized counterfactual collection method exists; representative K1 is not currently feasible. Stage A screening shows the metadata population is sufficient in principle (61 lineages, 3 providers), but Stage B (corpus-design freeze) and Stage C (paired-evidence collection) each require a separate, explicit owner authorization not yet given.
-- No K3 participant protocol, trace-material approval, recruitment plan, consent, or data-handling plan exists.
-- Prospective capture V1 is local and provisional. It does not authorize real session capture, provider activity, remote sealing, or K1/M4E progression.
+The OMP beta is releasable only after at least 10 Laconic-enabled sessions complete across at least 3 canonical Git repositories with at least 100 eligible observations, and all of these hold:
+
+- zero emitted references fail exact full expansion;
+- zero tool errors are compressed;
+- zero result corruption occurs outside the selected text replacement;
+- every emitted envelope is strictly smaller than its raw input;
+- engine absence, spawn failure, crash, malformed response, timeout, pause, resume, session switch, branch navigation, resumed sessions, and inherited or forked reference expansion are exercised;
+- latency p50 and p95, emitted/pass-through counts and reasons, character totals, and full/span expansions are reported;
+- a built package installs, loads in actual OMP, reports status, expands content, exercises disablement and uninstall, and exercises both `purge --session` and `purge --older-than`.
+
+There is no minimum aggregate savings percentage in this safety gate. Low observed reduction is reported and informs continuation; it is not repaired by changing the threshold after results are visible.
 
 ## Drift history
 
 | Drift | Symptom | Corrective boundary |
 | --- | --- | --- |
 | V1 prose compression | A 44.6% output headline looked like a coding-agent cost product. | Real-session composition found prose was only 2.30% of spend; V1 is retired. |
-| Mechanism-first V2 work | Encoder/replay/provenance work continued after K1 fired. | K1 is a deployment gate, not a metric to optimize around. |
-| Provenance as product | Archive, provider-replay, WORM, and capture work began to dominate discussion. | Provenance is supporting evidence infrastructure; it cannot improve net codec economics. |
-| Surface inversion | MCP and prospective infrastructure risked outranking the hook/CLI product path. | Hooks are primary conditional runtime; CLI is primary current surface; MCP is secondary. |
+| Product/research gate conflation | Fixture or infeasible representative replay prevented any runtime from generating prospective evidence. | Safety gates the opt-in product; representative evidence gates general savings and behavior claims. |
+| Provenance as product | Archive, provider replay, WORM, and capture work dominated the roadmap. | Preserve the evidence, but do not treat collection infrastructure as the product. |
+| Surface inversion | Observe and prospective infrastructure outranked the transform users need. | OMP runtime is the first product surface; Observe is supporting diagnostics; MCP is deferred. |
+| Mechanism expansion | Action compression and residency rewriting appeared alongside observation delivery. | Ship the observation-only boundary first; admit later mechanisms only from runtime evidence. |
 
 ## Drift checks
 
-Run these before proposing work:
+Before proposing work, verify that it:
 
-```text
-uv run laconic gates --corpus tests/corpus --format json
-uv run laconic measure tests/corpus --expect tests/corpus/expected.json
-git status --short
-```
-
-Reject or hold a proposal when it:
-
-- resumes hooks or MCP while K1 is below its unblock threshold;
-- adds provenance/capture infrastructure without changing a named evidence gap;
-- claims real-session savings from the synthetic fixture corpus;
-- treats K3 dry-run data as participant evidence;
-- turns Laconic into project-state, handoff, routing, or orchestration software.
+- advances the OMP runtime, exact recovery, fail-open behavior, operator control, packaging, or bounded dogfood proof;
+- does not revive historical replay, external data, or provider spend as a product prerequisite;
+- does not claim real-session token, cost, cache, or behavior savings from the synthetic fixture or raw character reduction;
+- does not treat K3 dry-run data as participant evidence;
+- does not expand the first beta into action rewriting, history compaction, MCP, hosted services, project state, routing, or orchestration without new runtime evidence and an explicit design decision.
