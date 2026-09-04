@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- Added the transport-neutral runtime session engine and bounded `python -m laconic.runtime` JSONL service. It stores raw observations in owner-only, path-contained per-session ledgers before emitting a strictly smaller namespaced envelope, supports exact full/span recovery after reopen, and records content-free decisions and latency metrics. This milestone does not install or activate the OMP adapter; live interception remains deferred to M17.
+
 ### Changed
 
 - Refocused the public product roadmap on an opt-in OMP runtime codec backed by the existing Python engine and recovery ledger. The runtime beta is governed by exact recovery, fail-open behavior, bounded latency, operator control, packaging, and real OMP qualification.
