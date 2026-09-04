@@ -2,59 +2,51 @@
 
 ## 1. Architecture Overview
 
-Laconic sits at the **tool boundary** of a coding agent. Everything an agent perceives passes through the observation codec on the way in; everything it does passes through the action codec on the way out. Both are backed by a content-addressed handle ledger that makes every elision reversible.
+Laconic sits at the **tool-result boundary** of an existing coding agent. The first runtime product is an explicitly installed OMP extension backed by one session-owned Python engine. The host adapter owns the session-scoped engine process lifecycle and result mutation; the engine owns encoding, recovery, decisions, and local storage.
 
-The model is never asked to write in a constrained schema while reasoning. The codec operates on transport, not on generation. This is deliberate — see §9.3.
+No live codec integration is released in version 0.8.0. The architecture below is the approved target for the OMP-first beta.
 
 ```mermaid
 graph TB
-    subgraph Client["Agent client"]
-        M[Cloud model]
-        TR[Tool runtime]
+    subgraph OMP["OMP client"]
+        TR["Tool runtime"]
+        EX["Laconic extension"]
+        M["Cloud model"]
     end
 
-    subgraph Core["Laconic core"]
-        OC[Observation codec]
-        AC[Action codec]
-        RM[Residency manager]
-        LG[(Handle ledger)]
+    subgraph Engine["Session-owned Python engine"]
+        RT["Runtime protocol"]
+        OC["Observation codec"]
+        LG[("Private session ledger")]
     end
 
-    subgraph Human["Human surface"]
-        RN[Renderer]
-        SC[Side channel]
+    subgraph Operator["Local operator surface"]
+        CLI["Laconic CLI"]
     end
 
-    subgraph Eval["Fidelity harness"]
-        RP[Replay engine]
-        AE[Action equivalence]
-        HS[Human study runner]
-    end
-
-    M -->|tool call| AC
-    AC -->|anchored delta| TR
-    TR -->|raw result| OC
-    OC -->|compact record| LG
-    OC -->|encoded observation| M
-    RM -->|compact or keep| LG
-    RM -->|break-even check| M
-
-    LG --> RN
-    RN --> SC
-
-    LG --> RP
-    RP --> AE
-    RN --> HS
+    TR -->|"successful text result"| EX
+    EX -->|"normalized JSONL request"| RT
+    RT -->|"commit exact raw result"| LG
+    RT -->|"encode eligible result"| OC
+    OC -->|"candidate encoding"| RT
+    RT -->|"emitted envelope or pass-through decision"| EX
+    EX -->|"smaller envelope or original result"| M
+    M -->|"laconic_expand reference"| EX
+    EX --> RT
+    RT -->|"exact full or span recovery"| LG
+    CLI -->|"install, status, pause, uninstall, purge"| EX
 ```
 
-Two deployment surfaces share the core:
+The first adapter transforms only successful, exactly-one-text-chunk results from OMP's `read`, `bash`, `grep`, and `glob` tools. Unsupported tools, mixed or non-text content, and errors pass through unchanged. A 250 ms deadline and a three-consecutive-failure circuit breaker preserve native OMP behavior when the engine fails.
 
-- **Surface A — Claude Code / hook-based clients.** Hooks intercept tool results before they enter the transcript.
-- **Surface B — MCP proxy.** Laconic wraps an MCP server and re-encodes tool results in flight, for any MCP-speaking client.
+The engine writes the exact raw observation before it may emit a replacement. It constructs the complete model-visible envelope, including the recovery reference, and emits only when that envelope is strictly smaller than the raw result. Internal handles such as `F3` remain short and session-scoped; model-visible references include the source OMP session, for example `<omp-session-id>/F3:61-94`.
+
+Thin adapters share this canonical engine. OMP is first. Claude Code requires a separate post-beta adapter design. MCP, action rewriting, residency/history compaction, and hosted services are deferred.
 
 ---
-
 ## 2. Component Design
+
+**Maturity boundary:** the codec, ledger, replay, renderer, action codec, and residency decision accounting exist in version 0.8.0. The session runtime, namespaced envelope, and OMP adapter described here are planned for the bounded beta. Action rewriting and applied residency compaction are not part of that beta.
 
 ### 2.1 Handle ledger (`src/laconic/ledger.py`)
 
@@ -155,7 +147,7 @@ class Ledger:
         return "\n".join(lines[int(start) - 1 : int(end)])
 ```
 
-Handles are short (`F3`, `B7`, `S2`) because the model has to write them, and stable for the life of a session because the transcript refers back to them.
+Handles remain short (`F3`, `B7`, `S2`) inside one ledger. A runtime envelope prefixes the handle with its source OMP session so references remain unambiguous after resume or full fork: `<omp-session-id>/F3[:first-last]`.
 
 ### 2.2 Observation codec (`src/laconic/codec/observe.py`)
 
@@ -201,7 +193,7 @@ class FileEncoder:
         return f"{head}\n  span {start}-{end}:\n{_indent(body)}"
 ```
 
-`Outliner` is a tree-sitter-backed symbol extractor with a hard fallback: when no grammar is available for a file type, it degrades to head/tail span scoping rather than failing. A codec that errors on an unfamiliar language is worse than one that compresses it badly.
+`Outliner` is a tree-sitter-backed symbol extractor with a hard fallback for direct library use: when no grammar is available for a file type, it degrades to head/tail span scoping rather than failing. The first OMP runtime still uses an explicit tool allowlist and does not route unknown tools through the fallback encoder.
 
 ```python
 class CommandEncoder:
@@ -371,75 +363,110 @@ Action equivalence is judged structurally first — same tool, same target, same
 
 ### 2.7 CLI (`src/laconic/cli.py`)
 
+Version 0.8.0 exposes research, evaluation, rendering, and Observe commands:
+
 ```text
-laconic measure [PATH ...]      channel decomposition and cost split
-laconic replay [--codec on|off] counterfactual cost and action equivalence
-laconic gates                   run K1, K2, K4, K5 and print pass/fail
-laconic view --turns A-B        rendered human view of a trace
-laconic expand F3[:61-94]       resolve a handle to raw content
-laconic study dry-run           validate the K3 study harness with simulated data
+laconic measure ...
+laconic replay ...
+laconic gates ...
+laconic expand ...
+laconic view ...
+laconic study ...
+laconic observe ...
+laconic k1 ...
 ```
 
-`laconic measure` is deliberately the first verb a user runs. The CLI is the primary operator, measurement, replay, inspection, and decision surface. Hook installation is the intended primary runtime surface and MCP is secondary, but neither command is exposed until a representative K1 result clears their deployment gate. If a user's own sessions show a different channel decomposition than ours, we want that discovered before any intervention is considered.
+The runtime beta will invert that emphasis through a deliberate pre-1.0 cutover:
+
+```text
+laconic install omp
+laconic uninstall omp
+laconic status
+laconic purge ...
+laconic expand ...
+laconic research ...
+```
+
+These runtime commands do not ship in 0.8.0. The implementation milestone must update every caller, test, and public document together rather than preserve duplicate aliases indefinitely.
 
 ---
-
 ## 3. Integration
 
-### 3.1 Surface A — hook-based clients
+### 3.1 First surface — OMP extension
 
 ```mermaid
 sequenceDiagram
-    participant CC as Claude Code
-    participant HK as Laconic hook
-    participant CD as Codec
-    participant LG as Ledger
+    participant T as OMP tool runtime
+    participant E as Laconic extension
+    participant R as Session engine
+    participant L as Private ledger
     participant M as Cloud model
 
-    CC->>HK: PostToolUse, raw tool result
-    HK->>CD: encode by tool name
-    CD->>LG: register record, mint handle
-    LG-->>CD: handle
-    CD-->>HK: compact observation
-    HK-->>CC: replacement tool result
-    CC->>M: transcript with compact observation
+    T->>E: successful single-text result
+    E->>R: encode request
+    R->>L: commit exact raw result
+    R->>R: build and compare complete envelope
+    alt envelope is strictly smaller
+        R-->>E: emitted envelope
+        E-->>M: namespaced recoverable result
+    else unsupported, failed, or not smaller
+        R-->>E: pass-through decision
+        E-->>M: original result
+    end
+    M->>E: laconic_expand reference
+    E->>R: expand full result or span
+    R->>L: resolve source session and handle
+    L-->>M: exact content
 ```
 
-The hook is synchronous and on the critical path, which imposes a hard latency budget (§6). If the codec cannot encode within budget, it passes the raw result through unchanged. **Failing open is mandatory**: a codec that stalls the agent is worse than no codec.
+The TypeScript extension uses OMP result middleware, session lifecycle events, registered tools, and commands. It retains the original content until a valid engine response arrives. Timeout, process exit, malformed response, storage failure, unsupported content, or an open circuit breaker returns no override.
 
-### 3.2 Surface B — MCP proxy
+The Python process is owned by one active OMP session and communicates over a versioned JSONL protocol. Protocol frames use stdout; diagnostics use stderr and never include raw content, subjects, tool arguments, prompts, credentials, or paths.
 
-Laconic wraps an upstream MCP server, forwards `tools/list` unchanged, and re-encodes `tools/call` results in flight. It registers one additional tool, `laconic_expand`, so the model can recover any elided region itself.
+### 3.2 Deferred adapters
 
-This surface makes the codec available to any MCP-speaking client, and it is the reason the ledger is transport-agnostic: neither MCP nor A2A specifies payload content style, which is precisely the layer Laconic occupies.
+Claude Code is the second host target only after the protocol survives OMP dogfood. It reuses the engine and ledger semantics rather than copying codec policy into plugin code.
+
+An MCP gateway is not a substitute for the OMP adapter because it cannot intercept built-in tool results. It remains deferred, along with additional tool shapes, action rewriting, applied residency compaction, and hosted synchronization.
 
 ---
-
 ## 4. Gates
 
-Pre-registered before implementation. `laconic gates` runs the automatable ones in CI against a committed transcript corpus.
+Product release and research claims use different gates.
 
-| # | Gate | Threshold | Kill condition | Automated |
-|---|---|---|---|---|
-| K1 | Net session cost reduction on replayed real traces, including induced follow-up reads | ≥ 25% | < 15% | yes |
-| K2 | Action equivalence, compressed vs raw observation | ≥ 95% | < 90% | yes |
-| K3 | Human bug-catch rate, rendered view vs raw trace | within 5pp | worse by > 10pp | no |
-| K4 | Codec overhead in added input tokens per turn | < 500 | above | yes |
-| K5 | Exact-match reasoning benchmark, codec on vs off | within 2pp | beyond | yes |
+### 4.1 OMP runtime beta gate
 
-### 4.1 K3 protocol
+The opt-in beta requires at least 10 completed Laconic-enabled OMP sessions across at least 3 canonical Git repositories and at least 100 eligible observations. It also requires:
 
-The experiment nobody in the literature has run, so the protocol is stated in full rather than deferred.
+- zero unrecoverable emitted references;
+- zero compressed tool errors;
+- zero result corruption outside the selected text replacement;
+- zero emitted envelopes that are equal to or larger than their raw input;
+- exercised engine absence, spawn failure, crash, malformed response, timeout, pause, resume, session switch, branch navigation, resumed-session, and inherited/fork recovery paths;
+- reported latency p50 and p95, emitted/pass-through decisions and reasons, character totals, and expansion counts;
+- a built-package install, actual OMP load, status, expansion, uninstall, and purge-preview smoke.
 
-- **Design.** Within-subjects, counterbalanced. Each participant reviews agent traces in both conditions — rendered view and raw trace — on matched task pairs, with condition order randomised.
-- **Materials.** Real agent traces from the corpus, each containing exactly one seeded defect of a known class: an unhandled error path, an incorrect boundary condition, a silently swallowed exception, or an edit applied to the wrong target.
-- **Primary measure.** Defect detection rate.
-- **Secondary measures.** Time to decision, self-reported confidence, and the calibration gap between confidence and correctness — the last of these is where the placebic-explanation hazard would show up first.
-- **Analysis.** Pre-registered; paired comparison with the equivalence margin stated in advance rather than chosen after seeing the data.
-- **Publication.** The result is published whichever way it lands. A negative K3 is a finding about every compression tool in this space, including Caveman's and including Laconic v1's, and it is worth more to the field than a positive one is to us.
+This safety gate has no minimum aggregate savings percentage. Observed character reduction is reported honestly and informs continuation; it is not renamed as token, cost, cache, or behavior improvement.
+
+### 4.2 Research claim gates
+
+The existing `laconic gates` suite remains research infrastructure:
+
+| # | Gate | Threshold | Kill condition |
+|---|---|---|---|
+| K1 | Session-level **net** cost reduction on representative replay, including induced follow-up work | ≥ 25% | < 15% means a general economics claim is not justified |
+| K2 | Action equivalence, compressed vs raw observation | ≥ 95% | < 90% means the codec is lossy where measured |
+| K3 | Human bug-catch rate, rendered view vs raw trace | within 5pp | worse by > 10pp means compression harms verification |
+| K4 | Codec overhead in added input tokens per turn | < 500 | above means structural overhead is excessive |
+| K5 | Exact-match reasoning benchmark, codec on vs off | within 2pp | beyond means the tested representation changes measured reasoning accuracy |
+
+The committed fixture reports its own bounded results and validates the gate machinery. It is not representative product-economics evidence. Its K1 result does not block the opt-in runtime beta, and a safe beta does not satisfy K1–K5.
+
+### 4.3 K3 protocol
+
+K3 remains a separately authorized participant study: within-subjects, counterbalanced, with matched seeded-defect traces, defect detection as the primary outcome, time/confidence/calibration as secondary outcomes, and a pre-registered paired analysis. A renderer dry run is not participant evidence.
 
 ---
-
 ## 5. Data Model
 
 ### 5.1 Ledger schema
@@ -475,150 +502,70 @@ CREATE TABLE compactions (
 );
 ```
 
-`raw_chars` and `encoded_chars` are stored per record so `laconic status` can report realised compression per tool without re-deriving it, and so a declined compaction leaves an auditable row explaining why.
+`raw_chars` and `encoded_chars` are stored per record so the planned runtime status surface can report realised character reduction without decompressing every row. Runtime decision records added in M16 distinguish an encoded candidate from an envelope actually emitted.
 
-### 5.2 Configuration (`~/.laconic/config.toml`)
+### 5.2 Runtime configuration boundary
 
-```toml
-[laconic]
-enabled = true
-fail_open = true                  # pass raw through on codec error or timeout
+The beta is local and opt-in:
 
-[observe]
-encode_latency_budget_ms = 40     # hard cap; exceeded means pass-through
-span_budget_lines = 120           # default span returned around a match
-outline_symbol_limit = 8
-preserve_errors = true            # never elide stderr or tracebacks
+- `LACONIC_DATA_DIR` overrides the platform-native application data directory.
+- One owner-only SQLite ledger belongs to each OMP session.
+- Project-scope installation is the default; user scope is explicit.
+- The adapter enforces a 250 ms result deadline and opens a circuit breaker after three consecutive engine failures.
+- Uninstall removes only the owned adapter asset and does not delete ledgers.
+- Purge is a separate, explicit, dry-runnable operation because resumable conversations may still contain references.
 
-[observe.command]
-keep_head_lines = 20
-keep_tail_lines = 20
-max_surfaced_errors = 25
-
-[residency]
-mode = "append_only"              # "append_only" | "compact"
-compact_above_tokens = 120000
-min_projected_turns = 0           # 0 means require a real estimate
-
-[act]
-anchor = "symbol"                 # "symbol" | "line"
-
-[render]
-provider = "ollama"               # "ollama" | "none"
-model = "gemma:latest"
-deterministic_only = false        # true renders structural facts and nothing else
-
-[replay]
-corpus = "~/.laconic/corpus"
-judge_model = "claude-sonnet-4-6" # semantic fallback for action equivalence
-```
-
-`fail_open` and `encode_latency_budget_ms` are the two settings that keep the codec from becoming the problem it is trying to solve.
+M16 and M17 finalize the protocol and operator schemas. M15 does not claim a configuration file or runtime command already exists.
 
 ---
-
 ## 6. Non-Functional Requirements
 
 | Property | Requirement | Rationale |
 |---|---|---|
-| Encode latency | p99 < 40 ms per observation | On the critical path via the hook |
-| Failure mode | Pass raw content through | A codec that blocks the agent is a regression |
-| Recoverability | 100% of elided content addressable | Central design invariant, verified by K2 |
-| Ledger growth | Bounded per session, zstd-compressed raw | Sessions carry 20 MB+ of raw observations |
-| Renderer | Fully out of band | Must never influence the model or block a turn |
-| Determinism | Same input, same encoding | Otherwise the prompt cache is destroyed |
-
-The determinism requirement is easy to overlook and expensive to violate: a non-deterministic encoder changes the prefix on every turn and turns a 0.10× cache read into a 1.25× cache write, converting the entire system into a cost increase.
-
----
-
-## 7. Package Structure
-
-```
-laconic/
-├── pyproject.toml
-├── README.md
-├── LICENSE
-├── src/
-│   └── laconic/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── ledger.py                # handle ledger, expansion
-│       ├── residency.py             # break-even arithmetic, compaction
-│       ├── costs.py                 # pricing constants, session-level accounting
-│       ├── codec/
-│       │   ├── observe.py           # encoder dispatch
-│       │   ├── encoders/
-│       │   │   ├── file.py          # outline plus span
-│       │   │   ├── command.py       # error-salient elision
-│       │   │   ├── search.py        # path interning
-│       │   │   └── fallback.py      # head/tail, always available
-│       │   ├── outline.py           # tree-sitter symbol extraction
-│       │   └── act.py               # anchored edits
-│       ├── render/
-│       │   ├── templates.py         # deterministic structural rendering
-│       │   ├── narrate.py           # local-model connective prose
-│       │   └── view.py              # trace assembly
-│       ├── replay/
-│       │   ├── engine.py            # counterfactual replay
-│       │   ├── equivalence.py       # K2 action equivalence
-│       │   └── corpus.py            # transcript ingest
-│       ├── surfaces/
-│       │   ├── hooks.py             # Surface A
-│       │   └── mcp_proxy.py         # Surface B
-│       └── prompts/
-│           └── narrate.txt
-├── scripts/
-│   └── measure_session_composition.py
-├── tests/
-│   ├── test_ledger.py
-│   ├── test_encoders.py
-│   ├── test_residency.py            # break-even arithmetic
-│   ├── test_recoverability.py       # the invariant, property-based
-│   ├── test_determinism.py          # same input, same encoding
-│   ├── test_replay.py
-│   └── corpus/
-└── docs/
-    ├── overview.md
-    ├── pitch.md
-    └── system-design.md
-```
-
-`test_recoverability.py` and `test_determinism.py` are the two suites that must never be allowed to go yellow. The first guards correctness, the second guards the entire cost thesis.
+| Result deadline | hard 250 ms adapter deadline; report p50 and p95 | The transform is on OMP's critical path |
+| Failure mode | preserve the original result | A codec that blocks or corrupts the agent is a regression |
+| Recoverability | exact full/span expansion for every emitted reference | Central product invariant |
+| Replacement | complete envelope strictly smaller than raw content | Prevent gross encoder output from overstating model-visible reduction |
+| Storage | owner-only, session-scoped, path-contained | Tool output may contain sensitive data |
+| Diagnostics | no raw content, subjects, paths, arguments, prompts, or credentials | Metrics must not become a second transcript store |
+| Determinism | same normalized input and state produce the same decision | Keeps behavior auditable and cache effects interpretable |
+| Control | inspect, pause, resume, uninstall, and explicit purge | Opt-in beta must remain reversible |
 
 ---
+## 7. Package Boundaries
 
+Version 0.8.0 already contains the canonical Python codec, ledger, replay, renderer, Observe, gate, and K1 packages. The runtime tranche adds only these primary boundaries:
+
+```text
+src/laconic/runtime/             # protocol, references, decisions, session engine, stdio
+src/laconic/integrations/omp/    # packaged OMP extension asset and owned installer support
+tests/test_runtime_*.py          # protocol, storage, decisions, installer, and CLI contracts
+```
+
+The host adapter stays thin. Encoding, strict-smaller decisions, ledger writes, metrics, and expansion belong to the Python engine. OMP lifecycle, middleware content-shape checks, process supervision, timeout, circuit breaking, and result override belong to the extension.
+
+Existing action, residency, replay, rendering, Observe, and K1 modules remain separate supporting surfaces. The runtime must not duplicate their policy or silently activate deferred mechanisms.
+
+---
 ## 8. Deployment Requirements
 
-### 8.1 Codec only
+### 8.1 OMP runtime beta
 
 | Requirement | Minimum |
 |---|---|
 | Python | 3.12+ |
-| Claude Code or an MCP-speaking client | current stable |
-| Disk for the ledger | ~50 MB per heavy session, zstd-compressed |
-| Network | none — the codec is entirely local |
+| OMP | current contract verified by the integration milestone |
+| JavaScript runtime | pinned Bun toolchain for adapter verification; packaged extension remains an OMP asset |
+| Disk | owner-only local space for one ledger per active session |
+| Network | none for codec, storage, expansion, metrics, or operator control |
 
-### 8.2 With rendering
+Installation is explicit and ownership-marked. The installer defaults to project scope, supports an explicit user scope, refuses to overwrite a foreign file, and removes only its own asset.
 
-| Requirement | Minimum | Notes |
-|---|---|---|
-| Ollama or compatible | 0.5+ | Only for generative connective text |
-| Local model | any 7–8B instruct | Structural facts never touch it |
-| RAM | 8 GB free | |
+### 8.2 Supporting surfaces
 
-Rendering is optional and out of band. With `deterministic_only = true` the renderer needs no model at all — structural facts alone cover most of what a human wants from a trace, and they cannot be hallucinated.
-
-### 8.3 For evaluation
-
-| Requirement | Notes |
-|---|---|
-| Transcript corpus | The replay harness needs real sessions; `laconic measure` ingests them |
-| API key | Replay re-runs turns against a live model for K2 and K5 |
-| Participants | K3 only, per the protocol in §4.1 |
+Rendering remains optional and out of band. Replay and research gates may require transcript fixtures, provider configuration, or participants under their own authorization. None is a runtime-beta dependency.
 
 ---
-
 ## 9. Design Decisions
 
 ### 9.1 Why a codec instead of an output-style prompt
@@ -643,4 +590,4 @@ Because rewriting a cached prefix costs a full cache write, and a tool that quie
 
 Nobody has measured whether compressed model output degrades a developer's ability to catch bugs. Verification is already a top-three time cost in AI-assisted programming (arXiv:2210.14306); explanations raise acceptance independent of correctness (arXiv:2006.14779) and reduce over-reliance only when they genuinely lower verification cost (arXiv:2212.06823).
 
-Shipping a compression tool without that measurement is how a project ends up optimising a number while making its users worse at their job. K3 is the gate that makes the rest of the system honest.
+K3 remains necessary before claiming that rendered compression preserves human verification outcomes. It is not a prerequisite for the observation-only OMP beta, whose model-facing safety is governed by exact recovery, fail-open behavior, bounded latency, and real runtime qualification.
