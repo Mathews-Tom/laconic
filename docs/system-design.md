@@ -444,7 +444,7 @@ The opt-in beta requires at least 10 completed Laconic-enabled OMP sessions acro
 - zero emitted envelopes that are equal to or larger than their raw input;
 - exercised engine absence, spawn failure, crash, malformed response, timeout, pause, resume, session switch, branch navigation, resumed-session, and inherited/fork recovery paths;
 - reported latency p50 and p95, emitted/pass-through decisions and reasons, character totals, and expansion counts;
-- a built-package install, actual OMP load, status, expansion, uninstall, and purge-preview smoke.
+- a built-package install, actual OMP load, status, expansion, and uninstall smoke; previews of both `purge --session` and `purge --older-than` before human sign-off; and execution of both purge forms before GO.
 
 This safety gate has no minimum aggregate savings percentage. Observed character reduction is reported honestly and informs continuation; it is not renamed as token, cost, cache, or behavior improvement.
 
