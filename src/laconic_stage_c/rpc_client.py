@@ -3,9 +3,9 @@ persistent process per baseline session, sending one `prompt` command per
 replayed turn and parsing the resulting event stream into
 `laconic.replay.engine.ReplayTurnCapture` sequences.
 
-Implements `laconic.replay.engine.ReplayClient` (`respond()`). Lives
-outside `src/laconic` per `tools/k1_stage_c/__init__.py`'s client
-boundary.
+Implements `laconic.replay.engine.ReplayClient` (`respond()`). Lives in the
+separately importable `laconic_stage_c` sibling package, which `src/laconic`
+never imports.
 
 Architecture and wire-protocol citations
 -----------------------------------------
@@ -124,20 +124,19 @@ class RpcTimeoutError(OmpRpcClientError):
 
 
 class CommandFactory(Protocol):
-    """Builds the `omp --mode rpc` argv for one session. Injectable so
+    """Build the `omp --mode rpc` argv for one session. Injectable so
     tests never construct a command that could resolve to a real `omp`
     binary."""
 
-    def __call__(self, *, model: str, deny_overlay_path: Path, profile: str) -> list[str]: ...
+    def __call__(
+        self, *, model: str, deny_overlay_path: Path, cwd: Path, session_dir: Path
+    ) -> list[str]: ...
 
 
-def default_command(*, model: str, deny_overlay_path: Path, profile: str) -> list[str]:
-    """The minimal `omp --mode rpc` invocation H-66's real spike
-    validated: model selection, the deny-overlay config, and an isolated
-    profile (design doc SS10.2's `--profile k1-stage-c-replay` -- keeps
-    this process's sessions/cache away from the operator's real OMP
-    state). Batch-orchestration concerns (cwd, session naming) are M2's,
-    not this client's."""
+def default_command(
+    *, model: str, deny_overlay_path: Path, cwd: Path, session_dir: Path
+) -> list[str]:
+    """Build the private, default-profile `omp --mode rpc` invocation."""
     return [
         "omp",
         "--mode",
@@ -146,8 +145,12 @@ def default_command(*, model: str, deny_overlay_path: Path, profile: str) -> lis
         model,
         "--config",
         str(deny_overlay_path),
-        "--profile",
-        profile,
+        "--cwd",
+        str(cwd),
+        "--session-dir",
+        str(session_dir),
+        "--no-session",
+        "--no-title",
     ]
 
 
@@ -164,15 +167,15 @@ class OmpRpcReplayClient:
         self,
         *,
         deny_overlay_path: Path,
-        profile: str = "k1-stage-c-replay",
-        cwd: Path | None = None,
+        cwd: Path,
+        session_dir: Path,
         command_factory: CommandFactory = default_command,
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         timeout_s: float = 120.0,
     ) -> None:
         self._deny_overlay_path = deny_overlay_path
-        self._profile = profile
         self._cwd = cwd
+        self._session_dir = session_dir
         self._command_factory = command_factory
         self._popen = popen
         self._timeout_s = timeout_s
@@ -206,6 +209,18 @@ class OmpRpcReplayClient:
             )
         return self._send_prompt(observation)
 
+    def preflight(self, model: str) -> None:
+        """Start the RPC process and wait for ``ready`` without a prompt."""
+        if self._closed:
+            raise OmpRpcClientError("preflight() called after close()")
+        if self._process is None:
+            self._spawn(model)
+        elif model != self._model:
+            raise OmpRpcClientError(
+                f"model changed mid-session ({self._model!r} -> {model!r}); one RPC "
+                "process serves one model for its whole session-replay (design doc SS14)"
+            )
+
     def close(self) -> None:
         """Close stdin and wait for exit (design doc SS14) -- idempotent."""
         if self._closed:
@@ -229,11 +244,14 @@ class OmpRpcReplayClient:
 
     def _spawn(self, model: str) -> None:
         command = self._command_factory(
-            model=model, deny_overlay_path=self._deny_overlay_path, profile=self._profile
+            model=model,
+            deny_overlay_path=self._deny_overlay_path,
+            cwd=self._cwd,
+            session_dir=self._session_dir,
         )
         process = self._popen(
             command,
-            cwd=str(self._cwd) if self._cwd is not None else None,
+            cwd=str(self._cwd),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
