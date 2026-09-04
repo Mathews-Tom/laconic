@@ -110,6 +110,22 @@ from laconic.replay.engine import (
     replay_off,
 )
 from laconic.replay.equivalence import SessionEquivalence, compare_session
+from laconic.runtime.omp_installer import OmpInstallError, OmpInstallPlan
+from laconic.runtime.omp_installer import (
+    apply_omp_install as apply_runtime_omp_install,
+)
+from laconic.runtime.omp_installer import (
+    apply_omp_uninstall as apply_runtime_omp_uninstall,
+)
+from laconic.runtime.omp_installer import (
+    omp_extensions_directory as runtime_omp_extensions_directory,
+)
+from laconic.runtime.omp_installer import (
+    preview_omp_install as preview_runtime_omp_install,
+)
+from laconic.runtime.omp_installer import (
+    preview_omp_uninstall as preview_runtime_omp_uninstall,
+)
 from laconic.study.analysis import MINIMUM_PARTICIPANTS
 from laconic.study.dryrun import DEFAULT_PARTICIPANT_COUNT, DryRunResult
 from laconic.study.dryrun import run as run_study_dry_run
@@ -145,6 +161,7 @@ EXIT_OBSERVE_OWNERSHIP_CONFLICT = 21
 EXIT_K1_STAGE_A_STOP = 22
 EXIT_K1_STAGE_B_TOTALS_MISMATCH = 23
 EXIT_K1_STAGE_C_INCOMPLETE = 24
+EXIT_OMP_INSTALL_ERROR = 25
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -152,6 +169,62 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A context-loop codec for coding agents.")
     parser.add_argument("--version", action="version", version=f"laconic {__version__}")
     subcommands = parser.add_subparsers(dest="command")
+    install = subcommands.add_parser(
+        "install",
+        help="install an owned runtime adapter",
+    )
+    install_subcommands = install.add_subparsers(dest="install_target")
+    install_omp = install_subcommands.add_parser(
+        "omp",
+        help="install Laconic's OMP runtime extension",
+        description=(
+            "Preview or atomically install one Laconic-owned native OMP extension. "
+            "The project scope is the default. This command never contacts a provider."
+        ),
+    )
+    install_omp.add_argument("--scope", choices=["project", "user"], default="project")
+    install_omp.add_argument("--profile", help="named OMP profile for user scope")
+    install_omp.add_argument(
+        "--user-dir",
+        type=Path,
+        help="explicit user-scope extension directory",
+    )
+    install_omp.add_argument(
+        "--python",
+        help="absolute interpreter recorded by the extension (default: this interpreter)",
+    )
+    install_omp.add_argument(
+        "--data-dir",
+        type=Path,
+        help="runtime ledger directory recorded by the extension",
+    )
+    install_omp.add_argument("--dry-run", action="store_true", help="preview only; never write")
+    install_omp.add_argument("--format", choices=["text", "json"], default="text")
+    install_omp.set_defaults(handler=_runtime_omp_install)
+
+    uninstall = subcommands.add_parser(
+        "uninstall",
+        help="remove an owned runtime adapter without purging data",
+    )
+    uninstall_subcommands = uninstall.add_subparsers(dest="uninstall_target")
+    uninstall_omp = uninstall_subcommands.add_parser(
+        "omp",
+        help="remove Laconic's owned OMP runtime extension",
+        description=(
+            "Preview or remove only Laconic's marked OMP extension. "
+            "Runtime ledgers are never purged by uninstall."
+        ),
+    )
+    uninstall_omp.add_argument("--scope", choices=["project", "user"], default="project")
+    uninstall_omp.add_argument("--profile", help="named OMP profile for user scope")
+    uninstall_omp.add_argument(
+        "--user-dir",
+        type=Path,
+        help="explicit user-scope extension directory",
+    )
+    uninstall_omp.add_argument("--dry-run", action="store_true", help="preview only; never write")
+    uninstall_omp.add_argument("--format", choices=["text", "json"], default="text")
+    uninstall_omp.set_defaults(handler=_runtime_omp_uninstall)
 
     measure = subcommands.add_parser(
         "measure",
@@ -527,6 +600,108 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OK
     exit_code: int = handler(args)
     return exit_code
+
+
+def _runtime_omp_target(args: argparse.Namespace) -> Path:
+    if args.scope == "project":
+        if args.profile is not None or args.user_dir is not None:
+            raise OmpInstallError("--profile and --user-dir require --scope user")
+    elif args.profile is not None and args.user_dir is not None:
+        raise OmpInstallError("--profile and --user-dir are mutually exclusive")
+    return runtime_omp_extensions_directory(
+        scope=args.scope,
+        cwd=Path.cwd(),
+        home=Path.home(),
+        user_dir=args.user_dir,
+        profile=args.profile,
+    )
+
+
+def _print_runtime_omp_plan(
+    plan: OmpInstallPlan,
+    fmt: str,
+    *,
+    applied: bool,
+    preview: bool,
+) -> None:
+    if fmt == "json":
+        print(
+            json.dumps(
+                {
+                    "adapter": "omp",
+                    "operation": plan.operation,
+                    "applied": applied,
+                    "preview": preview,
+                    "path": str(plan.path),
+                    "python": plan.python,
+                    "entrypoint": list(plan.entrypoint),
+                    "data_directory": (
+                        str(plan.data_directory) if plan.data_directory is not None else None
+                    ),
+                    "preserved": list(plan.preserved),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    state = "preview" if preview else ("applied" if applied else "unchanged")
+    print(f"laconic OMP adapter ({state}): [{plan.operation}] {plan.path}")
+    if plan.python is not None:
+        print(f"  python: {plan.python}")
+    print(f"  entrypoint: {' '.join(plan.entrypoint)}")
+    if plan.data_directory is not None:
+        print(f"  data directory: {plan.data_directory}")
+    for item in plan.preserved:
+        print(f"  [preserved] {item}")
+
+
+def _runtime_omp_install(args: argparse.Namespace) -> int:
+    try:
+        directory = _runtime_omp_target(args)
+        if args.dry_run:
+            plan = preview_runtime_omp_install(
+                directory,
+                python=args.python,
+                data_directory=args.data_dir,
+            )
+            _print_runtime_omp_plan(plan, args.format, applied=False, preview=True)
+        else:
+            result = apply_runtime_omp_install(
+                directory,
+                python=args.python,
+                data_directory=args.data_dir,
+            )
+            _print_runtime_omp_plan(
+                result.plan,
+                args.format,
+                applied=result.applied,
+                preview=False,
+            )
+    except (OmpInstallError, OSError) as error:
+        print(f"laconic install omp: {error}", file=sys.stderr)
+        return EXIT_OMP_INSTALL_ERROR
+    return EXIT_OK
+
+
+def _runtime_omp_uninstall(args: argparse.Namespace) -> int:
+    try:
+        directory = _runtime_omp_target(args)
+        if args.dry_run:
+            plan = preview_runtime_omp_uninstall(directory)
+            _print_runtime_omp_plan(plan, args.format, applied=False, preview=True)
+        else:
+            result = apply_runtime_omp_uninstall(directory)
+            _print_runtime_omp_plan(
+                result.plan,
+                args.format,
+                applied=result.applied,
+                preview=False,
+            )
+    except (OmpInstallError, OSError) as error:
+        print(f"laconic uninstall omp: {error}", file=sys.stderr)
+        return EXIT_OMP_INSTALL_ERROR
+    return EXIT_OK
 
 
 def _measure(args: argparse.Namespace) -> int:

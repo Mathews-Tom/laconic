@@ -6,7 +6,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export const LACONIC_PYTHON = "__LACONIC_PYTHON__";
-export const LACONIC_ENTRYPOINT = ["-m", "laconic.runtime"] as const;
+export const LACONIC_ENTRYPOINT = ["-I", "-m", "laconic.runtime"] as const;
 export const LACONIC_DATA_DIRECTORY = "__LACONIC_DATA_DIRECTORY__";
 
 export default function laconicRuntime(pi: ExtensionAPI): void {

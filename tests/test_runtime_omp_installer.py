@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,7 +36,7 @@ def test_project_install_preview_is_content_bounded_and_does_not_write(tmp_path:
 
     assert plan.operation == "add"
     assert plan.path == extension_dir / OMP_EXTENSION_FILENAME
-    assert plan.entrypoint == ("-m", "laconic.runtime")
+    assert plan.entrypoint == ("-I", "-m", "laconic.runtime")
     assert plan.preserved == ()
     assert not extension_dir.exists()
     assert not (tmp_path / "private-data").exists()
@@ -60,8 +63,27 @@ def test_install_is_idempotent_and_records_exact_invocation(tmp_path: Path) -> N
     assert second.plan.operation == "none"
     assert OMP_OWNED_MARKER in installed
     assert json.dumps("/usr/bin/python3") in installed
-    assert '["-m", "laconic.runtime"]' in installed
+    assert '["-I", "-m", "laconic.runtime"]' in installed
     assert json.dumps(str(data_dir)) in installed
+
+
+def test_install_preserves_the_environment_interpreter_that_can_import_laconic(
+    tmp_path: Path,
+) -> None:
+    plan = preview_omp_install(
+        tmp_path / "extensions",
+        python=sys.executable,
+        data_directory=tmp_path / "data",
+    )
+
+    assert plan.python == os.path.abspath(sys.executable)
+    imported = subprocess.run(
+        [plan.python, "-c", "import laconic"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert imported.returncode == 0, imported.stderr
 
 
 def test_owned_install_can_update_its_recorded_interpreter(tmp_path: Path) -> None:
@@ -79,6 +101,24 @@ def test_owned_install_can_update_its_recorded_interpreter(tmp_path: Path) -> No
     )
 
     assert plan.operation == "update"
+
+
+def test_project_install_rejects_a_symlinked_extension_ancestor(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    project.mkdir()
+    (project / ".omp").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OwnershipConflictError, match="must not contain symlinks"):
+        apply_omp_install(
+            project / ".omp" / "extensions",
+            python=sys.executable,
+        )
+
+    assert not (outside / "extensions").exists()
 
 
 def test_install_refuses_foreign_target_without_modification(tmp_path: Path) -> None:

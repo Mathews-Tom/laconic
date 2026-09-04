@@ -19,7 +19,7 @@ from laconic.runtime.storage import default_data_dir
 OMP_EXTENSION_FILENAME = "zz-laconic-runtime.ts"
 OMP_OWNED_MARKER = "// laconic-runtime: owned"
 OBSERVE_OWNED_MARKER = "// laconic-observe: owned"
-RUNTIME_ENTRYPOINT = ("-m", "laconic.runtime")
+RUNTIME_ENTRYPOINT = ("-I", "-m", "laconic.runtime")
 _PYTHON_PLACEHOLDER = "__LACONIC_PYTHON__"
 _DATA_DIRECTORY_PLACEHOLDER = "__LACONIC_DATA_DIRECTORY__"
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -110,7 +110,15 @@ def omp_extensions_directory(
     return home / config_dir / "agent" / "extensions"
 
 
+def _reject_symlink_components(path: Path) -> None:
+    absolute = Path(os.path.abspath(path.expanduser()))
+    for component in (absolute, *absolute.parents):
+        if component.is_symlink():
+            raise OwnershipConflictError(f"{component}: extension path must not contain symlinks")
+
+
 def _extension_files(directory: Path) -> tuple[tuple[Path, str], ...]:
+    _reject_symlink_components(directory)
     if not directory.exists():
         return ()
     if not directory.is_dir() or directory.is_symlink():
@@ -133,7 +141,9 @@ def _render_source(*, python: str, data_directory: Path) -> str:
 
 
 def _resolved_python(value: str | None) -> str:
-    path = Path(value or sys.executable).expanduser().resolve(strict=True)
+    # Preserve a virtual-environment or uv-tool symlink: resolving it records
+    # the base interpreter, which cannot import the environment's Laconic.
+    path = Path(os.path.abspath(Path(value or sys.executable).expanduser()))
     if not path.is_file() or not os.access(path, os.X_OK):
         raise OmpInstallError(f"Python interpreter is not executable: {path}")
     return str(path)
@@ -203,6 +213,7 @@ def preview_omp_uninstall(directory: Path) -> OmpInstallPlan:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
+    _reject_symlink_components(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -240,6 +251,7 @@ def apply_omp_uninstall(directory: Path) -> OmpInstallResult:
     """Remove only the currently marked runtime extension, never its ledgers."""
     plan = preview_omp_uninstall(directory)
     if plan.operation == "remove":
+        _reject_symlink_components(plan.path.parent)
         plan.path.unlink()
         return OmpInstallResult(plan=plan, applied=True)
     return OmpInstallResult(plan=plan, applied=False)
