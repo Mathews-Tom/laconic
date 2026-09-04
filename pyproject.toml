@@ -41,7 +41,10 @@ Repository = "https://github.com/Mathews-Tom/Laconic"
 laconic = "laconic.cli:main"
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/laconic", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
+only-include = ["src/laconic", "src/laconic_stage_c", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/laconic", "src/laconic_stage_c"]
 
 [dependency-groups]
 dev = [

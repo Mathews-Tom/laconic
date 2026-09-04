@@ -1,4 +1,4 @@
-"""Tests for `tools.k1_stage_c.rpc_client.OmpRpcReplayClient` (K1 Stage C M1).
+"""Tests for `laconic_stage_c.rpc_client.OmpRpcReplayClient` (K1 Stage C M1).
 
 Every test drives a *fake* subprocess: a tiny, committed Python script
 (`_FAKE_SERVER_SCRIPT`) launched via `sys.executable`, scripted per test
@@ -17,6 +17,7 @@ approximation.
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -24,7 +25,9 @@ from typing import Any
 
 import pytest
 
-from tools.k1_stage_c.rpc_client import (
+import laconic_stage_c
+from laconic_stage_c import factory, preflight
+from laconic_stage_c.rpc_client import (
     NoActionTakenError,
     OmpRpcClientError,
     OmpRpcReplayClient,
@@ -54,6 +57,8 @@ def main():
     with open(sys.argv[1], "r", encoding="utf-8") as handle:
         scenario = json.load(handle)
     emit(scenario.get("ready", {"type": "ready", "protocolVersion": 1}))
+    command_log = scenario.get("command_log")
+    commands = []
     turns = scenario.get("turns", [])
     turn_index = 0
     for line in sys.stdin:
@@ -61,6 +66,7 @@ def main():
         if not line:
             continue
         command = json.loads(line)
+        commands.append(command)
         if command.get("type") != "prompt":
             continue
         if turn_index >= len(turns):
@@ -80,6 +86,9 @@ def main():
             time.sleep(3600)
         if turn.get("exit_after", False):
             sys.exit(turn.get("exit_code", 0))
+    if command_log is not None:
+        with open(command_log, "w", encoding="utf-8") as handle:
+            json.dump(commands, handle)
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -213,7 +222,13 @@ def _write_scenario(tmp_path: Path, scenario: dict[str, Any], name: str = "scena
 
 
 def _fake_command_factory(script_path: Path, scenario_path: Path) -> Callable[..., list[str]]:
-    def factory(*, model: str, deny_overlay_path: Path, profile: str) -> list[str]:
+    def factory(
+        *,
+        model: str,
+        deny_overlay_path: Path,
+        cwd: Path,
+        session_dir: Path,
+    ) -> list[str]:
         return [sys.executable, str(script_path), str(scenario_path)]
 
     return factory
@@ -227,8 +242,14 @@ def _make_client(
     timeout_s: float = 5.0,
 ) -> OmpRpcReplayClient:
     scenario_path = _write_scenario(tmp_path, scenario)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    session_dir = tmp_path / "omp-sessions"
+    session_dir.mkdir()
     return OmpRpcReplayClient(
         deny_overlay_path=tmp_path / "deny-overlay.yml",
+        cwd=sandbox,
+        session_dir=session_dir,
         command_factory=_fake_command_factory(fake_server_script, scenario_path),
         timeout_s=timeout_s,
     )
@@ -431,15 +452,77 @@ def test_model_change_mid_session_raises(tmp_path: Path, fake_server_script: Pat
             client.respond(prefix=(), observation="obs 2", model="model-b")
 
 
-def test_default_command_shells_out_to_the_real_omp_binary_name() -> None:
-    """Documents (without invoking) the real client's default argv --
-    every test above overrides `command_factory` precisely so this
-    argv, which names the real `omp` binary, is never executed."""
-    command = default_command(
-        model="anthropic/claude-haiku-4-5", deny_overlay_path=Path("overlay.yml"), profile="p"
+def test_preflight_waits_for_ready_without_sending_a_provider_prompt(
+    tmp_path: Path, fake_server_script: Path
+) -> None:
+    command_log = tmp_path / "commands.json"
+    client = _make_client(
+        tmp_path,
+        fake_server_script,
+        {"command_log": str(command_log)},
     )
-    assert command[0] == "omp"
-    assert command[1:3] == ["--mode", "rpc"]
-    assert "--model" in command and "anthropic/claude-haiku-4-5" in command
-    assert "--config" in command and "overlay.yml" in command
-    assert "--profile" in command and "p" in command
+
+    client.preflight(model="openai-codex/gpt-5.6")
+    client.close()
+
+    assert json.loads(command_log.read_text(encoding="utf-8")) == []
+
+
+def test_factory_creates_private_stage_c_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    client = factory()
+
+    root = tmp_path / ".laconic/k1/stage_c"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "sandbox").stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "omp-sessions").stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "deny-overlay.yml").stat().st_mode) == 0o600
+    assert list((root / "sandbox").iterdir()) == []
+    assert client._deny_overlay_path == root / "deny-overlay.yml"
+
+
+def test_public_preflight_uses_factory_and_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class FakeClient:
+        def preflight(self, model: str) -> None:
+            calls.append(f"preflight:{model}")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(laconic_stage_c, "factory", FakeClient)
+
+    preflight(model="openai-codex/gpt-5.6")
+
+    assert calls == ["preflight:openai-codex/gpt-5.6", "close"]
+
+
+def test_default_command_uses_private_paths_without_profile() -> None:
+    """Documents (without invoking) the real client's argv -- every fake
+    subprocess test overrides `command_factory`, so no test can run `omp`."""
+    command = default_command(
+        model="anthropic/claude-haiku-4-5",
+        deny_overlay_path=Path("overlay.yml"),
+        cwd=Path("sandbox"),
+        session_dir=Path("omp-sessions"),
+    )
+
+    assert command == [
+        "omp",
+        "--mode",
+        "rpc",
+        "--model",
+        "anthropic/claude-haiku-4-5",
+        "--config",
+        "overlay.yml",
+        "--cwd",
+        "sandbox",
+        "--session-dir",
+        "omp-sessions",
+        "--no-session",
+        "--no-title",
+    ]
