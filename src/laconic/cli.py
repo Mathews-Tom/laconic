@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -110,7 +111,13 @@ from laconic.replay.engine import (
     replay_off,
 )
 from laconic.replay.equivalence import SessionEquivalence, compare_session
-from laconic.runtime.omp_installer import OmpInstallError, OmpInstallPlan
+from laconic.runtime.omp_installer import (
+    OBSERVE_OWNED_MARKER,
+    OMP_EXTENSION_FILENAME,
+    OMP_OWNED_MARKER,
+    OmpInstallError,
+    OmpInstallPlan,
+)
 from laconic.runtime.omp_installer import (
     apply_omp_install as apply_runtime_omp_install,
 )
@@ -126,6 +133,16 @@ from laconic.runtime.omp_installer import (
 from laconic.runtime.omp_installer import (
     preview_omp_uninstall as preview_runtime_omp_uninstall,
 )
+from laconic.runtime.operator import (
+    PurgePlan,
+    RuntimeStorageStatus,
+    apply_purge,
+    parse_duration,
+    preview_purge_older_than,
+    preview_purge_session,
+    runtime_storage_status,
+)
+from laconic.runtime.storage import UnsafeStoragePathError
 from laconic.study.analysis import MINIMUM_PARTICIPANTS
 from laconic.study.dryrun import DEFAULT_PARTICIPANT_COUNT, DryRunResult
 from laconic.study.dryrun import run as run_study_dry_run
@@ -162,6 +179,7 @@ EXIT_K1_STAGE_A_STOP = 22
 EXIT_K1_STAGE_B_TOTALS_MISMATCH = 23
 EXIT_K1_STAGE_C_INCOMPLETE = 24
 EXIT_OMP_INSTALL_ERROR = 25
+EXIT_RUNTIME_STORAGE_ERROR = 26
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -225,6 +243,35 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_omp.add_argument("--dry-run", action="store_true", help="preview only; never write")
     uninstall_omp.add_argument("--format", choices=["text", "json"], default="text")
     uninstall_omp.set_defaults(handler=_runtime_omp_uninstall)
+    status = subcommands.add_parser(
+        "status",
+        help="inspect OMP adapter and content-free runtime storage health",
+    )
+    status.add_argument("--profile", help="named OMP profile to inspect")
+    status.add_argument("--user-dir", type=Path, help="explicit user extension directory")
+    status.add_argument("--data-dir", type=Path, help="runtime storage root")
+    status.add_argument("--format", choices=["text", "json"], default="text")
+    status.set_defaults(handler=_runtime_status)
+
+    purge = subcommands.add_parser(
+        "purge",
+        help="explicitly delete selected runtime recovery ledgers",
+        description=(
+            "Delete one session ledger or whole ledgers older than a duration. "
+            "Uninstall never performs this operation."
+        ),
+    )
+    purge_selector = purge.add_mutually_exclusive_group(required=True)
+    purge_selector.add_argument("--session", help="exact OMP session id")
+    purge_selector.add_argument(
+        "--older-than",
+        metavar="DURATION",
+        help="positive duration such as 24h, 30d, or 4w",
+    )
+    purge.add_argument("--data-dir", type=Path, help="runtime storage root")
+    purge.add_argument("--dry-run", action="store_true", help="preview only; never delete")
+    purge.add_argument("--format", choices=["text", "json"], default="text")
+    purge.set_defaults(handler=_runtime_purge)
 
     measure = subcommands.add_parser(
         "measure",
@@ -701,6 +748,152 @@ def _runtime_omp_uninstall(args: argparse.Namespace) -> int:
     except (OmpInstallError, OSError) as error:
         print(f"laconic uninstall omp: {error}", file=sys.stderr)
         return EXIT_OMP_INSTALL_ERROR
+    return EXIT_OK
+
+
+def _runtime_adapter_state(directory: Path) -> str:
+    if not directory.exists():
+        return "not_installed"
+    if directory.is_symlink() or not directory.is_dir():
+        raise UnsafeStoragePathError(
+            f"OMP extension path is not an ordinary directory: {directory}"
+        )
+    target = directory / OMP_EXTENSION_FILENAME
+    markers = 0
+    for path in directory.iterdir():
+        if path.suffix not in (".ts", ".js"):
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise UnsafeStoragePathError(f"OMP extension entry is not an ordinary file: {path}")
+        source = path.read_text(encoding="utf-8")
+        if OMP_OWNED_MARKER in source or OBSERVE_OWNED_MARKER in source:
+            markers += 1
+    if markers > 1:
+        return "duplicate"
+    if target.exists():
+        source = target.read_text(encoding="utf-8")
+        return "installed" if OMP_OWNED_MARKER in source else "foreign_conflict"
+    return "conflicting_adapter" if markers else "not_installed"
+
+
+def _runtime_status_document(
+    storage: RuntimeStorageStatus,
+    *,
+    project_adapter: str,
+    user_adapter: str,
+) -> dict[str, object]:
+    return {
+        "project_adapter": project_adapter,
+        "user_adapter": user_adapter,
+        "engine_health": "active-session-only; use /laconic status in OMP",
+        "storage": {
+            "path": str(storage.root),
+            "exists": storage.exists,
+            "bytes": storage.storage_bytes,
+            "sessions": storage.sessions,
+            "eligible_observations": storage.eligible_observations,
+            "compressed_observations": storage.compressed_observations,
+            "pass_through_observations": storage.pass_through_observations,
+            "raw_chars": storage.raw_chars,
+            "visible_chars": storage.visible_chars,
+            "full_expansions": storage.full_expansions,
+            "span_expansions": storage.span_expansions,
+        },
+    }
+
+
+def _runtime_status(args: argparse.Namespace) -> int:
+    try:
+        if args.profile is not None and args.user_dir is not None:
+            raise OmpInstallError("--profile and --user-dir are mutually exclusive")
+        project_directory = runtime_omp_extensions_directory(
+            scope="project",
+            cwd=Path.cwd(),
+            home=Path.home(),
+        )
+        user_directory = runtime_omp_extensions_directory(
+            scope="user",
+            cwd=Path.cwd(),
+            home=Path.home(),
+            user_dir=args.user_dir,
+            profile=args.profile,
+        )
+        document = _runtime_status_document(
+            runtime_storage_status(args.data_dir),
+            project_adapter=_runtime_adapter_state(project_directory),
+            user_adapter=_runtime_adapter_state(user_directory),
+        )
+    except (OmpInstallError, UnsafeStoragePathError, sqlite3.Error, OSError) as error:
+        print(f"laconic status: {error}", file=sys.stderr)
+        return EXIT_RUNTIME_STORAGE_ERROR
+    if args.format == "json":
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return EXIT_OK
+    storage = document["storage"]
+    assert isinstance(storage, dict)
+    print("Laconic runtime status")
+    print(f"  project adapter: {document['project_adapter']}")
+    print(f"  user adapter: {document['user_adapter']}")
+    print(f"  engine health: {document['engine_health']}")
+    print(f"  storage: {storage['path']}")
+    print(f"  sessions: {storage['sessions']}")
+    print(
+        "  decisions: "
+        f"eligible={storage['eligible_observations']} "
+        f"compressed={storage['compressed_observations']} "
+        f"pass-through={storage['pass_through_observations']}"
+    )
+    print(f"  stored bytes: {storage['bytes']}")
+    print(f"  expansions: full={storage['full_expansions']} span={storage['span_expansions']}")
+    return EXIT_OK
+
+
+def _print_purge_plan(plan: PurgePlan, fmt: str, *, applied: bool, deleted_files: int) -> None:
+    document = {
+        "selector": plan.selector,
+        "storage": str(plan.root),
+        "targets": [path.name for path in plan.targets],
+        "sessions": len(plan.targets),
+        "reclaim_bytes": plan.reclaim_bytes,
+        "applied": applied,
+        "deleted_files": deleted_files,
+    }
+    if fmt == "json":
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return
+    state = "applied" if applied else "preview"
+    print(f"laconic purge ({state}): {plan.selector}")
+    print(f"  sessions: {len(plan.targets)}")
+    print(f"  reclaim bytes: {plan.reclaim_bytes}")
+    for target in plan.targets:
+        print(f"  [delete] {target.name}")
+
+
+def _runtime_purge(args: argparse.Namespace) -> int:
+    try:
+        if args.session is not None:
+            plan = preview_purge_session(args.session, args.data_dir)
+        else:
+            assert args.older_than is not None
+            seconds = parse_duration(args.older_than)
+            plan = preview_purge_older_than(
+                seconds,
+                args.data_dir,
+                selector=f"older-than={args.older_than}",
+            )
+        if args.dry_run:
+            _print_purge_plan(plan, args.format, applied=False, deleted_files=0)
+        else:
+            result = apply_purge(plan)
+            _print_purge_plan(
+                result.plan,
+                args.format,
+                applied=True,
+                deleted_files=result.deleted_files,
+            )
+    except (UnsafeStoragePathError, sqlite3.Error, OSError, ValueError) as error:
+        print(f"laconic purge: {error}", file=sys.stderr)
+        return EXIT_RUNTIME_STORAGE_ERROR
     return EXIT_OK
 
 
