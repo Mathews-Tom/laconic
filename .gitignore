@@ -209,6 +209,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Bun
+node_modules/
+
 # Private K1 remeasurement manifests and receipts
 .laconic/k1/
 
