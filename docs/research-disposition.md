@@ -35,7 +35,7 @@ The approved product tranche is:
 1. align public product authority;
 2. build a canonical session runtime and recovery protocol;
 3. integrate that runtime into OMP;
-4. qualify it through at least 10 completed real OMP sessions across 3 repositories and at least 100 eligible observations;
+4. ~~qualify it through at least 10 completed real OMP sessions across 3 repositories and at least 100 eligible observations~~ — completed, see `docs/runtime-beta-report.md`;
 5. prepare the bounded `v0.9.0` beta only when every safety criterion passes.
 
 This authorization does not include provider replay spend, external data collection, a confirmatory cohort, Claude Code integration, MCP, action rewriting, history compaction, hosted services, or universal savings claims.
