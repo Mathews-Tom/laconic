@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Added tool-result interception for successful single-text `read`, `bash`, `grep`, and `glob` results. Unsupported tools, errors, mixed/non-text content, failed requests, and non-smaller candidates remain byte-for-byte pass-through.
 - Added the read-only `laconic_expand` OMP tool, `/laconic status|pause|resume`, and operator commands for exact runtime expansion, content-free aggregate status, explicit session/age purge, and owned-only uninstall. Purge requires `--session` or `--older-than`; uninstall never invokes it.
 - Added `docs/omp-runtime.md`, the installation, recovery, control, uninstall, purge, and safety-boundary guide for the unreleased runtime candidate.
+- Added the M18 beta qualification surface (`laconic.beta`, `python -m laconic.beta`): a campaign manifest that freezes the contract *and* the population — one candidate wheel digest plus an explicit ten-slot-to-three-repository binding — privacy-allowlisted per-session receipts derived from a session's own runtime ledger with byte-for-byte re-verification of every emitted reference, and a deterministic aggregate report with a freshness check. Evidence that is empty, partial, duplicate, stale, mutated, or privacy-invalid is refused before any report renders, and no savings figure can influence the verdict.
+- Added `docs/runtime-beta-runbook.md` (how the campaign is frozen, run, and reported) and `docs/runtime-beta-report.md` (the campaign's generated report, committed verbatim). The runtime candidate passed qualification: ten completed OMP 18.1.10 sessions across three canonical Git roots, 137 eligible observations, every safety counter zero, latency 1.45 ms at p50 and 18.65 ms at p95, and 35.84% observed character reduction on that read-heavy agent-driven workload.
 
 ### Changed
 
@@ -21,6 +23,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Separated the runtime product gate from representative replay research. The committed fixture's 8.53% K1 result remains valid for that fixture and continues to bound general savings claims, but no longer blocks a safety-gated beta.
 - Reclassified Laconic Observe as supporting content-free diagnostics rather than the primary product surface, and recorded the terminal K1 Stage C replay disposition without authorizing another run or provider spend.
 - Reorganized the pre-1.0 CLI around product verbs. Offline evaluation is now under `laconic research`, and Observe is under `laconic diagnostics observe`. The former top-level research and diagnostic aliases were removed.
+
+### Fixed
+
+- Fixed `laconic status` and `laconic purge --older-than` failing for an entire runtime store when any one ledger's writer had been killed mid-transaction. Both opened each ledger read-only, and SQLite must roll a hot journal back before reading, which a read-only connection may not do — so the operator surfaces broke exactly after a crash, including the retention command that would clear the damaged session. Both reads now use a handle constrained by `PRAGMA query_only`, which recovers the journal and still refuses writes.
 
 ## [0.8.0] — 2026-08-27
 
