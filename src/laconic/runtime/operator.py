@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,10 +112,30 @@ def _file_bytes(path: Path) -> int:
     return path.stat().st_size
 
 
-def _read_metrics(path: Path) -> tuple[int, int, int, int, int, int, int]:
-    uri = f"{path.as_uri()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as database:
+def _query_only(path: Path) -> sqlite3.Connection:
+    """Open one ledger for reading without granting this connection writes.
+
+    A ``mode=ro`` URI cannot read a ledger whose writer died mid-transaction:
+    SQLite must roll the hot journal back before any read, and a read-only
+    connection is not allowed to, so every query fails with "attempt to write
+    a readonly database". That is exactly the state a killed engine leaves
+    behind, which made `status` and `purge --older-than` unusable on a store
+    containing one crashed session -- the moment an operator most needs them.
+
+    An ordinary handle constrained by ``PRAGMA query_only`` recovers the
+    journal and still refuses every write from this connection.
+    """
+    database = sqlite3.connect(path)
+    try:
         database.execute("PRAGMA query_only = ON")
+    except BaseException:
+        database.close()
+        raise
+    return database
+
+
+def _read_metrics(path: Path) -> tuple[int, int, int, int, int, int, int]:
+    with closing(_query_only(path)) as database:
         decisions = database.execute(
             "SELECT count(*), "
             "coalesce(sum(CASE WHEN outcome = 'emitted' THEN 1 ELSE 0 END), 0), "
@@ -193,9 +214,7 @@ def preview_purge_session(session_id: str, data_dir: Path | None = None) -> Purg
 
 
 def _last_activity(path: Path) -> float:
-    uri = f"{path.as_uri()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as database:
-        database.execute("PRAGMA query_only = ON")
+    with closing(_query_only(path)) as database:
         row = database.execute(
             "SELECT max(created_at) FROM ("
             "SELECT created_at FROM observations UNION ALL "

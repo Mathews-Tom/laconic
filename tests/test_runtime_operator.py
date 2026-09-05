@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,74 @@ from laconic.runtime.operator import (
     preview_purge_session,
     runtime_storage_status,
 )
-from laconic.runtime.storage import RuntimeStorage, UnsafeStoragePathError
+from laconic.runtime.storage import (
+    RuntimeStorage,
+    UnsafeStoragePathError,
+    resolve_data_dir,
+    session_ledger_path,
+)
+
+
+def _abandon_writer_mid_transaction(ledger: Path) -> None:
+    """Leave a genuinely hot rollback journal behind, as a killed engine does.
+
+    A tiny page cache forces the uncommitted rows out to the journal before the
+    writer disappears without unwinding its transaction, so the next reader
+    must roll that journal back before it can read anything.
+    """
+    rows = "[(900 + i, 'x' * 400 + str(i)) for i in range(4000)]"
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sqlite3\n"
+            f"db = sqlite3.connect({str(ledger)!r})\n"
+            "db.execute('PRAGMA cache_size = 2')\n"
+            "db.execute('BEGIN IMMEDIATE')\n"
+            "db.executemany('INSERT INTO runtime_decisions (session_id, sequence, "
+            "request_id, tool_name, outcome, reason, candidate_reference, raw_chars, "
+            "visible_chars, latency_ms, created_at) VALUES (\\'crashed\\', ?, ?, \\'Read\\', "
+            "\\'pass_through\\', \\'not_smaller\\', NULL, 5, 5, 1.0, 101.0)', "
+            f"{rows})\n"
+            "os._exit(0)\n",
+        ],
+        check=True,
+    )
+    assert Path(f"{ledger}-journal").exists()
+
+
+def test_status_and_retention_survive_a_ledger_whose_writer_was_killed(
+    tmp_path: Path,
+) -> None:
+    """A crashed engine leaves a hot journal. Both read-only operator surfaces
+    must still work: a read-only SQLite handle cannot roll that journal back,
+    so one crashed session used to break `status` and `purge --older-than` for
+    the whole store."""
+    root = tmp_path / "data"
+    storage = RuntimeStorage(root)
+    with storage.open_ledger("crashed") as ledger:
+        ledger.record_runtime_decision(
+            sequence=0,
+            request_id="encode-a",
+            tool_name="Read",
+            outcome="emitted",
+            reason="smaller_envelope",
+            candidate_reference="crashed/F1",
+            raw_chars=100,
+            visible_chars=40,
+            latency_ms=2,
+            created_at=100.0,
+        )
+    _abandon_writer_mid_transaction(session_ledger_path("crashed", resolve_data_dir(root)))
+
+    status = runtime_storage_status(root)
+    plan = preview_purge_older_than(60, root, now=1_000.0)
+
+    # The abandoned transaction rolled back, so only the committed decision counts.
+    assert status.sessions == 1
+    assert status.eligible_observations == 1
+    assert status.compressed_observations == 1
+    assert plan.targets == (session_ledger_path("crashed", resolve_data_dir(root)),)
 
 
 def test_status_on_absent_storage_is_empty_and_does_not_create_it(tmp_path: Path) -> None:
