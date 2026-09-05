@@ -130,4 +130,15 @@ laconic diagnostics observe ...
 
 ## Safety and evidence boundary
 
-The runtime reports character counts because it compares exact strings at the tool boundary. Character reduction is not a token, cost, cache, or behavior claim. General savings remain governed by representative paired research. Release remains blocked until M18 completes the predeclared real-OMP qualification and the human review gate is signed.
+The runtime reports character counts because it compares exact strings at the tool boundary. Character reduction is not a token, cost, cache, or behavior claim. General savings remain governed by representative paired research.
+
+## Beta qualification result
+
+The predeclared qualification campaign completed and its report is committed verbatim at [`docs/runtime-beta-report.md`](runtime-beta-report.md). It was generated from per-session receipts by `python -m laconic.beta report generate`, and `report check` refuses a committed report that has drifted from its evidence. Read that report with these facts about how it was produced:
+
+- **Campaign.** Ten OMP 18.1.10 sessions, all reaching a clean `session_shutdown`, across three canonical Git roots, producing 137 observations the codec actually evaluated. Every safety counter is zero: no emitted reference failed exact recovery, no tool error was compressed, no envelope was larger than its raw content, and no result corruption was observed.
+- **Sessions were agent-driven.** Nine sessions ran headless (`omp -p`) and one interactively, all performing read-only repository investigation under an automated prompt rather than a human's own coding work. Ledger contents are genuine engine output; the work those sessions performed is narrower than general daily use.
+- **Repositories were local clones** of three unrelated projects pinned at fixed commits, not live working checkouts.
+- **The observed 35.84% character reduction is descriptive of that workload only.** Read-heavy investigation is the shape the codec handles best; 96 of 137 eligible observations were still passed through unchanged because their envelope would not have been smaller. No minimum savings figure gates the beta, and none is claimed.
+- **Faults were injected deliberately** — absent interpreter, non-executable interpreter, engine killed mid-session, one malformed protocol frame, and one response stalled past the 250 ms deadline. In every case the host returned the original observation and the session completed; measured latency was 1.45 ms at p50 and 18.65 ms at p95.
+- **The qualified wheel predates one fix.** The campaign's crash scenarios exposed a defect in `laconic status` and `laconic purge --older-than`, which could not read a ledger whose writer had been killed. That fix landed after the candidate wheel was frozen, so the wheel the beta ships must include it.
