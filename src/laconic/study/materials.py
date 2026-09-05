@@ -9,7 +9,7 @@ exposed in the two conditions the study compares:
 
 - :attr:`TraceMaterial.raw_text` -- the full, unelided trace a raw-trace
   reader sees, turn by turn.
-- :attr:`TraceMaterial.rendered_text` -- exactly what ``laconic view`` would
+- :attr:`TraceMaterial.rendered_text` -- exactly what ``laconic research view`` would
   print: :func:`laconic.render.templates.render`'s provenance-tagged
   structural facts, plus a narration block via
   :func:`laconic.render.templates.render_narration`. This exercises the same
@@ -123,7 +123,7 @@ def _build_task(
     not a per-task running index. A global index would mint a second
     observation's handle as e.g. ``B2`` whenever it differs in kind from the
     first, where the real ledger mints ``B1``; since the rendered condition
-    exists specifically to show participants what ``laconic view`` actually
+    exists specifically to show participants what ``laconic research view`` actually
     renders, a handle scheme the product never produces would be a defect in
     the measurement instrument itself.
     """

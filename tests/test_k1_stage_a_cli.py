@@ -1,4 +1,4 @@
-"""End-to-end test for `laconic k1 stage-a scan` via `laconic.cli`, and a
+"""End-to-end test for `laconic research k1 stage-a scan` via `laconic.cli`, and a
 direct test of `scan_all_providers`'s test-only `home`/`roots` overrides.
 No test touches a real `~/.claude`/`~/.codex`/`~/.omp` path."""
 
@@ -59,7 +59,7 @@ def test_k1_stage_a_scan_cli_writes_ledger_and_returns_stop_exit_code(
 
     parser = build_parser()
     out_path = tmp_path / "ledger.json"
-    args = parser.parse_args(["k1", "stage-a", "scan", "--out", str(out_path)])
+    args = parser.parse_args(["research", "k1", "stage-a", "scan", "--out", str(out_path)])
     exit_code = args.handler(args)
 
     assert exit_code == EXIT_K1_STAGE_A_STOP
@@ -71,6 +71,8 @@ def test_k1_stage_a_scan_cli_writes_ledger_and_returns_stop_exit_code(
 
 def test_k1_stage_a_scan_cli_parses_nested_subcommands() -> None:
     parser = build_parser()
-    namespace = parser.parse_args(["k1", "stage-a", "scan", "--out", "/tmp/does-not-run.json"])
+    namespace = parser.parse_args(
+        ["research", "k1", "stage-a", "scan", "--out", "/tmp/does-not-run.json"]
+    )
     assert namespace.k1_command == "stage-a"
     assert namespace.k1_stage_a_command == "scan"

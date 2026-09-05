@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -110,7 +111,13 @@ from laconic.replay.engine import (
     replay_off,
 )
 from laconic.replay.equivalence import SessionEquivalence, compare_session
-from laconic.runtime.omp_installer import OmpInstallError, OmpInstallPlan
+from laconic.runtime.omp_installer import (
+    OBSERVE_OWNED_MARKER,
+    OMP_EXTENSION_FILENAME,
+    OMP_OWNED_MARKER,
+    OmpInstallError,
+    OmpInstallPlan,
+)
 from laconic.runtime.omp_installer import (
     apply_omp_install as apply_runtime_omp_install,
 )
@@ -125,6 +132,22 @@ from laconic.runtime.omp_installer import (
 )
 from laconic.runtime.omp_installer import (
     preview_omp_uninstall as preview_runtime_omp_uninstall,
+)
+from laconic.runtime.operator import (
+    PurgePlan,
+    RuntimeStorageStatus,
+    apply_purge,
+    parse_duration,
+    preview_purge_older_than,
+    preview_purge_session,
+    runtime_storage_status,
+)
+from laconic.runtime.references import InvalidRuntimeReferenceError
+from laconic.runtime.storage import (
+    RuntimeStorage,
+    SessionLedgerNotFoundError,
+    UnsafeStoragePathError,
+    resolve_data_dir,
 )
 from laconic.study.analysis import MINIMUM_PARTICIPANTS
 from laconic.study.dryrun import DEFAULT_PARTICIPANT_COUNT, DryRunResult
@@ -162,6 +185,8 @@ EXIT_K1_STAGE_A_STOP = 22
 EXIT_K1_STAGE_B_TOTALS_MISMATCH = 23
 EXIT_K1_STAGE_C_INCOMPLETE = 24
 EXIT_OMP_INSTALL_ERROR = 25
+EXIT_RUNTIME_STORAGE_ERROR = 26
+EXIT_RUNTIME_REFERENCE_ERROR = 27
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -225,8 +250,56 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_omp.add_argument("--dry-run", action="store_true", help="preview only; never write")
     uninstall_omp.add_argument("--format", choices=["text", "json"], default="text")
     uninstall_omp.set_defaults(handler=_runtime_omp_uninstall)
+    status = subcommands.add_parser(
+        "status",
+        help="inspect OMP adapter and content-free runtime storage health",
+    )
+    status.add_argument("--profile", help="named OMP profile to inspect")
+    status.add_argument("--user-dir", type=Path, help="explicit user extension directory")
+    status.add_argument("--data-dir", type=Path, help="runtime storage root")
+    status.add_argument("--format", choices=["text", "json"], default="text")
+    status.set_defaults(handler=_runtime_status)
 
-    measure = subcommands.add_parser(
+    purge = subcommands.add_parser(
+        "purge",
+        help="explicitly delete selected runtime recovery ledgers",
+        description=(
+            "Delete one session ledger or whole ledgers older than a duration. "
+            "Uninstall never performs this operation."
+        ),
+    )
+    purge_selector = purge.add_mutually_exclusive_group(required=True)
+    purge_selector.add_argument("--session", help="exact OMP session id")
+    purge_selector.add_argument(
+        "--older-than",
+        metavar="DURATION",
+        help="positive duration such as 24h, 30d, or 4w",
+    )
+    purge.add_argument("--data-dir", type=Path, help="runtime storage root")
+    purge.add_argument("--dry-run", action="store_true", help="preview only; never delete")
+    purge.add_argument("--format", choices=["text", "json"], default="text")
+    purge.set_defaults(handler=_runtime_purge)
+    expand = subcommands.add_parser(
+        "expand",
+        help="recover full or spanned text from a runtime reference",
+    )
+    expand.add_argument("reference", metavar="SESSION/HANDLE[:FIRST-LAST]")
+    expand.add_argument("--data-dir", type=Path, help="runtime storage root")
+    expand.set_defaults(handler=_runtime_expand)
+
+    research = subcommands.add_parser(
+        "research",
+        help="offline measurement, replay, evaluation, and K1 research tools",
+    )
+    research_subcommands = research.add_subparsers(dest="research_command")
+
+    diagnostics = subcommands.add_parser(
+        "diagnostics",
+        help="local diagnostic collection and audit tools",
+    )
+    diagnostics_subcommands = diagnostics.add_subparsers(dest="diagnostics_command")
+
+    measure = research_subcommands.add_parser(
         "measure",
         help="channel decomposition and cost split of real sessions",
         description=(
@@ -260,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     measure.set_defaults(handler=_measure)
 
-    replay = subcommands.add_parser(
+    replay = research_subcommands.add_parser(
         "replay",
         help="counterfactual cost and action equivalence, codec on vs off",
         description=(
@@ -324,7 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay.set_defaults(handler=_replay)
 
-    gates = subcommands.add_parser(
+    gates = research_subcommands.add_parser(
         "gates",
         help="run product evaluation criteria and print pass/fail",
         description="Evaluate the codec against committed transcript-corpus fixtures.",
@@ -348,20 +421,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gates.set_defaults(handler=_gates)
 
-    expand = subcommands.add_parser(
+    research_expand = research_subcommands.add_parser(
         "expand",
         help="resolve a ledger handle or line span from a transcript corpus",
     )
-    expand.add_argument("reference", metavar="HANDLE[:FIRST-LAST]")
-    expand.add_argument(
+    research_expand.add_argument("reference", metavar="HANDLE[:FIRST-LAST]")
+    research_expand.add_argument(
         "--corpus",
         type=Path,
         default=DEFAULT_CORPUS,
-        help=f"directory containing session transcripts (default: {DEFAULT_CORPUS})",
+        help=f"session transcript corpus (default: {DEFAULT_CORPUS})",
     )
-    expand.set_defaults(handler=_expand)
+    research_expand.set_defaults(handler=_research_expand)
 
-    view = subcommands.add_parser(
+    view = research_subcommands.add_parser(
         "view",
         help="render a structural trace from a transcript corpus",
     )
@@ -405,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     view.set_defaults(handler=_view)
 
-    study = subcommands.add_parser(
+    study = research_subcommands.add_parser(
         "study",
         help="human-study harness (docs/system-design.md §4.1)",
     )
@@ -435,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     study_dry_run.set_defaults(handler=_study_dry_run)
 
-    observe = subcommands.add_parser(
+    observe = diagnostics_subcommands.add_parser(
         "observe",
         help="local, content-free hook receipts and audit (docs/observe-design.md)",
     )
@@ -499,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
     observe_report.add_argument("--format", choices=["text", "json"], default="text")
     observe_report.set_defaults(handler=_observe_report)
 
-    k1 = subcommands.add_parser("k1", help="K1 representative-corpus governance tooling")
+    k1 = research_subcommands.add_parser("k1", help="K1 representative-corpus governance tooling")
     k1_subcommands = k1.add_subparsers(dest="k1_command")
     k1_stage_a = k1_subcommands.add_parser("stage-a", help="Stage A metadata feasibility screening")
     k1_stage_a_subcommands = k1_stage_a.add_subparsers(dest="k1_stage_a_command")
@@ -704,10 +777,182 @@ def _runtime_omp_uninstall(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _runtime_expand(args: argparse.Namespace) -> int:
+    try:
+        root = resolve_data_dir(args.data_dir)
+        sessions = root / "sessions"
+        if not root.is_dir() or root.is_symlink() or not sessions.is_dir() or sessions.is_symlink():
+            raise SessionLedgerNotFoundError("runtime storage does not exist")
+        content = RuntimeStorage(root).expand(args.reference)
+    except InvalidRuntimeReferenceError:
+        print("laconic expand: invalid runtime reference", file=sys.stderr)
+        return EXIT_RUNTIME_REFERENCE_ERROR
+    except SessionLedgerNotFoundError:
+        print("laconic expand: runtime session does not exist", file=sys.stderr)
+        return EXIT_RUNTIME_REFERENCE_ERROR
+    except UnknownHandleError:
+        print("laconic expand: runtime handle does not exist", file=sys.stderr)
+        return EXIT_RUNTIME_REFERENCE_ERROR
+    except InvalidSpanError:
+        print("laconic expand: invalid runtime span", file=sys.stderr)
+        return EXIT_RUNTIME_REFERENCE_ERROR
+    except (UnsafeStoragePathError, sqlite3.Error, OSError):
+        print("laconic expand: runtime storage failure", file=sys.stderr)
+        return EXIT_RUNTIME_REFERENCE_ERROR
+    sys.stdout.write(content)
+    return EXIT_OK
+
+
+def _runtime_adapter_state(directory: Path) -> str:
+    if not directory.exists():
+        return "not_installed"
+    if directory.is_symlink() or not directory.is_dir():
+        raise UnsafeStoragePathError(
+            f"OMP extension path is not an ordinary directory: {directory}"
+        )
+    target = directory / OMP_EXTENSION_FILENAME
+    markers = 0
+    for path in directory.iterdir():
+        if path.suffix not in (".ts", ".js"):
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise UnsafeStoragePathError(f"OMP extension entry is not an ordinary file: {path}")
+        source = path.read_text(encoding="utf-8")
+        if OMP_OWNED_MARKER in source or OBSERVE_OWNED_MARKER in source:
+            markers += 1
+    if markers > 1:
+        return "duplicate"
+    if target.exists():
+        source = target.read_text(encoding="utf-8")
+        return "installed" if OMP_OWNED_MARKER in source else "foreign_conflict"
+    return "conflicting_adapter" if markers else "not_installed"
+
+
+def _runtime_status_document(
+    storage: RuntimeStorageStatus,
+    *,
+    project_adapter: str,
+    user_adapter: str,
+) -> dict[str, object]:
+    return {
+        "project_adapter": project_adapter,
+        "user_adapter": user_adapter,
+        "engine_health": "active-session-only; use /laconic status in OMP",
+        "storage": {
+            "path": str(storage.root),
+            "exists": storage.exists,
+            "bytes": storage.storage_bytes,
+            "sessions": storage.sessions,
+            "eligible_observations": storage.eligible_observations,
+            "compressed_observations": storage.compressed_observations,
+            "pass_through_observations": storage.pass_through_observations,
+            "raw_chars": storage.raw_chars,
+            "visible_chars": storage.visible_chars,
+            "full_expansions": storage.full_expansions,
+            "span_expansions": storage.span_expansions,
+        },
+    }
+
+
+def _runtime_status(args: argparse.Namespace) -> int:
+    try:
+        if args.profile is not None and args.user_dir is not None:
+            raise OmpInstallError("--profile and --user-dir are mutually exclusive")
+        project_directory = runtime_omp_extensions_directory(
+            scope="project",
+            cwd=Path.cwd(),
+            home=Path.home(),
+        )
+        user_directory = runtime_omp_extensions_directory(
+            scope="user",
+            cwd=Path.cwd(),
+            home=Path.home(),
+            user_dir=args.user_dir,
+            profile=args.profile,
+        )
+        document = _runtime_status_document(
+            runtime_storage_status(args.data_dir),
+            project_adapter=_runtime_adapter_state(project_directory),
+            user_adapter=_runtime_adapter_state(user_directory),
+        )
+    except (OmpInstallError, UnsafeStoragePathError, sqlite3.Error, OSError) as error:
+        print(f"laconic status: {error}", file=sys.stderr)
+        return EXIT_RUNTIME_STORAGE_ERROR
+    if args.format == "json":
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return EXIT_OK
+    storage = document["storage"]
+    assert isinstance(storage, dict)
+    print("Laconic runtime status")
+    print(f"  project adapter: {document['project_adapter']}")
+    print(f"  user adapter: {document['user_adapter']}")
+    print(f"  engine health: {document['engine_health']}")
+    print(f"  storage: {storage['path']}")
+    print(f"  sessions: {storage['sessions']}")
+    print(
+        "  decisions: "
+        f"eligible={storage['eligible_observations']} "
+        f"compressed={storage['compressed_observations']} "
+        f"pass-through={storage['pass_through_observations']}"
+    )
+    print(f"  stored bytes: {storage['bytes']}")
+    print(f"  expansions: full={storage['full_expansions']} span={storage['span_expansions']}")
+    return EXIT_OK
+
+
+def _print_purge_plan(plan: PurgePlan, fmt: str, *, applied: bool, deleted_files: int) -> None:
+    document = {
+        "selector": plan.selector,
+        "storage": str(plan.root),
+        "targets": [path.name for path in plan.targets],
+        "sessions": len(plan.targets),
+        "reclaim_bytes": plan.reclaim_bytes,
+        "applied": applied,
+        "deleted_files": deleted_files,
+    }
+    if fmt == "json":
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return
+    state = "applied" if applied else "preview"
+    print(f"laconic purge ({state}): {plan.selector}")
+    print(f"  sessions: {len(plan.targets)}")
+    print(f"  reclaim bytes: {plan.reclaim_bytes}")
+    for target in plan.targets:
+        print(f"  [delete] {target.name}")
+
+
+def _runtime_purge(args: argparse.Namespace) -> int:
+    try:
+        if args.session is not None:
+            plan = preview_purge_session(args.session, args.data_dir)
+        else:
+            assert args.older_than is not None
+            seconds = parse_duration(args.older_than)
+            plan = preview_purge_older_than(
+                seconds,
+                args.data_dir,
+                selector=f"older-than={args.older_than}",
+            )
+        if args.dry_run:
+            _print_purge_plan(plan, args.format, applied=False, deleted_files=0)
+        else:
+            result = apply_purge(plan)
+            _print_purge_plan(
+                result.plan,
+                args.format,
+                applied=True,
+                deleted_files=result.deleted_files,
+            )
+    except (UnsafeStoragePathError, sqlite3.Error, OSError, ValueError) as error:
+        print(f"laconic purge: {error}", file=sys.stderr)
+        return EXIT_RUNTIME_STORAGE_ERROR
+    return EXIT_OK
+
+
 def _measure(args: argparse.Namespace) -> int:
     if args.report is not None and args.codec != "on":
         print(
-            f"laconic measure: --report {args.report} requires --codec on",
+            f"laconic research measure: --report {args.report} requires --codec on",
             file=sys.stderr,
         )
         return EXIT_REPORT_REQUIRES_CODEC
@@ -716,13 +961,13 @@ def _measure(args: argparse.Namespace) -> int:
     try:
         result = scan_corpus(paths)
     except EmptyCorpusError as error:
-        print(f"laconic measure: {error}", file=sys.stderr)
+        print(f"laconic research measure: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
     except MalformedRecordError as error:
-        print(f"laconic measure: {error}", file=sys.stderr)
+        print(f"laconic research measure: {error}", file=sys.stderr)
         return EXIT_MALFORMED_RECORD
     except OSError as error:
-        print(f"laconic measure: cannot read the corpus: {error}", file=sys.stderr)
+        print(f"laconic research measure: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
 
     print(f"Scanning {result.transcripts} session transcripts...\n")
@@ -752,11 +997,11 @@ def _measure(args: argparse.Namespace) -> int:
 
 def _replay(args: argparse.Namespace) -> int:
     if args.assert_baseline and args.codec != "off":
-        print("laconic replay: --assert-baseline requires --codec off", file=sys.stderr)
+        print("laconic research replay: --assert-baseline requires --codec off", file=sys.stderr)
         return EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF
 
     if args.mode == "live" and args.codec != "on":
-        print("laconic replay: --mode live requires --codec on", file=sys.stderr)
+        print("laconic research replay: --mode live requires --codec on", file=sys.stderr)
         return EXIT_LIVE_CONFIG_ERROR
 
     live_only_flags_given = any(
@@ -764,7 +1009,8 @@ def _replay(args: argparse.Namespace) -> int:
     )
     if live_only_flags_given and args.mode != "live":
         print(
-            "laconic replay: --model/--cost-cap/--artifact-dir/--client require --mode live",
+            "laconic research replay: --model/--cost-cap/--artifact-dir/--client "
+            "require --mode live",
             file=sys.stderr,
         )
         return EXIT_LIVE_CONFIG_ERROR
@@ -779,18 +1025,21 @@ def _replay_off_cli(paths: list[Path], args: argparse.Namespace) -> int:
     try:
         sessions = replay_off(paths)
     except EmptyCorpusError as error:
-        print(f"laconic replay: {error}", file=sys.stderr)
+        print(f"laconic research replay: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
     except MalformedRecordError as error:
-        print(f"laconic replay: {error}", file=sys.stderr)
+        print(f"laconic research replay: {error}", file=sys.stderr)
         return EXIT_MALFORMED_RECORD
     except OSError as error:
-        print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+        print(f"laconic research replay: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
 
     if not sessions:
         listed = ", ".join(str(path) for path in paths)
-        print(f"laconic replay: no *.jsonl transcripts found under {listed}", file=sys.stderr)
+        print(
+            f"laconic research replay: no *.jsonl transcripts found under {listed}",
+            file=sys.stderr,
+        )
         return EXIT_NO_CORPUS
 
     _warn_unpriced_models([session.path for session in sessions])
@@ -799,7 +1048,7 @@ def _replay_off_cli(paths: list[Path], args: argparse.Namespace) -> int:
         try:
             assert_baseline(sessions)
         except BaselineMismatchError as error:
-            print(f"laconic replay: {error}", file=sys.stderr)
+            print(f"laconic research replay: {error}", file=sys.stderr)
             return EXIT_BASELINE_MISMATCH
 
     if args.format == "json":
@@ -818,15 +1067,18 @@ def _replay_on_cli(paths: list[Path], args: argparse.Namespace) -> int:
     try:
         baselines = find_baseline_transcripts(paths)
     except EmptyCorpusError as error:
-        print(f"laconic replay: {error}", file=sys.stderr)
+        print(f"laconic research replay: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
     except OSError as error:
-        print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+        print(f"laconic research replay: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
 
     if not baselines:
         listed = ", ".join(str(path) for path in paths)
-        print(f"laconic replay: no *.jsonl transcripts found under {listed}", file=sys.stderr)
+        print(
+            f"laconic research replay: no *.jsonl transcripts found under {listed}",
+            file=sys.stderr,
+        )
         return EXIT_NO_CORPUS
 
     if args.mode == "live":
@@ -842,13 +1094,13 @@ def _replay_on_recorded_cli(baselines: list[Path], args: argparse.Namespace) -> 
             session = load_recorded_response(baseline)
             entry_or_code = _score_session(baseline, session)
         except MissingRecordedResponseError as error:
-            print(f"laconic replay: {error}", file=sys.stderr)
+            print(f"laconic research replay: {error}", file=sys.stderr)
             return EXIT_MISSING_RECORDED_RESPONSE
         except MalformedRecordError as error:
-            print(f"laconic replay: {error}", file=sys.stderr)
+            print(f"laconic research replay: {error}", file=sys.stderr)
             return EXIT_MALFORMED_RECORD
         except OSError as error:
-            print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+            print(f"laconic research replay: cannot read the corpus: {error}", file=sys.stderr)
             return EXIT_NO_CORPUS
         if isinstance(entry_or_code, int):
             return entry_or_code
@@ -872,7 +1124,7 @@ def _replay_on_live_cli(baselines: list[Path], args: argparse.Namespace) -> int:
     )
     if missing_live_config:
         print(
-            "laconic replay: --mode live requires --model, --cost-cap, "
+            "laconic research replay: --mode live requires --model, --cost-cap, "
             "--artifact-dir, and --client",
             file=sys.stderr,
         )
@@ -881,13 +1133,16 @@ def _replay_on_live_cli(baselines: list[Path], args: argparse.Namespace) -> int:
     try:
         client = _load_client(args.client)
     except (ImportError, AttributeError, TypeError, ValueError) as error:
-        print(f"laconic replay: cannot load --client {args.client!r}: {error}", file=sys.stderr)
+        print(
+            f"laconic research replay: cannot load --client {args.client!r}: {error}",
+            file=sys.stderr,
+        )
         return EXIT_CLIENT_IMPORT_ERROR
 
     try:
         config = LiveReplayConfig(model=args.model, cost_cap_usd=args.cost_cap, client=client)
     except LiveModeConfigError as error:
-        print(f"laconic replay: {error}", file=sys.stderr)
+        print(f"laconic research replay: {error}", file=sys.stderr)
         return EXIT_LIVE_CONFIG_ERROR
 
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -902,13 +1157,13 @@ def _replay_on_live_cli(baselines: list[Path], args: argparse.Namespace) -> int:
             )
             entry_or_code = _score_session(baseline, session, include_indices=set(observations))
         except CostCapExceededError as error:
-            print(f"laconic replay: {error}", file=sys.stderr)
+            print(f"laconic research replay: {error}", file=sys.stderr)
             return EXIT_COST_CAP_EXCEEDED
         except MalformedRecordError as error:
-            print(f"laconic replay: {error}", file=sys.stderr)
+            print(f"laconic research replay: {error}", file=sys.stderr)
             return EXIT_MALFORMED_RECORD
         except OSError as error:
-            print(f"laconic replay: cannot read the corpus: {error}", file=sys.stderr)
+            print(f"laconic research replay: cannot read the corpus: {error}", file=sys.stderr)
             return EXIT_NO_CORPUS
         if isinstance(entry_or_code, int):
             return entry_or_code
@@ -933,9 +1188,9 @@ def _score_session(
     response ``session``, or return an exit code on a comparison defect.
 
     A comparison-length mismatch is a malformed fixture, not a crash-worthy
-    bug: it is reported through the normal ``laconic replay: ...`` stderr
-    convention and mapped to :data:`EXIT_MISMATCH`, the same code
-    ``laconic measure`` uses for a comparison that found a real drift.
+    bug: it is reported through the normal ``laconic research replay: ...``
+    stderr convention and mapped to :data:`EXIT_MISMATCH`, the same code
+    ``laconic research measure`` uses for a comparison that found a real drift.
 
     ``include_indices``, when given, restricts the baseline action
     sequence to exactly the turn indices ``session`` actually covers --
@@ -957,7 +1212,7 @@ def _score_session(
     try:
         equivalence = compare_session(baseline_actions, session.non_induced_actions)
     except ValueError as error:
-        print(f"laconic replay: {baseline}: {error}", file=sys.stderr)
+        print(f"laconic research replay: {baseline}: {error}", file=sys.stderr)
         return EXIT_MISMATCH
     return (baseline, report, equivalence)
 
@@ -1053,7 +1308,7 @@ def _build_observations(baseline: Path, *, codec: Literal["on", "off"]) -> dict[
 
 
 def _warn_unpriced_models(paths: Sequence[Path]) -> None:
-    """Print the same "no published price" warning ``laconic measure``
+    """Print the same "no published price" warning ``laconic research measure``
     does, for every model actually billed across ``paths``.
 
     ``codec="on"`` net cost is a subtraction between a baseline and a
@@ -1161,22 +1416,22 @@ def _gates(args: argparse.Namespace) -> int:
     try:
         suite = run_gates([args.corpus], only=only)
     except UnknownGateError as error:
-        print(f"laconic gates: {error}", file=sys.stderr)
+        print(f"laconic research gates: {error}", file=sys.stderr)
         return EXIT_UNKNOWN_GATE
     except EmptyCorpusError as error:
-        print(f"laconic gates: {error}", file=sys.stderr)
+        print(f"laconic research gates: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
     except MissingRecordedResponseError as error:
-        print(f"laconic gates: {error}", file=sys.stderr)
+        print(f"laconic research gates: {error}", file=sys.stderr)
         return EXIT_MISSING_RECORDED_RESPONSE
     except MalformedRecordError as error:
-        print(f"laconic gates: {error}", file=sys.stderr)
+        print(f"laconic research gates: {error}", file=sys.stderr)
         return EXIT_MALFORMED_RECORD
     except ReasoningAccuracyFixtureError as error:
-        print(f"laconic gates: {error}", file=sys.stderr)
+        print(f"laconic research gates: {error}", file=sys.stderr)
         return EXIT_REASONING_ACCURACY_FIXTURE
     except OSError as error:
-        print(f"laconic gates: cannot read the corpus: {error}", file=sys.stderr)
+        print(f"laconic research gates: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
 
     if args.format == "json":
@@ -1186,7 +1441,7 @@ def _gates(args: argparse.Namespace) -> int:
     return suite.exit_code
 
 
-def _expand(args: argparse.Namespace) -> int:
+def _research_expand(args: argparse.Namespace) -> int:
     try:
         fixture = load_fixture_ledger([args.corpus])
     except (MalformedRecordError, UnmatchedToolResultError) as error:
@@ -1216,21 +1471,21 @@ def _view(args: argparse.Namespace) -> int:
     try:
         fixture = load_fixture_ledger([args.corpus])
     except (MalformedRecordError, UnmatchedToolResultError) as error:
-        print(f"laconic view: malformed transcript: {error}", file=sys.stderr)
+        print(f"laconic research view: malformed transcript: {error}", file=sys.stderr)
         return EXIT_MALFORMED_RECORD
     except UnsupportedToolResultError as error:
-        print(f"laconic view: unsupported tool result: {error}", file=sys.stderr)
+        print(f"laconic research view: unsupported tool result: {error}", file=sys.stderr)
         return EXIT_RENDER_TRACE
     except EmptyCorpusError as error:
-        print(f"laconic view: {error}", file=sys.stderr)
+        print(f"laconic research view: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
     except OSError as error:
-        print(f"laconic view: cannot read the corpus: {error}", file=sys.stderr)
+        print(f"laconic research view: cannot read the corpus: {error}", file=sys.stderr)
         return EXIT_NO_CORPUS
     try:
         first_turn, last_turn = args.turns
         if args.deterministic_only:
-            print("laconic view: deterministic-only mode", file=sys.stderr)
+            print("laconic research view: deterministic-only mode", file=sys.stderr)
         provider = None
         if not args.deterministic_only:
             try:
@@ -1243,14 +1498,18 @@ def _view(args: argparse.Namespace) -> int:
                     )
                 )
             except NarrationConfigurationError as error:
-                print(f"laconic view: invalid narration provider: {error}", file=sys.stderr)
+                print(
+                    f"laconic research view: invalid narration provider: {error}",
+                    file=sys.stderr,
+                )
                 return EXIT_NARRATION_CONFIG
-        print(f"laconic view: source transcript: {fixture.transcript}", file=sys.stderr)
+        print(f"laconic research view: source transcript: {fixture.transcript}", file=sys.stderr)
         entries = assemble(fixture.ledger, first_turn, last_turn)
         output = render(entries)
         if not output:
             print(
-                f"laconic view: no observations in requested turn range {first_turn}-{last_turn}",
+                "laconic research view: no observations in requested turn range "
+                f"{first_turn}-{last_turn}",
                 file=sys.stderr,
             )
             return EXIT_RENDER_TRACE
@@ -1260,11 +1519,14 @@ def _view(args: argparse.Namespace) -> int:
                 narration = provider.narrate(entries)
             except NarrationUnavailableError as error:
                 print(
-                    f"laconic view: {error}; showing deterministic output",
+                    f"laconic research view: {error}; showing deterministic output",
                     file=sys.stderr,
                 )
             except NarrationResponseError as error:
-                print(f"laconic view: invalid narration response: {error}", file=sys.stderr)
+                print(
+                    f"laconic research view: invalid narration response: {error}",
+                    file=sys.stderr,
+                )
                 return EXIT_NARRATION_RESPONSE
             else:
                 if narration is not None:
@@ -1278,7 +1540,8 @@ def _view(args: argparse.Namespace) -> int:
 def _study_dry_run(args: argparse.Namespace) -> int:
     if args.participants < MINIMUM_PARTICIPANTS:
         print(
-            f"laconic study: --participants must be at least {MINIMUM_PARTICIPANTS} "
+            f"laconic research study: --participants must be at least "
+            f"{MINIMUM_PARTICIPANTS} "
             f"(the pre-registered minimum the equivalence analysis requires); "
             f"got {args.participants}",
             file=sys.stderr,
@@ -1290,17 +1553,21 @@ def _study_dry_run(args: argparse.Namespace) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     except OSError as error:
-        print(f"laconic study: cannot write {args.out}: {error}", file=sys.stderr)
+        print(f"laconic research study: cannot write {args.out}: {error}", file=sys.stderr)
         return EXIT_STUDY_OUTPUT_ERROR
     _report_study_dry_run(result)
-    print(f"laconic study: wrote analysis-ready dataset to {args.out}", file=sys.stderr)
+    print(
+        f"laconic research study: wrote analysis-ready dataset to {args.out}",
+        file=sys.stderr,
+    )
     return EXIT_OK
 
 
 def _report_study_dry_run(result: DryRunResult) -> None:
     detection = result.analysis.detection
     print(
-        f"laconic study dry-run: seed={result.seed} participants={result.participant_count} "
+        f"laconic research study dry-run: seed={result.seed} "
+        f"participants={result.participant_count} "
         f"responses={len(result.responses)} pairs={result.analysis.n_pairs}"
     )
     print(
@@ -1368,7 +1635,7 @@ def _print_plan(plan: InstallPlan, fmt: str, *, applied: bool) -> None:
         )
         return
     state = "applied" if applied else "preview"
-    print(f"laconic observe ({state}): {plan.client.value} via {plan.mechanism.value}")
+    print(f"laconic diagnostics observe ({state}): {plan.client.value} via {plan.mechanism.value}")
     for action in plan.actions:
         print(f"  [{action.kind}] {action.description}")
     for item in plan.preserved:
@@ -1390,10 +1657,10 @@ def _observe_install(args: argparse.Namespace) -> int:
         else:
             result = apply_omp_install(target, python=args.python)
     except ConfigParseError as error:
-        print(f"laconic observe install: {error}", file=sys.stderr)
+        print(f"laconic diagnostics observe install: {error}", file=sys.stderr)
         return EXIT_OBSERVE_CONFIG_PARSE_ERROR
     except OwnershipConflictError as error:
-        print(f"laconic observe install: {error}", file=sys.stderr)
+        print(f"laconic diagnostics observe install: {error}", file=sys.stderr)
         return EXIT_OBSERVE_OWNERSHIP_CONFLICT
     _print_plan(result.plan, args.format, applied=result.applied)
     return EXIT_OK
@@ -1416,7 +1683,7 @@ def _observe_remove(args: argparse.Namespace) -> int:
         else:
             result = apply_omp_remove(target)
     except ConfigParseError as error:
-        print(f"laconic observe remove: {error}", file=sys.stderr)
+        print(f"laconic diagnostics observe remove: {error}", file=sys.stderr)
         return EXIT_OBSERVE_CONFIG_PARSE_ERROR
     _print_plan(result.plan, args.format, applied=result.applied)
     return EXIT_OK
@@ -1428,7 +1695,7 @@ def _observe_status(args: argparse.Namespace) -> int:
     if args.format == "json":
         print(json.dumps(status.to_json(), indent=2, sort_keys=True))
         return EXIT_OK
-    print(f"laconic observe status: {status.path}")
+    print(f"laconic diagnostics observe status: {status.path}")
     print(f"  exists: {status.exists}")
     print(f"  entries: {status.entry_count}")
     print(f"  chain valid: {status.chain_valid}")
@@ -1443,7 +1710,7 @@ def _observe_report(args: argparse.Namespace) -> int:
     if args.format == "json":
         print(json.dumps(report.to_json(), indent=2, sort_keys=True))
         return EXIT_OK
-    print(f"laconic observe report: {report.path} ({report.entry_count} entries)")
+    print(f"laconic diagnostics observe report: {report.path} ({report.entry_count} entries)")
     for label, counts in (
         ("adapter", report.by_adapter),
         ("tool category", report.by_tool_category),
@@ -1504,14 +1771,18 @@ def _k1_stage_b_build_manifest(args: argparse.Namespace) -> int:
         frozen = FrozenCorpus.load(corpus_manifest_path)
     except OSError as error:
         print(
-            f"laconic k1 stage-b build-manifest: cannot read {corpus_manifest_path}: {error}",
+            "laconic research k1 stage-b build-manifest: "
+            f"cannot read {corpus_manifest_path}: {error}",
             file=sys.stderr,
         )
         return EXIT_K1_STAGE_B_TOTALS_MISMATCH
     try:
         entries = build_session_manifest(frozen)
     except TotalsMismatchError as error:
-        print(f"laconic k1 stage-b build-manifest: {error}", file=sys.stderr)
+        print(
+            f"laconic research k1 stage-b build-manifest: {error}",
+            file=sys.stderr,
+        )
         return EXIT_K1_STAGE_B_TOTALS_MISMATCH
     write_session_manifest(entries, out_path)
     design_count = sum(1 for entry in entries if entry.set.value == "design")
@@ -1531,7 +1802,7 @@ def _k1_stage_c_run(args: argparse.Namespace) -> int:
             raise ValueError(f"--spend-cap must be positive, got {args.spend_cap}")
         manifest = load_stage_c_manifest(args.manifest, selected_set=selected_set)
     except (OSError, StageCManifestError, ValueError) as error:
-        print(f"laconic k1 stage-c run: {error}", file=sys.stderr)
+        print(f"laconic research k1 stage-c run: {error}", file=sys.stderr)
         return EXIT_LIVE_CONFIG_ERROR
     try:
         client_factory = _load_client_factory(args.client)
@@ -1541,7 +1812,7 @@ def _k1_stage_c_run(args: argparse.Namespace) -> int:
             close()
     except (ImportError, AttributeError, TypeError, ValueError) as error:
         print(
-            f"laconic k1 stage-c run: cannot load --client {args.client!r}: {error}",
+            f"laconic research k1 stage-c run: cannot load --client {args.client!r}: {error}",
             file=sys.stderr,
         )
         return EXIT_CLIENT_IMPORT_ERROR
@@ -1612,17 +1883,23 @@ def _check_expectation(expected_file: Path, measured: Expectation) -> int:
     try:
         loaded = json.loads(expected_file.read_text(encoding="utf-8"))
     except OSError as error:
-        print(f"laconic measure: cannot read {expected_file}: {error}", file=sys.stderr)
+        print(f"laconic research measure: cannot read {expected_file}: {error}", file=sys.stderr)
         return EXIT_NO_EXPECTATION
     except UnicodeDecodeError as error:
-        print(f"laconic measure: {expected_file} is not UTF-8 text: {error}", file=sys.stderr)
+        print(
+            f"laconic research measure: {expected_file} is not UTF-8 text: {error}",
+            file=sys.stderr,
+        )
         return EXIT_NO_EXPECTATION
     except json.JSONDecodeError as error:
-        print(f"laconic measure: {expected_file} is not valid JSON: {error}", file=sys.stderr)
+        print(
+            f"laconic research measure: {expected_file} is not valid JSON: {error}",
+            file=sys.stderr,
+        )
         return EXIT_NO_EXPECTATION
     if not isinstance(loaded, dict):
         print(
-            f"laconic measure: {expected_file} is not an expected-values object",
+            f"laconic research measure: {expected_file} is not an expected-values object",
             file=sys.stderr,
         )
         return EXIT_NO_EXPECTATION
@@ -1727,7 +2004,7 @@ def _report_reduction(paths: Sequence[Path]) -> None:
     ``paths`` and report gross encoded volume against raw volume.
 
     This is a *gross* comparison: it never subtracts follow-up reads the
-    codec might induce. Net accounting is ``laconic replay``'s job, added in
+    codec might induce. Net accounting is ``laconic research replay``'s job, added in
     milestone — reporting it here would let this milestone claim a savings number
     it has no way to have earned honestly.
     """

@@ -42,6 +42,22 @@ def default_data_dir() -> Path:
     return (Path(base) if base else Path.home() / ".local" / "share") / "laconic"
 
 
+def resolve_data_dir(data_dir: Path | None = None) -> Path:
+    """Resolve the runtime root without creating or inspecting it."""
+    return (data_dir or default_data_dir()).expanduser().resolve(strict=False)
+
+
+def session_ledger_path(session_id: str, data_dir: Path | None = None) -> Path:
+    """Derive one opaque, contained session path without creating storage."""
+    checked = validate_session_id(session_id)
+    root = resolve_data_dir(data_dir)
+    sessions = root / "sessions"
+    path = sessions / f"{_session_digest(checked)}.sqlite3"
+    if path.parent.resolve(strict=False) != sessions.resolve(strict=False):
+        raise UnsafeStoragePathError(f"runtime ledger escaped storage root: {path}")
+    return path
+
+
 def _session_digest(session_id: str) -> str:
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
@@ -74,7 +90,7 @@ class RuntimeStorage:
             raise PrivateStorageUnavailableError(
                 "owner-only runtime storage is unavailable on this platform"
             )
-        self._root = (data_dir or default_data_dir()).expanduser().resolve(strict=False)
+        self._root = resolve_data_dir(data_dir)
         self._sessions = self._root / "sessions"
         _make_private_directory(self._root)
         _make_private_directory(self._sessions)
@@ -85,8 +101,7 @@ class RuntimeStorage:
 
     def ledger_path(self, session_id: str) -> Path:
         """Derive a contained opaque path without interpolating the session id."""
-        checked = validate_session_id(session_id)
-        path = self._sessions / f"{_session_digest(checked)}.sqlite3"
+        path = session_ledger_path(session_id, self._root)
         if path.parent.resolve(strict=True) != self._sessions.resolve(strict=True):
             raise UnsafeStoragePathError(f"runtime ledger escaped storage root: {path}")
         if path.is_symlink():

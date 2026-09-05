@@ -130,8 +130,18 @@ def test_unreachable_provider_degrades_the_view(
 
     monkeypatch.setattr(narrate_module, "urlopen", unavailable)
     corpus = Path(__file__).parent / "corpus"
-    deterministic_args = ["view", "--turns", "1-5", "--corpus", str(corpus), "--provider", "none"]
+    deterministic_args = [
+        "research",
+        "view",
+        "--turns",
+        "1-5",
+        "--corpus",
+        str(corpus),
+        "--provider",
+        "none",
+    ]
     provider_args = [
+        "research",
         "view",
         "--turns",
         "1-5",
@@ -162,6 +172,7 @@ def test_deterministic_only_bypasses_optional_provider_configuration(
     assert (
         main(
             [
+                "research",
                 "view",
                 "--turns",
                 "1-5",
@@ -207,6 +218,7 @@ def test_http_exception_degrades_the_view(
     assert (
         main(
             [
+                "research",
                 "view",
                 "--turns",
                 "1-5",
@@ -254,6 +266,7 @@ def test_malformed_provider_response_fails_with_a_dedicated_exit_code(
     assert (
         main(
             [
+                "research",
                 "view",
                 "--turns",
                 "1-5",
@@ -293,6 +306,7 @@ def test_server_error_degrades_without_printing_provider_control_bytes(
     assert (
         main(
             [
+                "research",
                 "view",
                 "--turns",
                 "1-5",
@@ -328,6 +342,7 @@ def test_client_error_fails_loudly_without_provider_reason(
     assert (
         main(
             [
+                "research",
                 "view",
                 "--turns",
                 "1-5",
@@ -440,6 +455,7 @@ def test_view_narration_never_writes_ledger_or_agent_context(
     assert (
         main(
             [
+                "research",
                 "view",
                 "--turns",
                 "1-5",

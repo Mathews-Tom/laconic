@@ -1,4 +1,4 @@
-"""End-to-end test for `laconic k1 stage-b build-manifest` via
+"""End-to-end test for `laconic research k1 stage-b build-manifest` via
 `laconic.cli`. No test touches a real `~/.claude`/`~/.codex`/`~/.omp`
 path -- the CLI's `build_session_manifest` call is monkeypatched to a
 thin wrapper pinning `home`/`roots` to synthetic fixtures, exercising
@@ -82,6 +82,7 @@ def test_build_manifest_cli_writes_manifest_and_returns_ok(
     out_path = tmp_path / "session_manifest.json"
     args = parser.parse_args(
         [
+            "research",
             "k1",
             "stage-b",
             "build-manifest",
@@ -135,6 +136,7 @@ def test_build_manifest_cli_returns_mismatch_exit_code_on_bad_totals(
     out_path = tmp_path / "session_manifest.json"
     args = parser.parse_args(
         [
+            "research",
             "k1",
             "stage-b",
             "build-manifest",
@@ -155,6 +157,7 @@ def test_build_manifest_cli_returns_mismatch_exit_code_on_missing_corpus_manifes
     parser = build_parser()
     args = parser.parse_args(
         [
+            "research",
             "k1",
             "stage-b",
             "build-manifest",
@@ -168,6 +171,6 @@ def test_build_manifest_cli_returns_mismatch_exit_code_on_missing_corpus_manifes
 
 def test_build_manifest_cli_parses_nested_subcommands() -> None:
     parser = build_parser()
-    namespace = parser.parse_args(["k1", "stage-b", "build-manifest"])
+    namespace = parser.parse_args(["research", "k1", "stage-b", "build-manifest"])
     assert namespace.k1_command == "stage-b"
     assert namespace.k1_stage_b_command == "build-manifest"

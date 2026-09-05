@@ -41,7 +41,10 @@ def test_claude_code_install_preserves_foreign_handlers_and_top_level_keys() -> 
     assert any("model" in item for item in plan.preserved)
 
 
-_OWNED_HANDLER = {"type": "command", "command": "laconic observe emit __laconic_observe__"}
+_OWNED_HANDLER = {
+    "type": "command",
+    "command": "laconic diagnostics observe emit __laconic_observe__",
+}
 
 
 def test_claude_code_install_is_idempotent_on_already_owned_entries() -> None:
@@ -68,7 +71,10 @@ def test_claude_code_remove_only_touches_owned_entries() -> None:
             "PostToolUse": [
                 {
                     "hooks": [
-                        {"type": "command", "command": "laconic observe emit __laconic_observe__"},
+                        {
+                            "type": "command",
+                            "command": "laconic diagnostics observe emit __laconic_observe__",
+                        },
                         {"type": "command", "command": "./scripts/lint.sh"},
                     ]
                 }

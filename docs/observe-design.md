@@ -78,10 +78,10 @@ Receipts are local measurement artifacts. They may support a later metadata feas
 The CLI owns installation and removal:
 
 ```text
-laconic observe install --client claude-code|omp --scope project|user --dry-run
-laconic observe remove --client claude-code|omp --scope project|user
-laconic observe status
-laconic observe report
+laconic diagnostics observe install --client claude-code|omp --scope project|user --dry-run
+laconic diagnostics observe remove --client claude-code|omp --scope project|user
+laconic diagnostics observe status
+laconic diagnostics observe report
 ```
 
 Install and remove must be idempotent, preserve unrelated client configuration, identify only Laconic-owned entries, and support a dry-run preview. The subprocess contract has a bounded wall-clock budget, local diagnostics outside agent flow, and exit-success/no-output behavior on every failure path.

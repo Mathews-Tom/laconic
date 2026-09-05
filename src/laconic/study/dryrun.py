@@ -3,7 +3,7 @@
 ``DEVELOPMENT_PLAN.md`` §6 milestone's acceptance line: "A dry run with simulated
 responses produces an analysis-ready dataset." This module wires materials,
 condition assignment, response capture, and the pre-registered analysis into
-one seeded, reproducible run; ``laconic study dry-run --seed N --out FILE``
+one seeded, reproducible run; ``laconic research study dry-run --seed N --out FILE``
 is the CLI surface over it (``laconic.cli``). No real participant is ever
 involved -- every response here is drawn from a seeded random-number
 generator, never from a person, per this milestone's own constraint that no

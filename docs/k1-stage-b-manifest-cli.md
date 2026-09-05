@@ -1,13 +1,13 @@
 # K1 Stage B Manifest — Operator Guide
 
-`laconic k1 stage-b build-manifest` is the only command this tool provides. It
+`laconic research k1 stage-b build-manifest` is the only command this tool provides. It
 turns H-59's frozen *lineage*-level corpus design
 (`.docs/DEVELOPMENT_PLAN_HISTORY.md`, `.docs/K1_REPRESENTATIVE_CORPUS_PROTOCOL.md`
 § Stage B) into a frozen, reviewable, *session*-level manifest.
 
 It never reads a transcript body, prompt, tool argument/result, assistant
 response, source file, credential, or title -- every content read is the same
-bounded `cwd`-only scan `laconic k1 stage-a scan` already performs. It never
+bounded `cwd`-only scan `laconic research k1 stage-a scan` already performs. It never
 contacts a provider, invokes a live replay, or spends money. It never
 recomputes H-59's frozen design/confirmatory lineage split -- it only checks
 lineage-ID membership against it.
@@ -15,7 +15,7 @@ lineage-ID membership against it.
 ## Command
 
 ```text
-laconic k1 stage-b build-manifest [--corpus-manifest PATH] [--out PATH]
+laconic research k1 stage-b build-manifest [--corpus-manifest PATH] [--out PATH]
 ```
 
 `--corpus-manifest` defaults to `.laconic/k1/stage_b/corpus_manifest.json`
@@ -28,7 +28,7 @@ laconic k1 stage-b build-manifest [--corpus-manifest PATH] [--out PATH]
 1. Loads the frozen lineage-level decision (`design_set`, `confirmatory_set`,
    and the frozen `time_window_days`/`size_band_exclusion`/`per_lineage_session_cap`
    rules) from `--corpus-manifest`.
-2. Re-runs the same admission pipeline `laconic k1 stage-a scan` uses, anchored
+2. Re-runs the same admission pipeline `laconic research k1 stage-a scan` uses, anchored
    to the manifest's `frozen_at` timestamp -- **never wall-clock time** -- so
    the result is reproducible regardless of when this command actually runs.
 3. Restricts the result to sessions whose opaque `project_lineage_id` is in one
@@ -47,8 +47,8 @@ laconic k1 stage-b build-manifest [--corpus-manifest PATH] [--out PATH]
 ## Reading a totals mismatch
 
 ```text
-$ laconic k1 stage-b build-manifest
-laconic k1 stage-b build-manifest: session-level totals disagree with H-59's frozen totals: confirmatory_sessions_postcap: frozen=285 observed=283
+$ laconic research k1 stage-b build-manifest
+laconic research k1 stage-b build-manifest: session-level totals disagree with H-59's frozen totals: confirmatory_sessions_postcap: frozen=285 observed=283
 ```
 
 This means real files changed since the freeze (e.g. a session was deleted, or

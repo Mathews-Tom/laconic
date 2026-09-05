@@ -259,7 +259,7 @@ def find_baseline_transcripts(paths: Sequence[Path]) -> list[Path]:
     committed recorded-response fixture
     (:data:`~laconic.replay.corpus.REPLAY_ARTIFACT_SUFFIX`), so a fixture
     can never be scanned as a baseline session anywhere in this package --
-    including ``laconic measure``, which calls ``find_transcripts``
+    including ``laconic research measure``, which calls ``find_transcripts``
     directly and would otherwise double-count a fixture committed beside
     its baseline as an extra session.
     """
@@ -276,7 +276,7 @@ class SessionCost:
 
 def session_cost_of(path: Path) -> SessionCost:
     """Reproduce ``path``'s own recorded cost via the exact accounting
-    ``laconic measure`` uses -- the independent reference
+    ``laconic research measure`` uses -- the independent reference
     :func:`assert_baseline` checks the replay engine's own turn-by-turn
     accumulation against.
     """

@@ -237,7 +237,7 @@ class ReasoningClient(Protocol):
 
     No concrete implementation ships, matching
     ``laconic.replay.engine.ReplayClient``'s precedent -- live capture is
-    opt-in tooling a caller runs separately from ``laconic gates``, never
+    opt-in tooling a caller runs separately from ``laconic research gates``, never
     a code path the gate itself can reach.
     """
 

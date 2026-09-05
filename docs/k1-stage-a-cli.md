@@ -1,6 +1,6 @@
 # K1 Stage A — Operator Guide
 
-`laconic k1 stage-a scan` is the only command this tool provides. It is a
+`laconic research k1 stage-a scan` is the only command this tool provides. It is a
 metadata feasibility screen governed by
 `.docs/K1_REPRESENTATIVE_CORPUS_PROTOCOL.md` § Stage A and authorized by
 `.docs/DEVELOPMENT_PLAN_HISTORY.md` H-53: it enumerates historical Claude
@@ -18,7 +18,7 @@ explicit decision by the project owner after reviewing the ledger.
 ## Command
 
 ```text
-laconic k1 stage-a scan [--out PATH]
+laconic research k1 stage-a scan [--out PATH]
 ```
 
 `--out` defaults to `.laconic/k1/stage_a/ledger.json` (already covered by
@@ -72,7 +72,7 @@ conditions with their fired/not-fired state, and the resulting
 ## Reading the disposition
 
 ```text
-$ laconic k1 stage-a scan
+$ laconic research k1 stage-a scan
 K1 Stage A scan -- 41 admitted session(s) across 2 authorized root(s) and 3 authorized provider(s).
 Ledger written to .laconic/k1/stage_a/ledger.json
 
