@@ -217,3 +217,8 @@ node_modules/
 
 # Local Observe receipts and hash-chained audit log
 .laconic/observe/
+
+# Local M18 qualification campaign evidence: frozen manifest, per-session
+# receipts, and generated reports. The tracked report lives under
+# docs/runtime-beta-report.md and contains only its aggregate output.
+.laconic/beta/
