@@ -4,13 +4,14 @@
 
 Laconic sits at the **tool-result boundary** of an existing coding agent. The first runtime product is an explicitly installed OMP extension backed by one session-owned Python engine. The host adapter owns the session-scoped engine process lifecycle and result mutation; the engine owns encoding, recovery, decisions, and local storage.
 
-No live codec integration is released in version 0.8.0. The architecture below is the approved target for the OMP-first beta.
+The published version 0.8.0 has no live codec integration. The repository now contains the unreleased OMP runtime candidate shown below; M18 qualification and human sign-off still block release.
 
 ```mermaid
 graph TB
     subgraph OMP["OMP client"]
         TR["Tool runtime"]
         EX["Laconic extension"]
+        CTL["/laconic command"]
         M["Cloud model"]
     end
 
@@ -34,7 +35,9 @@ graph TB
     M -->|"laconic_expand reference"| EX
     EX --> RT
     RT -->|"exact full or span recovery"| LG
-    CLI -->|"install, status, pause, uninstall, purge"| EX
+    CTL -->|"status, pause, resume"| EX
+    CLI -->|"install, uninstall"| EX
+    CLI -->|"status, expand, purge"| LG
 ```
 
 The first adapter transforms only successful, exactly-one-text-chunk results from OMP's `read`, `bash`, `grep`, and `glob` tools. Unsupported tools, mixed or non-text content, and errors pass through unchanged. A 250 ms deadline and a three-consecutive-failure circuit breaker preserve native OMP behavior when the engine fails.
@@ -46,7 +49,7 @@ Thin adapters share this canonical engine. OMP is first. Claude Code requires a 
 ---
 ## 2. Component Design
 
-**Maturity boundary:** the codec, ledger, replay, renderer, action codec, and residency decision accounting exist in version 0.8.0. The session runtime, namespaced envelope, and OMP adapter described here are planned for the bounded beta. Action rewriting and applied residency compaction are not part of that beta.
+**Maturity boundary:** version 0.8.0 releases the codec, ledger, replay, renderer, action codec, and residency decision accounting. The repository's unreleased runtime candidate adds the session runtime, namespaced envelope, OMP adapter, and operator controls. Action rewriting and applied residency compaction are not part of the beta.
 
 ### 2.1 Handle ledger (`src/laconic/ledger.py`)
 
@@ -313,12 +316,12 @@ The compact trace is not meant to be read raw. The renderer resolves it into pro
 ```mermaid
 sequenceDiagram
     participant H as Developer
-    participant CLI as laconic view
+    participant CLI as laconic research view
     participant LG as Ledger
     participant T as Template renderer
     participant LM as Local model
 
-    H->>CLI: laconic view --turns 12-18
+    H->>CLI: laconic research view --turns 12-18
     CLI->>LG: fetch records and actions
     LG-->>CLI: structured trace
     CLI->>T: render structural facts
@@ -363,31 +366,32 @@ Action equivalence is judged structurally first — same tool, same target, same
 
 ### 2.7 CLI (`src/laconic/cli.py`)
 
-Version 0.8.0 exposes research, evaluation, rendering, and Observe commands:
-
-```text
-laconic measure ...
-laconic replay ...
-laconic gates ...
-laconic expand ...
-laconic view ...
-laconic study ...
-laconic observe ...
-laconic k1 ...
-```
-
-The runtime beta will invert that emphasis through a deliberate pre-1.0 cutover:
+The pre-1.0 command surface now reserves top-level verbs for the runtime product:
 
 ```text
 laconic install omp
 laconic uninstall omp
 laconic status
-laconic purge ...
-laconic expand ...
-laconic research ...
+laconic purge --session ID|--older-than DURATION
+laconic expand SESSION/HANDLE[:FIRST-LAST]
 ```
 
-These runtime commands do not ship in 0.8.0. The implementation milestone must update every caller, test, and public document together rather than preserve duplicate aliases indefinitely.
+Session-local engine control lives inside OMP:
+
+```text
+/laconic status
+/laconic pause
+/laconic resume
+```
+
+Offline evaluation and released diagnostics moved under explicit namespaces:
+
+```text
+laconic research measure|replay|gates|expand|view|study|k1 ...
+laconic diagnostics observe ...
+```
+
+There are no duplicate compatibility aliases. `laconic expand` resolves runtime namespaced references; `laconic research expand` resolves fixture-corpus handles. `docs/omp-runtime.md` is the operator guide.
 
 ---
 ## 3. Integration
@@ -450,7 +454,7 @@ This safety gate has no minimum aggregate savings percentage. Observed character
 
 ### 4.2 Research claim gates
 
-The existing `laconic gates` suite remains research infrastructure:
+The existing `laconic research gates` suite remains research infrastructure:
 
 | # | Gate | Threshold | Kill condition |
 |---|---|---|---|

@@ -42,10 +42,10 @@ The research claim gate does not block the opt-in beta. Passing the product gate
 
 ## Current state, as measured
 
-- Package version: `0.8.0` (`pyproject.toml`).
-- The deterministic observation codec, session-scoped recovery ledger, action codec, residency decision accounting, replay/gate harness, renderer, and K3 dry-run harness are released as library, CLI, or research surfaces.
-- No live codec integration is released. OMP runtime delivery is planned; this charter does not claim it already exists.
-- Laconic Observe (`laconic.observe`, `laconic observe install/remove/status/report`) is released as a local, content-free diagnostic surface for Claude Code and OMP. It does not transform agent-visible tool results.
+- Package version: `0.8.0` (`pyproject.toml`). The published package has no live codec integration.
+- The repository's unreleased runtime candidate includes the canonical session engine, owner-only namespaced recovery storage, an ownership-safe native OMP extension, a 250 ms fail-open boundary, a three-failure circuit breaker, model/operator expansion, pause/resume controls, content-free status, and explicit purge.
+- The runtime adapter transforms only successful single-text `read`, `bash`, `grep`, and `glob` results, and only when the complete recovery-bearing envelope is strictly smaller. M18 real-OMP qualification and human sign-off still block release.
+- Laconic Observe (`laconic.observe`, `laconic diagnostics observe install/remove/status/report`) remains a released local, content-free diagnostic surface for Claude Code and OMP. It does not transform agent-visible tool results.
 - The committed fixture reports K1 net savings of **8.53%**, K2 action equivalence of **100%**, K4 overhead of **26.8 tokens**, K5 difference of **0.0pp**, and K3 as manual/not evaluated. The fixture validates the gate machinery; it is not representative product-economics evidence.
 - The source-mapped K1 Stage C replacement pilot ended before replay client construction. All 11 selected Codex and 13 selected OMP baselines produced zero replay-engine turns, actions, and observations because the historical parser accepts Claude-shaped tool-use records. No provider prompt, replay artifact, external annotation, or modeled spend resulted.
 

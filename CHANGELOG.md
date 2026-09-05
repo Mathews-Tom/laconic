@@ -8,13 +8,19 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
-- Added the transport-neutral runtime session engine and bounded `python -m laconic.runtime` JSONL service. It stores raw observations in owner-only, path-contained per-session ledgers before emitting a strictly smaller namespaced envelope, supports exact full/span recovery after reopen, and records content-free decisions and latency metrics. This milestone does not install or activate the OMP adapter; live interception remains deferred to M17.
+- Added the transport-neutral runtime session engine and bounded `python -m laconic.runtime` JSONL service. It stores raw observations in owner-only, path-contained per-session ledgers before emitting a strictly smaller namespaced envelope, supports exact full/span recovery after reopen, and records content-free decisions and latency metrics. The OMP adapter below consumes this canonical engine rather than duplicating codec policy.
+- Added an ownership-safe native OMP extension installer and generated extension asset. The project-scoped install is the default; user/profile scope is explicit. Install and uninstall are atomic, idempotent, symlink-safe, foreign-file-safe, and never purge runtime data.
+- Added session-owned OMP runtime supervision over the canonical Python JSONL engine. The extension uses OMP's real session identifier, preserves the engine across branch/tree navigation, rebinds on session switch, enforces a 250 ms deadline, drains diagnostics, fails open, and opens a circuit breaker after three consecutive engine failures.
+- Added tool-result interception for successful single-text `read`, `bash`, `grep`, and `glob` results. Unsupported tools, errors, mixed/non-text content, failed requests, and non-smaller candidates remain byte-for-byte pass-through.
+- Added the read-only `laconic_expand` OMP tool, `/laconic status|pause|resume`, and operator commands for exact runtime expansion, content-free aggregate status, explicit session/age purge, and owned-only uninstall. Purge requires `--session` or `--older-than`; uninstall never invokes it.
+- Added `docs/omp-runtime.md`, the installation, recovery, control, uninstall, purge, and safety-boundary guide for the unreleased runtime candidate.
 
 ### Changed
 
 - Refocused the public product roadmap on an opt-in OMP runtime codec backed by the existing Python engine and recovery ledger. The runtime beta is governed by exact recovery, fail-open behavior, bounded latency, operator control, packaging, and real OMP qualification.
 - Separated the runtime product gate from representative replay research. The committed fixture's 8.53% K1 result remains valid for that fixture and continues to bound general savings claims, but no longer blocks a safety-gated beta.
 - Reclassified Laconic Observe as supporting content-free diagnostics rather than the primary product surface, and recorded the terminal K1 Stage C replay disposition without authorizing another run or provider spend.
+- Reorganized the pre-1.0 CLI around product verbs. Offline evaluation is now under `laconic research`, and Observe is under `laconic diagnostics observe`. The former top-level research and diagnostic aliases were removed.
 
 ## [0.8.0] — 2026-08-27
 

@@ -1,20 +1,17 @@
 # Laconic Observe — Operator Guide
 
-`laconic observe` is a measurement-only CLI surface (`docs/observe-design.md`).
-It installs a local, content-free receipt hook, never a codec transform: no
-`laconic observe` command enables the codec, changes K1 status, injects
-context into an agent, exposes an MCP tool, or contacts a provider.
+`laconic diagnostics observe` is a measurement-only CLI surface (`docs/observe-design.md`). It installs a local, content-free receipt hook, never a codec transform: no `laconic diagnostics observe` command enables the codec, changes K1 status, injects context into an agent, exposes an MCP tool, or contacts a provider.
 
 ## Commands
 
 ```text
-laconic observe install --client claude-code|omp [--scope project|user]
-                         [--dry-run] [--user-dir PATH] [--python PATH]
-                         [--format text|json]
-laconic observe remove  --client claude-code|omp [--scope project|user]
-                         [--dry-run] [--user-dir PATH] [--format text|json]
-laconic observe status  [--audit-path PATH] [--format text|json]
-laconic observe report  [--audit-path PATH] [--format text|json]
+laconic diagnostics observe install --client claude-code|omp [--scope project|user]
+                                     [--dry-run] [--user-dir PATH] [--python PATH]
+                                     [--format text|json]
+laconic diagnostics observe remove  --client claude-code|omp [--scope project|user]
+                                     [--dry-run] [--user-dir PATH] [--format text|json]
+laconic diagnostics observe status  [--audit-path PATH] [--format text|json]
+laconic diagnostics observe report  [--audit-path PATH] [--format text|json]
 ```
 
 Every `install`/`remove` call is idempotent: running it twice in a row
@@ -55,7 +52,7 @@ and never guesses a `--profile` name. If you run `omp --profile <name>`,
 pass `--user-dir` explicitly:
 
 ```text
-laconic observe install --client omp --scope user \
+laconic diagnostics observe install --client omp --scope user \
   --user-dir ~/.omp/profiles/<name>/agent/extensions
 ```
 
@@ -65,7 +62,7 @@ overwrite it and exits with a dedicated error rather than destroying it.
 
 ## Removing
 
-`laconic observe remove` reverses exactly what `install` would add, and
+`laconic diagnostics observe remove` reverses exactly what `install` would add, and
 nothing else:
 
 - Claude Code: strips only Observe-owned hook entries from the settings
@@ -76,7 +73,7 @@ nothing else:
 
 ## Status and reports
 
-`laconic observe status` and `laconic observe report` read only the local
+`laconic diagnostics observe status` and `laconic diagnostics observe report` read only the local
 hash-chained audit log (default: `.laconic/observe/audit.jsonl`, relative to
 the current directory; override with `--audit-path`). Neither command
 contacts a provider or reads a real client configuration.
@@ -84,8 +81,8 @@ contacts a provider or reads a real client configuration.
 `status` answers "is anything here, and does it still verify":
 
 ```text
-$ laconic observe status
-laconic observe status: .laconic/observe/audit.jsonl
+$ laconic diagnostics observe status
+laconic diagnostics observe status: .laconic/observe/audit.jsonl
   exists: True
   entries: 42
   chain valid: True

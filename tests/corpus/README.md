@@ -1,6 +1,6 @@
 # Fixture corpus
 
-A synthetic session corpus in the format `laconic measure` and the replay harness consume. Nothing here comes from a real session: the measurements that motivate Laconic were taken over private transcripts containing proprietary source, which cannot be committed.
+A synthetic session corpus in the format `laconic research measure` and the replay harness consume. Nothing here comes from a real session: the measurements that motivate Laconic were taken over private transcripts containing proprietary source, which cannot be committed.
 
 ## Layout
 
@@ -51,7 +51,7 @@ Channel attribution: `text` blocks are prose (fenced code is measured separately
 
 ## Expected values
 
-`expected.json` is the committed decomposition of this corpus. `laconic measure tests/corpus --expect tests/corpus/expected.json` exits non-zero on any difference. Integer counters must match exactly; USD figures match within `COST_TOLERANCE_USD`.
+`expected.json` is the committed decomposition of this corpus. `laconic research measure tests/corpus --expect tests/corpus/expected.json` exits non-zero on any difference. Integer counters must match exactly; USD figures match within `COST_TOLERANCE_USD`.
 
 Regenerate after an intentional corpus or accounting change:
 
