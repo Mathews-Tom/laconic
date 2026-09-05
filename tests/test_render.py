@@ -168,15 +168,15 @@ def test_expand_resolves_bare_and_spanned_handles(
         encoding="utf-8",
     )
 
-    assert main(["expand", "F1", "--corpus", str(corpus)]) == 0
+    assert main(["research", "expand", "F1", "--corpus", str(corpus)]) == 0
     first = capsys.readouterr()
     assert first.out == "first line\nsecond line\nthird line"
     assert f"source transcript: {transcript}" in first.err
 
-    assert main(["expand", "F1:2-3", "--corpus", str(corpus)]) == 0
+    assert main(["research", "expand", "F1:2-3", "--corpus", str(corpus)]) == 0
     assert capsys.readouterr().out == "second line\nthird line"
 
-    assert main(["expand", "F1:4-4", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert main(["research", "expand", "F1:4-4", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
     assert "outside 1-3" in capsys.readouterr().err
 
 
@@ -222,10 +222,12 @@ def test_commands_reject_textless_tool_result_blocks(
         encoding="utf-8",
     )
 
-    assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert main(["research", "expand", "F1", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
     assert "unsupported tool result" in capsys.readouterr().err
 
-    assert main(["view", "--turns", "1-5", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert (
+        main(["research", "view", "--turns", "1-5", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    )
     assert "unsupported tool result" in capsys.readouterr().err
 
 
@@ -255,23 +257,25 @@ def test_expand_reports_unresolvable_handles(
         encoding="utf-8",
     )
 
-    assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert main(["research", "expand", "F1", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
     assert "unknown handle: F1" in capsys.readouterr().err
 
 
 def test_expand_rejects_missing_and_malformed_corpora(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["expand", "F1", "--corpus", str(tmp_path / "missing")]) == EXIT_NO_CORPUS
+    assert (
+        main(["research", "expand", "F1", "--corpus", str(tmp_path / "missing")]) == EXIT_NO_CORPUS
+    )
     assert "corpus path does not exist" in capsys.readouterr().err
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_NO_CORPUS
+    assert main(["research", "expand", "F1", "--corpus", str(corpus)]) == EXIT_NO_CORPUS
     assert "no *.jsonl transcripts found" in capsys.readouterr().err
     (corpus / "session.jsonl").write_text("{not json}\n", encoding="utf-8")
 
-    assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_MALFORMED_RECORD
+    assert main(["research", "expand", "F1", "--corpus", str(corpus)]) == EXIT_MALFORMED_RECORD
     assert "invalid JSON record" in capsys.readouterr().err
 
 
@@ -300,7 +304,7 @@ def test_expand_rejects_an_unmatched_tool_result(
         encoding="utf-8",
     )
 
-    assert main(["expand", "F1", "--corpus", str(corpus)]) == EXIT_MALFORMED_RECORD
+    assert main(["research", "expand", "F1", "--corpus", str(corpus)]) == EXIT_MALFORMED_RECORD
     assert "has no matching tool use" in capsys.readouterr().err
 
 
@@ -316,6 +320,7 @@ def test_view_is_byte_identical_and_never_connects_in_deterministic_mode(
     monkeypatch.setattr(socket.socket, "connect", forbid_connection)
     corpus = Path(__file__).parent / "corpus"
     args = [
+        "research",
         "view",
         "--turns",
         "1-5",
@@ -342,7 +347,8 @@ def test_view_is_byte_identical_across_processes() -> None:
     corpus = Path(__file__).parent / "corpus"
     command = (
         "from laconic.cli import main; raise SystemExit(main("
-        f"['view', '--turns', '1-5', '--corpus', {str(corpus)!r}, '--deterministic-only']))"
+        f"['research', 'view', '--turns', '1-5', '--corpus', {str(corpus)!r}, "
+        "'--deterministic-only']))"
     )
     outputs = []
     for hash_seed in ("1", "2"):
@@ -362,7 +368,7 @@ def test_view_is_byte_identical_across_processes() -> None:
 @pytest.mark.parametrize("turns", ("1", "a-5", "0-5", "5-1"))
 def test_view_rejects_invalid_turn_ranges(turns: str) -> None:
     with pytest.raises(SystemExit) as error:
-        main(["view", "--turns", turns])
+        main(["research", "view", "--turns", turns])
 
     assert error.value.code == 2
 
@@ -370,7 +376,10 @@ def test_view_rejects_invalid_turn_ranges(turns: str) -> None:
 def test_view_reports_empty_turn_ranges(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     corpus = Path(__file__).parent / "corpus"
 
-    assert main(["view", "--turns", "200-300", "--corpus", str(corpus)]) == EXIT_RENDER_TRACE
+    assert (
+        main(["research", "view", "--turns", "200-300", "--corpus", str(corpus)])
+        == EXIT_RENDER_TRACE
+    )
     assert "no observations in requested turn range 200-300" in capsys.readouterr().err
 
 
@@ -380,12 +389,12 @@ def test_view_reports_transcript_free_corpora(
     corpus = tmp_path / "corpus"
     corpus.mkdir()
 
-    assert main(["view", "--turns", "1-5", "--corpus", str(corpus)]) == EXIT_NO_CORPUS
+    assert main(["research", "view", "--turns", "1-5", "--corpus", str(corpus)]) == EXIT_NO_CORPUS
     assert "no *.jsonl transcripts found" in capsys.readouterr().err
 
 
 def test_view_reports_missing_corpora(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     missing = tmp_path / "missing"
 
-    assert main(["view", "--turns", "1-5", "--corpus", str(missing)]) == EXIT_NO_CORPUS
+    assert main(["research", "view", "--turns", "1-5", "--corpus", str(missing)]) == EXIT_NO_CORPUS
     assert "corpus path does not exist" in capsys.readouterr().err

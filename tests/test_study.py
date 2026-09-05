@@ -103,7 +103,7 @@ def test_materials_handles_match_what_a_real_ledger_would_mint() -> None:
     """Regression for a per-task global handle index that diverged from
     :meth:`~laconic.ledger.Ledger.register`'s per-kind ordinal scheme --
     the rendered condition exists specifically to show participants what
-    ``laconic view`` actually renders, so a handle scheme the product
+    ``laconic research view`` actually renders, so a handle scheme the product
     never produces would be a defect in the measurement instrument itself.
     Independently reconstructs each material's expected handle sequence by
     feeding a real :class:`~laconic.ledger.Ledger` observations of the
@@ -598,7 +598,7 @@ def test_dryrun_to_json_round_trips_through_json_dumps() -> None:
 
 def test_cli_study_dry_run_writes_analysis_ready_dataset(tmp_path: Path) -> None:
     out = tmp_path / "k3.json"
-    assert main(["study", "dry-run", "--seed", "0", "--out", str(out)]) == EXIT_OK
+    assert main(["research", "study", "dry-run", "--seed", "0", "--out", str(out)]) == EXIT_OK
     payload = json.loads(out.read_text())
     assert payload["seed"] == 0
     assert payload["participant_count"] == DEFAULT_PARTICIPANT_COUNT
@@ -610,8 +610,10 @@ def test_cli_study_dry_run_writes_analysis_ready_dataset(tmp_path: Path) -> None
 def test_cli_study_dry_run_is_reproducible_for_the_same_seed(tmp_path: Path) -> None:
     first_out = tmp_path / "first.json"
     second_out = tmp_path / "second.json"
-    assert main(["study", "dry-run", "--seed", "5", "--out", str(first_out)]) == EXIT_OK
-    assert main(["study", "dry-run", "--seed", "5", "--out", str(second_out)]) == EXIT_OK
+    assert main(["research", "study", "dry-run", "--seed", "5", "--out", str(first_out)]) == EXIT_OK
+    assert (
+        main(["research", "study", "dry-run", "--seed", "5", "--out", str(second_out)]) == EXIT_OK
+    )
     assert first_out.read_text() == second_out.read_text()
 
 
@@ -620,6 +622,7 @@ def test_cli_study_dry_run_honors_participants_flag(tmp_path: Path) -> None:
     assert (
         main(
             [
+                "research",
                 "study",
                 "dry-run",
                 "--seed",
@@ -641,6 +644,7 @@ def test_cli_study_dry_run_rejects_participants_below_the_minimum(tmp_path: Path
     out = tmp_path / "k3.json"
     exit_code = main(
         [
+            "research",
             "study",
             "dry-run",
             "--seed",

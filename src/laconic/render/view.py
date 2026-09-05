@@ -120,7 +120,7 @@ def load_fixture_ledger(paths: Sequence[Path]) -> FixtureLedger:
 def _populate_fixture_ledger(ledger: Ledger, paths: Sequence[Path]) -> Path:
     """Encode one deterministic fixture session into ``ledger``.
 
-    ``laconic view --turns`` names turns from one session, never a synthetic
+    ``laconic research view --turns`` names turns from one session, never a synthetic
     concatenation of unrelated transcripts. A corpus directory resolves to its
     sorted first baseline transcript; callers needing another session pass that
     transcript path directly.

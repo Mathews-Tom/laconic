@@ -107,7 +107,7 @@ class GateResult:
         )
 
     def to_json(self) -> dict[str, object]:
-        """Serialize every field ``laconic gates --format json`` reports,
+        """Serialize every field ``laconic research gates --format json`` reports,
         with ``verdict`` as its plain string value rather than the enum."""
         return {
             "gate": self.gate,

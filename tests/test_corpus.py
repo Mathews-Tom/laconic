@@ -193,7 +193,7 @@ def test_a_recorded_response_replay_artifact_is_excluded_from_a_directory_scan(
 ) -> None:
     """A committed `laconic.replay.engine` fixture beside its baseline
     (`<stem>.codec-on.jsonl`) is synthetic material about a session, never
-    a measurable session of its own -- `laconic measure` must not
+    measurable session of its own -- `laconic research measure` must not
     double-count it."""
     (tmp_path / "session-a.jsonl").write_text("")
     (tmp_path / f"session-a{REPLAY_ARTIFACT_SUFFIX}").write_text("")

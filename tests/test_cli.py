@@ -43,15 +43,17 @@ def test_version_is_the_packaged_version(capsys: pytest.CaptureFixture[str]) -> 
     assert capsys.readouterr().out.strip() == f"laconic {__version__}"
 
 
-def test_bare_invocation_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
+def test_bare_invocation_emphasizes_product_verbs(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == EXIT_OK
-    assert "measure" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    for command in ("install", "uninstall", "status", "purge", "expand", "research"):
+        assert command in help_text
 
 
 def test_measure_reports_a_cost_split_that_sums_to_one_hundred(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["measure", str(CORPUS_DIR)]) == EXIT_OK
+    assert main(["research", "measure", str(CORPUS_DIR)]) == EXIT_OK
     out = capsys.readouterr().out
     assert "Cost decomposition (share of modelled spend):" in out
     total_line = next(line for line in out.splitlines() if line.strip().startswith("total"))
@@ -59,7 +61,7 @@ def test_measure_reports_a_cost_split_that_sums_to_one_hundred(
 
 
 def test_measure_reports_every_channel(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["measure", str(CORPUS_DIR)]) == EXIT_OK
+    assert main(["research", "measure", str(CORPUS_DIR)]) == EXIT_OK
     out = capsys.readouterr().out
     for label in (
         "tool results (observations)",
@@ -73,7 +75,7 @@ def test_measure_reports_every_channel(capsys: pytest.CaptureFixture[str]) -> No
 def test_measure_against_matching_expectation_exits_zero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["measure", str(CORPUS_DIR), "--expect", str(EXPECTED_FILE)]) == EXIT_OK
+    assert main(["research", "measure", str(CORPUS_DIR), "--expect", str(EXPECTED_FILE)]) == EXIT_OK
     assert "Measurement matches" in capsys.readouterr().out
 
 
@@ -85,14 +87,14 @@ def test_measure_against_drifted_expectation_exits_non_zero(
     drifted = tmp_path / "expected.json"
     drifted.write_text(json.dumps(expected))
 
-    assert main(["measure", str(CORPUS_DIR), "--expect", str(drifted)]) == 1
+    assert main(["research", "measure", str(CORPUS_DIR), "--expect", str(drifted)]) == 1
     assert "channels.prose" in capsys.readouterr().err
 
 
 def test_measure_on_an_empty_corpus_exits_non_zero_with_a_message(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["measure", str(tmp_path)]) == 3
+    assert main(["research", "measure", str(tmp_path)]) == 3
     error = capsys.readouterr().err
     assert "no *.jsonl transcripts found" in error
     assert str(tmp_path) in error
@@ -104,14 +106,14 @@ def test_measure_on_a_corpus_without_usage_exits_non_zero(
     (tmp_path / "s.jsonl").write_text(
         json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n"
     )
-    assert main(["measure", str(tmp_path)]) == 3
+    assert main(["research", "measure", str(tmp_path)]) == 3
     assert "no assistant usage records" in capsys.readouterr().err
 
 
 def test_measure_does_not_double_count_a_committed_recorded_response_fixture(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A `laconic replay` fixture committed beside its baseline must not
+    """A `laconic research replay` fixture committed beside its baseline must not
     be counted as an extra measured session."""
     baseline = _write_records(
         tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
@@ -124,7 +126,7 @@ def test_measure_does_not_double_count_a_committed_recorded_response_fixture(
             )
         ],
     )
-    assert main(["measure", str(tmp_path)]) == EXIT_OK
+    assert main(["research", "measure", str(tmp_path)]) == EXIT_OK
     assert "Scanning 1 session transcripts" in capsys.readouterr().out
 
 
@@ -136,7 +138,7 @@ def test_shim_output_is_identical_to_the_measure_command() -> None:
     """`docs/overview.md` §2 cites the script; both paths must agree."""
     via_script = _run([sys.executable, str(SHIM), str(CORPUS_DIR)])
     assert CONSOLE_SCRIPT is not None, "the laconic console script must be installed"
-    via_cli = _run([CONSOLE_SCRIPT, "measure", str(CORPUS_DIR)])
+    via_cli = _run([CONSOLE_SCRIPT, "research", "measure", str(CORPUS_DIR)])
     assert via_script.returncode == EXIT_OK
     assert via_cli.returncode == EXIT_OK
     assert via_script.stdout == via_cli.stdout
@@ -152,7 +154,7 @@ def test_measure_reports_the_headline_prose_figures(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The project's headline number, pinned to tests/corpus/README.md."""
-    assert main(["measure", str(CORPUS_DIR)]) == EXIT_OK
+    assert main(["research", "measure", str(CORPUS_DIR)]) == EXIT_OK
     out = capsys.readouterr().out
     assert "Output share of spend                        11.25%" in out
     assert "Prose share of emitted output                19.41%" in out
@@ -175,7 +177,7 @@ def test_measure_on_a_corpus_without_billable_tokens_exits_non_zero(
         )
         + "\n"
     )
-    assert main(["measure", str(tmp_path)]) == 3
+    assert main(["research", "measure", str(tmp_path)]) == 3
     assert "no billable tokens" in capsys.readouterr().err
 
 
@@ -195,14 +197,14 @@ def test_measure_on_a_corpus_without_channel_content_exits_non_zero(
         )
         + "\n"
     )
-    assert main(["measure", str(tmp_path)]) == 3
+    assert main(["research", "measure", str(tmp_path)]) == 3
     assert "no channel content" in capsys.readouterr().err
 
 
 def test_measure_on_a_mistyped_path_exits_non_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["measure", str(tmp_path / "typo")]) == 3
+    assert main(["research", "measure", str(tmp_path / "typo")]) == 3
     assert "does not exist" in capsys.readouterr().err
 
 
@@ -210,7 +212,7 @@ def test_missing_expectation_file_is_distinct_from_a_mismatch(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     missing = tmp_path / "nope.json"
-    assert main(["measure", str(CORPUS_DIR), "--expect", str(missing)]) == 4
+    assert main(["research", "measure", str(CORPUS_DIR), "--expect", str(missing)]) == 4
     assert "cannot read" in capsys.readouterr().err
 
 
@@ -219,7 +221,7 @@ def test_malformed_expectation_file_is_distinct_from_a_mismatch(
 ) -> None:
     broken = tmp_path / "expected.json"
     broken.write_text("{not json")
-    assert main(["measure", str(CORPUS_DIR), "--expect", str(broken)]) == 4
+    assert main(["research", "measure", str(CORPUS_DIR), "--expect", str(broken)]) == 4
     assert "not valid JSON" in capsys.readouterr().err
 
 
@@ -239,7 +241,7 @@ def test_an_unpriced_model_is_reported_as_a_guess(
         )
         + "\n"
     )
-    assert main(["measure", str(tmp_path)]) == EXIT_OK
+    assert main(["research", "measure", str(tmp_path)]) == EXIT_OK
     assert "no published price for claude-someday-9" in capsys.readouterr().err
 
 
@@ -262,7 +264,7 @@ def test_an_undecodable_expectation_file_is_not_reported_as_a_mismatch(
 ) -> None:
     binary = tmp_path / "expected.json"
     binary.write_bytes(b"\xff\xfe\x00\x01\x80\x81")
-    assert main(["measure", str(CORPUS_DIR), "--expect", str(binary)]) == 4
+    assert main(["research", "measure", str(CORPUS_DIR), "--expect", str(binary)]) == 4
     assert "not UTF-8 text" in capsys.readouterr().err
 
 
@@ -282,7 +284,7 @@ def test_a_mistyped_token_counter_exits_with_its_own_code(
         )
         + "\n"
     )
-    assert main(["measure", str(tmp_path)]) == 5
+    assert main(["research", "measure", str(tmp_path)]) == 5
     assert "output_tokens is not an integer" in capsys.readouterr().err
 
 
@@ -294,7 +296,7 @@ def test_an_unreadable_transcript_is_not_reported_as_a_mismatch(
     transcript.write_text('{"type": "user", "message": {"content": "hi"}}\n')
     transcript.chmod(0o000)
     try:
-        assert main(["measure", str(tmp_path)]) == 3
+        assert main(["research", "measure", str(tmp_path)]) == 3
     finally:
         transcript.chmod(0o600)
     assert "cannot read the corpus" in capsys.readouterr().err
@@ -321,28 +323,34 @@ def test_a_tool_with_no_recorded_calls_reports_no_mean(
         },
     ]
     (tmp_path / "s.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    assert main(["measure", str(tmp_path)]) == EXIT_OK
+    assert main(["research", "measure", str(tmp_path)]) == EXIT_OK
     out = capsys.readouterr().out
     assert "calls=0" in out
     assert "mean=n/a" in out
 
 
 def test_report_reduction_requires_codec_on(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["measure", str(CORPUS_DIR), "--report", "reduction"]) == EXIT_REPORT_REQUIRES_CODEC
+    assert (
+        main(["research", "measure", str(CORPUS_DIR), "--report", "reduction"])
+        == EXIT_REPORT_REQUIRES_CODEC
+    )
     assert "requires --codec on" in capsys.readouterr().err
 
 
 def test_codec_on_without_report_prints_no_reduction_section(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["measure", str(CORPUS_DIR), "--codec", "on"]) == EXIT_OK
+    assert main(["research", "measure", str(CORPUS_DIR), "--codec", "on"]) == EXIT_OK
     assert "File observation encoder" not in capsys.readouterr().out
 
 
 def test_codec_on_report_reduction_prints_a_gross_reduction_below_one_hundred_percent(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["measure", str(CORPUS_DIR), "--codec", "on", "--report", "reduction"]) == EXIT_OK
+    assert (
+        main(["research", "measure", str(CORPUS_DIR), "--codec", "on", "--report", "reduction"])
+        == EXIT_OK
+    )
     out = capsys.readouterr().out
     assert "File observation encoder" in out
     assert "gross" in out
@@ -356,7 +364,10 @@ def test_codec_on_report_reduction_never_claims_net_savings(
 ) -> None:
     """`DEVELOPMENT_PLAN.md` §6 M4 constraint: this milestone must not claim
     net savings — induced-read accounting belongs to M8."""
-    assert main(["measure", str(CORPUS_DIR), "--codec", "on", "--report", "reduction"]) == EXIT_OK
+    assert (
+        main(["research", "measure", str(CORPUS_DIR), "--codec", "on", "--report", "reduction"])
+        == EXIT_OK
+    )
     out = capsys.readouterr().out
     reduction_section = out.rsplit("File observation encoder", 1)[1].lower()
     assert "net " not in reduction_section
@@ -368,6 +379,7 @@ def test_codec_on_report_reduction_composes_with_expect(
 ) -> None:
     exit_code = main(
         [
+            "research",
             "measure",
             str(CORPUS_DIR),
             "--codec",
@@ -404,12 +416,14 @@ def test_report_reduction_on_a_corpus_with_no_reads_reports_zero(
         },
     ]
     (tmp_path / "s.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    exit_code = main(["measure", str(tmp_path), "--codec", "on", "--report", "reduction"])
+    exit_code = main(
+        ["research", "measure", str(tmp_path), "--codec", "on", "--report", "reduction"]
+    )
     assert exit_code == EXIT_OK
     assert "no Read observations found" in capsys.readouterr().out
 
 
-# --- laconic replay ------------------------------------------------------
+# --- laconic research replay --------------------------------------------
 
 
 def _assistant_record(
@@ -468,7 +482,7 @@ def _provenance_record() -> dict[str, object]:
 def test_replay_codec_off_text_reports_every_session_and_a_total(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["replay", str(CORPUS_DIR)]) == EXIT_OK
+    assert main(["research", "replay", str(CORPUS_DIR)]) == EXIT_OK
     out = capsys.readouterr().out
     assert "session-a-refactor.jsonl" in out
     assert "total cost" in out
@@ -477,7 +491,7 @@ def test_replay_codec_off_text_reports_every_session_and_a_total(
 def test_replay_codec_off_json_reports_a_parseable_total(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["replay", str(CORPUS_DIR), "--format", "json"]) == EXIT_OK
+    assert main(["research", "replay", str(CORPUS_DIR), "--format", "json"]) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
     assert payload["codec"] == "off"
     assert payload["total_turns"] == 125
@@ -485,11 +499,11 @@ def test_replay_codec_off_json_reports_a_parseable_total(
 
 
 def test_replay_assert_baseline_passes_on_the_fixture_corpus() -> None:
-    assert main(["replay", str(CORPUS_DIR), "--assert-baseline"]) == EXIT_OK
+    assert main(["research", "replay", str(CORPUS_DIR), "--assert-baseline"]) == EXIT_OK
 
 
 def test_replay_assert_baseline_requires_codec_off(capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(["replay", str(CORPUS_DIR), "--codec", "on", "--assert-baseline"])
+    exit_code = main(["research", "replay", str(CORPUS_DIR), "--codec", "on", "--assert-baseline"])
     assert exit_code == EXIT_ASSERT_BASELINE_REQUIRES_CODEC_OFF
     assert "--assert-baseline requires --codec off" in capsys.readouterr().err
 
@@ -500,7 +514,7 @@ def test_replay_codec_on_without_a_fixture_reports_it_is_missing(
     _write_records(
         tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
     )
-    exit_code = main(["replay", str(tmp_path), "--codec", "on"])
+    exit_code = main(["research", "replay", str(tmp_path), "--codec", "on"])
     assert exit_code == EXIT_MISSING_RECORDED_RESPONSE
     assert "no committed recorded-response fixture" in capsys.readouterr().err
 
@@ -522,7 +536,7 @@ def test_replay_codec_on_recorded_reports_net_cost_and_equivalence(
             )
         ],
     )
-    exit_code = main(["replay", str(tmp_path), "--codec", "on"])
+    exit_code = main(["research", "replay", str(tmp_path), "--codec", "on"])
     assert exit_code == EXIT_OK
     out = capsys.readouterr().out
     assert "net savings" in out
@@ -550,7 +564,7 @@ def test_replay_codec_on_json_reports_a_parseable_net_cost_payload(tmp_path: Pat
 
     buffer = io.StringIO()
     with redirect_stdout(buffer):
-        exit_code = main(["replay", str(tmp_path), "--codec", "on", "--format", "json"])
+        exit_code = main(["research", "replay", str(tmp_path), "--codec", "on", "--format", "json"])
     assert exit_code == EXIT_OK
     payload = json.loads(buffer.getvalue())
     assert payload["codec"] == "on"
@@ -563,7 +577,7 @@ def test_replay_live_requires_all_four_flags(
     _write_records(
         tmp_path / "s.jsonl", [_assistant_record(tool_name="Edit", tool_input={"path": "a.py"})]
     )
-    exit_code = main(["replay", str(tmp_path), "--codec", "on", "--mode", "live"])
+    exit_code = main(["research", "replay", str(tmp_path), "--codec", "on", "--mode", "live"])
     assert exit_code == EXIT_LIVE_CONFIG_ERROR
     assert "requires --model, --cost-cap, --artifact-dir, and --client" in capsys.readouterr().err
 
@@ -576,6 +590,7 @@ def test_replay_live_reports_an_unresolvable_client(
     )
     exit_code = main(
         [
+            "research",
             "replay",
             str(tmp_path),
             "--codec",
@@ -630,6 +645,7 @@ def test_replay_live_runs_end_to_end_with_an_injected_client(
     )
     exit_code = main(
         [
+            "research",
             "replay",
             str(corpus),
             "--codec",
@@ -653,13 +669,13 @@ def test_replay_live_runs_end_to_end_with_an_injected_client(
     assert written["provenance"]["source"] == "live"
 
 
-# --- laconic gates ---------------------------------------------------------
+# --- laconic research gates ---------------------------------------------
 
 
 def test_gates_exit_code_reflects_the_committed_corpus_real_kill(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    exit_code = main(["gates", "--corpus", str(CORPUS_DIR)])
+    exit_code = main(["research", "gates", "--corpus", str(CORPUS_DIR)])
     assert exit_code == 1
     out = capsys.readouterr().out
     assert "net-cost" in out
@@ -667,7 +683,7 @@ def test_gates_exit_code_reflects_the_committed_corpus_real_kill(
 
 
 def test_gates_format_json_is_parseable(capsys: pytest.CaptureFixture[str]) -> None:
-    main(["gates", "--corpus", str(CORPUS_DIR), "--format", "json"])
+    main(["research", "gates", "--corpus", str(CORPUS_DIR), "--format", "json"])
     payload = json.loads(capsys.readouterr().out)
     gate_names = {entry["gate"] for entry in payload["gates"]}
     assert gate_names == {
@@ -682,6 +698,7 @@ def test_gates_format_json_is_parseable(capsys: pytest.CaptureFixture[str]) -> N
 def test_gates_only_filters_which_gates_run(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(
         [
+            "research",
             "gates",
             "--corpus",
             str(CORPUS_DIR),
@@ -697,7 +714,9 @@ def test_gates_only_filters_which_gates_run(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_gates_only_rejects_an_unknown_gate_name(capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(["gates", "--corpus", str(CORPUS_DIR), "--only", "unknown-criterion"])
+    exit_code = main(
+        ["research", "gates", "--corpus", str(CORPUS_DIR), "--only", "unknown-criterion"]
+    )
     assert exit_code == EXIT_UNKNOWN_GATE
     assert "unknown-criterion" in capsys.readouterr().err
 
@@ -731,7 +750,7 @@ def test_gates_on_a_corpus_with_no_transcripts_reports_a_missing_recorded_respon
         )
         + "\n"
     )
-    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "net-cost"])
+    exit_code = main(["research", "gates", "--corpus", str(tmp_path), "--only", "net-cost"])
     assert exit_code == EXIT_MISSING_RECORDED_RESPONSE
     assert "no committed recorded-response fixture" in capsys.readouterr().err
 
@@ -741,7 +760,7 @@ def test_gates_on_an_empty_corpus_reports_no_corpus_rather_than_a_false_pass(
 ) -> None:
     """A typo'd or empty ``--corpus`` path must fail loudly, not report
     K2/K4/K5 as a green PASS on zero evidence."""
-    exit_code = main(["gates", "--corpus", str(tmp_path)])
+    exit_code = main(["research", "gates", "--corpus", str(tmp_path)])
     assert exit_code == EXIT_NO_CORPUS
     assert "no baseline transcripts" in capsys.readouterr().err
 
@@ -769,16 +788,18 @@ def test_gates_reports_a_malformed_reasoning_accuracy_fixture_with_its_own_exit_
         + "\n"
     )
     (tmp_path / "reasoning_accuracy_responses.ndjson").write_text('{"item_id": "widget_7"\n')
-    exit_code = main(["gates", "--corpus", str(tmp_path), "--only", "reasoning-accuracy"])
+    exit_code = main(
+        ["research", "gates", "--corpus", str(tmp_path), "--only", "reasoning-accuracy"]
+    )
     assert exit_code == EXIT_REASONING_ACCURACY_FIXTURE
     assert "not valid JSON" in capsys.readouterr().err
 
 
 def test_gates_has_no_live_mode_flag(capsys: pytest.CaptureFixture[str]) -> None:
     """Structural, not conventional: CI cannot reach a live model call
-    because `laconic gates` has no such flag to reach one with."""
+    because `laconic research gates` has no such flag to reach one with."""
     with pytest.raises(SystemExit) as exit_info:
-        main(["gates", "--help"])
+        main(["research", "gates", "--help"])
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     assert "--live" not in out

@@ -11,10 +11,10 @@ unsupported event, or a storage failure -- because H-46/H-48
 stdout content surfaces to Claude or a user, which the design's
 no-agent-visible-output invariant forbids unconditionally.
 
-This is **not** a ``laconic observe`` CLI subcommand: it is
+This is **not** a ``laconic diagnostics observe`` CLI subcommand: it is
 machine-invoked and never run by a person. M3 owns the user-facing
 ``install``/``remove``/``status``/``report`` subcommands under
-``laconic observe``.
+``laconic diagnostics observe``.
 """
 
 from __future__ import annotations

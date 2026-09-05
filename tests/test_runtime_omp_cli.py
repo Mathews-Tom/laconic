@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from laconic.cli import EXIT_OK, EXIT_OMP_INSTALL_ERROR, main
+from laconic.cli import EXIT_OK, EXIT_OMP_INSTALL_ERROR, EXIT_RUNTIME_REFERENCE_ERROR, main
+from laconic.ledger import ObservationKind
 from laconic.runtime.omp_installer import (
     OBSERVE_OWNED_MARKER,
     OMP_EXTENSION_FILENAME,
@@ -271,6 +272,73 @@ def test_status_on_absent_storage_does_not_create_it(
     assert payload["storage"]["exists"] is False
     assert payload["storage"]["sessions"] == 0
     assert not data_dir.exists()
+
+
+def test_expand_recovers_exact_runtime_content_and_spans(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+    raw = "alpha\nbeta\ngamma"
+    with storage.open_ledger("session-a") as ledger:
+        ledger.register(ObservationKind.FILE, "src/example.py", raw, "outline", 1)
+
+    assert main(["expand", "session-a/F1", "--data-dir", str(storage.root)]) == EXIT_OK
+    assert capsys.readouterr().out == raw
+
+    assert main(["expand", "session-a/F1:2-3", "--data-dir", str(storage.root)]) == EXIT_OK
+    assert capsys.readouterr().out == "beta\ngamma"
+
+
+@pytest.mark.parametrize(
+    ("reference", "error"),
+    [
+        ("not-a-reference", "invalid runtime reference"),
+        ("missing/F1", "runtime session does not exist"),
+        ("session-a/F2", "runtime handle does not exist"),
+        ("session-a/F1:1-3", "invalid runtime span"),
+    ],
+)
+def test_expand_rejects_invalid_or_unknown_runtime_references(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    reference: str,
+    error: str,
+) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+    with storage.open_ledger("session-a") as ledger:
+        ledger.register(ObservationKind.FILE, "src/example.py", "alpha\nbeta", "outline", 1)
+
+    assert (
+        main(["expand", reference, "--data-dir", str(storage.root)]) == EXIT_RUNTIME_REFERENCE_ERROR
+    )
+    result = capsys.readouterr()
+    assert result.out == ""
+    assert error in result.err
+
+
+def test_expand_on_absent_storage_fails_without_creating_it(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_dir = tmp_path / "absent"
+
+    assert (
+        main(["expand", "session-a/F1", "--data-dir", str(data_dir)])
+        == EXIT_RUNTIME_REFERENCE_ERROR
+    )
+    assert "runtime session does not exist" in capsys.readouterr().err
+    assert not data_dir.exists()
+
+
+@pytest.mark.parametrize("legacy_command", ["measure", "observe", "view", "k1"])
+def test_research_and_diagnostic_commands_are_not_top_level(
+    legacy_command: str,
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main([legacy_command, "--help"])
+
+    assert error.value.code == 2
 
 
 def test_purge_session_requires_explicit_apply_and_preserves_other_session(

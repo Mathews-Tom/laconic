@@ -28,13 +28,13 @@ jobs:
       - run: uv run pytest -q
       - run: uv run laconic --help
       - run: uv run laconic --version | grep -Eqx 'laconic [0-9]+\.[0-9]+\.[0-9]+'
-      # `laconic gates` reads only committed recorded-response fixtures; it
+      # `laconic research gates` reads only committed recorded-response fixtures; it
       # has no live-mode flag or provider configuration. Keep its verdicts
       # visible without allowing the pre-registered net-cost result to block
       # unrelated CI.
       - name: gates
         continue-on-error: true
-        run: uv run laconic gates --corpus tests/corpus --format json | tee gates.json
+        run: uv run laconic research gates --corpus tests/corpus --format json | tee gates.json
       # The tolerated gates step also masks malformed output and runner
       # crashes. Re-read the report in a required step so CI accepts only the
       # declared gate set, the manual human assessment, and the known

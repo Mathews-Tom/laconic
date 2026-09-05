@@ -177,6 +177,7 @@ def test_stage_c_cli_wires_fake_batch_results_into_json_protocol_report(
     monkeypatch.setattr(cli, "run_resumable_batch", fake_batch)
     exit_code = cli.main(
         [
+            "research",
             "k1",
             "stage-c",
             "run",
