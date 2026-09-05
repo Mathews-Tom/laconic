@@ -217,7 +217,8 @@ def test_reopening_preserves_handles_metrics_and_sequence_boundary(tmp_path: Pat
     first.handle(ShutdownRequest(request_id="shutdown-1"))
 
     reopened = RuntimeSession()
-    _initialize(reopened, tmp_path, request_id="init-2")
+    initialized = _initialize(reopened, tmp_path, request_id="init-2")
+    assert initialized.next_sequence == 2
     metrics = reopened.metrics()
     assert metrics.compressed_observations == 1
     assert metrics.full_expansions == 1

@@ -160,7 +160,7 @@ def test_encode_request_rejects_extra_missing_and_coerced_fields(
 @pytest.mark.parametrize(
     "response",
     [
-        InitializeResponse(request_id="r1", session_id="session-1"),
+        InitializeResponse(request_id="r1", session_id="session-1", next_sequence=1),
         EncodeObservationResponse(
             request_id="r2",
             decision="emitted",

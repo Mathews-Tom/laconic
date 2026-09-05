@@ -203,7 +203,11 @@ class RuntimeSession:
         self._session_id = request.session_id
         self._working_directory = working_directory
         self._last_sequence = decisions[-1].sequence if decisions else -1
-        return InitializeResponse(request_id=request.request_id, session_id=request.session_id)
+        return InitializeResponse(
+            request_id=request.request_id,
+            session_id=request.session_id,
+            next_sequence=self._last_sequence + 1 if decisions else 1,
+        )
 
     def _encode(self, request: EncodeObservationRequest) -> EncodeObservationResponse:
         if request.sequence <= self._last_sequence:

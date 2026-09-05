@@ -123,6 +123,7 @@ type RuntimeRequest = InitializeRequest | EncodeObservationRequest | ExpandReque
 class InitializeResponse:
     request_id: str
     session_id: str
+    next_sequence: int
     operation: Operation = Operation.INITIALIZE
     protocol_version: int = PROTOCOL_VERSION
 
@@ -420,7 +421,10 @@ def _response_payload(response: RuntimeResponse) -> dict[str, JsonValue]:
             "error": {"code": response.code.value, "message": response.message},
         }
     if isinstance(response, InitializeResponse):
-        result: dict[str, JsonValue] = {"session_id": response.session_id}
+        result: dict[str, JsonValue] = {
+            "session_id": response.session_id,
+            "next_sequence": response.next_sequence,
+        }
     elif isinstance(response, EncodeObservationResponse):
         result = {
             "decision": response.decision,
@@ -482,8 +486,12 @@ def parse_response_line(line: str) -> RuntimeResponse:
     request_id, operation = _request_context(reader)
     result = _Reader(reader.object("result"))
     if operation is Operation.INITIALIZE:
-        result.exact_keys("session_id")
-        return InitializeResponse(request_id=request_id, session_id=result.string("session_id"))
+        result.exact_keys("session_id", "next_sequence")
+        return InitializeResponse(
+            request_id=request_id,
+            session_id=result.string("session_id"),
+            next_sequence=result.integer("next_sequence", minimum=0),
+        )
     if operation is Operation.ENCODE_OBSERVATION:
         result.exact_keys(
             "decision",
