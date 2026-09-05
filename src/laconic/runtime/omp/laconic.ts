@@ -83,6 +83,11 @@ export interface EncodeOutcome {
   rawChars: number;
   visibleChars: number;
 }
+export interface ExpandOutcome {
+  reference: string;
+  content: string;
+  metricRecorded: boolean;
+}
 
 export class RuntimeProtocolError extends Error {
   constructor(
@@ -93,6 +98,12 @@ export class RuntimeProtocolError extends Error {
     this.name = "RuntimeProtocolError";
   }
 }
+const REQUEST_FAULT_CODES: Readonly<Record<string, true>> = {
+  invalid_reference: true,
+  unknown_session: true,
+  unknown_handle: true,
+  invalid_span: true,
+};
 
 interface PendingRequest {
   operation: RuntimeOperation;
@@ -172,6 +183,20 @@ function validateEncodeOutcome(result: JsonObject): EncodeOutcome {
     throw new RuntimeProtocolError("invalid_frame", "emitted response is inconsistent");
   }
   return { decision, content, reference, rawChars, visibleChars };
+}
+function validateExpandOutcome(result: JsonObject, reference: string): ExpandOutcome {
+  if (!hasExactKeys(result, ["reference", "content", "metric_recorded"])) {
+    throw new RuntimeProtocolError("invalid_frame", "expand response is malformed");
+  }
+  const returnedReference = asString(result.reference, "reference");
+  if (returnedReference !== reference || typeof result.metric_recorded !== "boolean") {
+    throw new RuntimeProtocolError("invalid_frame", "expand response is inconsistent");
+  }
+  return {
+    reference: returnedReference,
+    content: asString(result.content, "content", true),
+    metricRecorded: result.metric_recorded,
+  };
 }
 
 function inheritedEnvironment(): Record<string, string> {
@@ -559,7 +584,12 @@ export class RuntimeSupervisor {
       this.state = "ready";
       return result;
     } catch (error) {
-      this.recordFailure();
+      if (
+        !(error instanceof RuntimeProtocolError) ||
+        REQUEST_FAULT_CODES[error.code] === undefined
+      ) {
+        this.recordFailure();
+      }
       throw error;
     }
   }
@@ -578,6 +608,11 @@ export class RuntimeSupervisor {
       sequence,
     });
     return validateEncodeOutcome(result);
+  }
+
+  async expand(reference: string): Promise<ExpandOutcome> {
+    const result = await this.invoke("expand", { reference });
+    return validateExpandOutcome(result, reference);
   }
 
   async pause(): Promise<void> {
@@ -679,8 +714,99 @@ export function attachObservationInterceptor(
   );
 }
 
+function statusSummary(snapshot: SupervisorSnapshot): string {
+  return [
+    `state=${snapshot.state}`,
+    `session=${snapshot.sessionId ?? "none"}`,
+    `failures=${snapshot.consecutiveFailures}`,
+    `breaker=${snapshot.breakerOpen ? "open" : "closed"}`,
+  ].join(" ");
+}
+
+function publishStatus(ctx: ExtensionContext, supervisor: RuntimeSupervisor, notify = true): void {
+  const snapshot = supervisor.snapshot();
+  ctx.ui.setStatus("laconic", `Laconic: ${snapshot.state}`);
+  if (notify) {
+    ctx.ui.notify(`Laconic runtime: ${statusSummary(snapshot)}`, "info");
+  }
+}
+
+export function attachRecoverySurface(
+  pi: ExtensionAPI,
+  supervisor: RuntimeSupervisor,
+): void {
+  const z = pi.zod;
+  pi.registerTool({
+    name: "laconic_expand",
+    label: "Expand Laconic observation",
+    description:
+      "Recover complete text or a line span from a Laconic reference. " +
+      "Pass the exact session/handle reference emitted in a compressed observation.",
+    parameters: z.object({
+      reference: z
+        .string()
+        .describe("Laconic reference: SESSION/HANDLE or SESSION/HANDLE:FIRST-LAST"),
+    }),
+    loadMode: "essential",
+    approval: "read",
+    strict: true,
+    async execute(_toolCallId, params) {
+      try {
+        if (!isObject(params) || typeof params.reference !== "string") {
+          throw new RuntimeProtocolError("invalid_reference", "reference must be a string");
+        }
+        const outcome = await supervisor.expand(params.reference);
+        return {
+          content: [{ type: "text" as const, text: outcome.content }],
+        };
+      } catch (error) {
+        const code = error instanceof RuntimeProtocolError ? error.code : "runtime_failure";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `laconic expansion failed: ${code}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  });
+
+  pi.registerCommand("laconic", {
+    description: "Show, pause, or resume the Laconic runtime",
+    handler: async (args, ctx) => {
+      const action = args.trim() || "status";
+      if (action === "status") {
+        publishStatus(ctx, supervisor);
+        return;
+      }
+      if (action === "pause") {
+        await supervisor.pause();
+        publishStatus(ctx, supervisor);
+        return;
+      }
+      if (action === "resume") {
+        await supervisor.resume(ctx);
+        const snapshot = supervisor.snapshot();
+        publishStatus(ctx, supervisor, false);
+        ctx.ui.notify(
+          snapshot.state === "ready"
+            ? `Laconic runtime resumed: ${statusSummary(snapshot)}`
+            : `Laconic runtime unavailable: ${statusSummary(snapshot)}`,
+          snapshot.state === "ready" ? "info" : "warning",
+        );
+        return;
+      }
+      ctx.ui.notify("Usage: /laconic [status|pause|resume]", "error");
+    },
+  });
+}
+
 export default function laconicRuntime(pi: ExtensionAPI): void {
   pi.setLabel("Laconic runtime");
   const supervisor = attachRuntimeLifecycle(pi);
   attachObservationInterceptor(pi, supervisor);
+  attachRecoverySurface(pi, supervisor);
 }

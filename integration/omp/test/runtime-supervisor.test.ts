@@ -15,6 +15,7 @@ import {
   RuntimeProtocolError,
   RuntimeSupervisor,
   attachObservationInterceptor,
+  attachRecoverySurface,
   attachRuntimeLifecycle,
   type JsonObject,
   type RuntimeOperation,
@@ -165,6 +166,68 @@ async function interceptorHarness(): Promise<{
   await supervisor.bind(context);
   attachObservationInterceptor(captureApi(handlers), supervisor);
   return { handlers, runtime, supervisor, context };
+}
+
+interface ToolExecutionResult {
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+}
+
+interface RegisteredToolFixture {
+  name: string;
+  loadMode?: string;
+  approval?: string;
+  execute(toolCallId: string, params: { reference: string }): Promise<ToolExecutionResult>;
+}
+
+interface RegisteredCommandFixture {
+  handler(args: string, ctx: ExtensionContext): Promise<void>;
+}
+
+interface RecoverySurface {
+  tool?: RegisteredToolFixture;
+  commandName?: string;
+  command?: RegisteredCommandFixture;
+}
+
+function captureRecoveryApi(surface: RecoverySurface): ExtensionAPI {
+  const stringSchema = {
+    describe() {
+      return stringSchema;
+    },
+  };
+  return {
+    zod: {
+      string: () => stringSchema,
+      object: (shape: unknown) => shape,
+    },
+    registerTool(tool: RegisteredToolFixture) {
+      surface.tool = tool;
+    },
+    registerCommand(name: string, command: RegisteredCommandFixture) {
+      surface.commandName = name;
+      surface.command = command;
+    },
+  } as unknown as ExtensionAPI;
+}
+
+function operatorContext(
+  sessionId: string,
+  notifications: Array<{ message: string; type: string | undefined }>,
+  statuses: Array<{ key: string; text: string | undefined }>,
+): ExtensionContext {
+  return {
+    cwd: "/project",
+    sessionManager: { getSessionId: () => sessionId },
+    ui: {
+      notify(message: string, type?: string) {
+        notifications.push({ message, type });
+      },
+      setStatus(key: string, text: string | undefined) {
+        statuses.push({ key, text });
+      },
+    },
+  } as unknown as ExtensionContext;
 }
 
 describe("OMP runtime lifecycle", () => {
@@ -329,6 +392,114 @@ describe("tool-result interception", () => {
       await supervisor.shutdown();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("recovery and operator surfaces", () => {
+  test("registers an essential read tool that expands full and spanned cross-session text", async () => {
+    const root = mkdtempSync(join(tmpdir(), "laconic-omp-expand-"));
+    const supervisor = new RuntimeSupervisor({
+      command: [pythonInterpreter(), "-m", "laconic.runtime"],
+      dataDirectory: join(root, "ledgers"),
+      requestTimeoutMs: INTEGRATION_REQUEST_TIMEOUT_MS,
+    });
+    const surface: RecoverySurface = {};
+    attachRecoverySurface(captureRecoveryApi(surface), supervisor);
+    if (surface.tool === undefined) {
+      throw new Error("recovery tool was not registered");
+    }
+    const raw = Array.from({ length: 200 }, (_, index) => `source line ${index + 1}`).join("\n");
+    try {
+      await supervisor.bind(fakeContext("source-session", process.cwd()));
+      const encoded = await supervisor.encodeObservation("Bash", { command: "fixture" }, raw);
+      if (encoded.reference === null) {
+        throw new Error("fixture did not emit a runtime reference");
+      }
+      await supervisor.bind(fakeContext("active-session", process.cwd()));
+
+      const full = await surface.tool.execute("expand-full", {
+        reference: encoded.reference,
+      });
+      const span = await surface.tool.execute("expand-span", {
+        reference: `${encoded.reference}:2-3`,
+      });
+
+      expect(surface.tool.name).toBe("laconic_expand");
+      expect(surface.tool.loadMode).toBe("essential");
+      expect(surface.tool.approval).toBe("read");
+      expect(full).toEqual({ content: [{ type: "text", text: raw }] });
+      expect(span).toEqual({
+        content: [{ type: "text", text: "source line 2\nsource line 3" }],
+      });
+    } finally {
+      await supervisor.shutdown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("invalid expansion fails loudly without leaking the supplied reference or opening breaker", async () => {
+    const runtime = new ScriptedRuntimeProcess();
+    const supervisor = new RuntimeSupervisor({ createProcess: async () => runtime });
+    await supervisor.bind(fakeContext("session-a", "/project"));
+    const surface: RecoverySurface = {};
+    attachRecoverySurface(captureRecoveryApi(surface), supervisor);
+    if (surface.tool === undefined) {
+      throw new Error("recovery tool was not registered");
+    }
+    const secretReference = "secret-invalid-reference";
+    runtime.responses.push(
+      new RuntimeProtocolError("invalid_reference", `invalid reference ${secretReference}`),
+    );
+
+    const result = await surface.tool.execute("expand-invalid", {
+      reference: secretReference,
+    });
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "laconic expansion failed: invalid_reference" }],
+      isError: true,
+    });
+    expect(JSON.stringify(result)).not.toContain(secretReference);
+    expect(supervisor.snapshot().consecutiveFailures).toBe(0);
+    expect(supervisor.snapshot().breakerOpen).toBe(false);
+  });
+
+  test("status, pause, and resume stay local to the extension runtime", async () => {
+    const processes: FakeRuntimeProcess[] = [];
+    const supervisor = new RuntimeSupervisor({
+      createProcess: async () => {
+        const runtime = new FakeRuntimeProcess();
+        processes.push(runtime);
+        return runtime;
+      },
+    });
+    const notifications: Array<{ message: string; type: string | undefined }> = [];
+    const statuses: Array<{ key: string; text: string | undefined }> = [];
+    const context = operatorContext("session-a", notifications, statuses);
+    await supervisor.bind(context);
+    const surface: RecoverySurface = {};
+    attachRecoverySurface(captureRecoveryApi(surface), supervisor);
+    if (surface.command === undefined) {
+      throw new Error("operator command was not registered");
+    }
+
+    await surface.command.handler("", context);
+    await surface.command.handler("pause", context);
+    expect(supervisor.snapshot().state).toBe("paused");
+    expect(processes[0]?.shutdownCalls).toBe(1);
+    await surface.command.handler("resume", operatorContext("session-b", notifications, statuses));
+    expect(supervisor.snapshot().state).toBe("ready");
+    expect(supervisor.snapshot().sessionId).toBe("session-b");
+    await surface.command.handler("unknown", context);
+
+    expect(surface.commandName).toBe("laconic");
+    expect(statuses).toContainEqual({ key: "laconic", text: "Laconic: paused" });
+    expect(statuses).toContainEqual({ key: "laconic", text: "Laconic: ready" });
+    expect(notifications.some(({ message }) => message.includes("state=ready"))).toBe(true);
+    expect(notifications.at(-1)).toEqual({
+      message: "Usage: /laconic [status|pause|resume]",
+      type: "error",
+    });
   });
 });
 
