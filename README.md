@@ -1,6 +1,6 @@
 # Laconic
 
-**Shrink what your coding agent carries. Lose nothing.**
+**Carry less context. Keep every byte.**
 
 Laconic sits at your agent's tool boundary and replaces bulky tool results with a structural outline plus the lines that were actually asked for — while keeping the exact original bytes on disk, addressable, until you say otherwise.
 
@@ -47,7 +47,31 @@ src/laconic/ledger.py  745 lines
 
 **29,186 characters in, 810 out — 97% fewer characters at the tool boundary.** The agent still sees the shape of the whole file, gets the exact lines it asked for verbatim, and can pull any other part back by itself, mid-task, without asking you. The handle is right there on the first line.
 
-Asked for nothing in particular, that same file comes back as a 313-character outline.
+With no requested span, the complete recovery-bearing envelope is 313 characters and contains only the structural outline.
+
+## How it works
+
+Laconic is closer to a claim ticket than a trash compactor. The model carries a short handle and the useful part of a result; the complete original stays in a private local ledger.
+
+```mermaid
+flowchart TB
+    RESULT["Successful text tool result"] --> ADAPTER["Host adapter"]
+    ADAPTER --> RUNTIME["Canonical Python runtime"]
+    RUNTIME --> CODEC["Tool-shaped encoder"]
+    CODEC --> LEDGER[("Private session ledger")]
+    LEDGER --> CHECK{"Exact recovery succeeds and the full envelope is smaller"}
+    CHECK -->|"yes"| ENVELOPE["Model sees the envelope and handle"]
+    CHECK -->|"no"| ORIGINAL["Model sees the original result"]
+    ENVELOPE --> EXPAND["Agent expands exact full text or a line span"]
+```
+
+1. The host adapter intercepts an eligible successful text result. Tool errors, mixed content, unsupported tools and malformed responses remain unchanged.
+2. The shared runtime selects a file, command or search encoder. File results retain structure and requested lines; command and search results retain boundaries and salient errors.
+3. The encoder commits the exact raw result to the session ledger before returning a candidate.
+4. The runtime immediately expands the reference and compares the complete envelope with the original. Recovery mismatch or no size win means pass-through.
+5. The model receives either the smaller envelope or the untouched original. Any omitted content remains available through the handle.
+
+OMP and Claude Code use different host adapters but share this decision path. Compression policy, reference minting, recovery and storage are not reimplemented per host.
 
 ## What you get
 
@@ -122,18 +146,16 @@ laconic setup --verify-only    # did it actually run?
 laconic savings
 ```
 
-```text
-Modelled cost avoided
-  $110.80 to $255.82  (4.58% to 10.58%)
-  against a modelled $2,418.27 for the sessions this estimate covers
-  A model, not a measurement: no session ran without the codec, so
-  this is what the removed characters would have cost, not a saving
-  anyone observed. Every assumption is listed in the written report.
-```
+The command reads your local session billing metadata and reports:
 
-You also get a full local breakdown of where your model spend actually went — uncached input, cache reads, cache writes, output — joined to what the codec did in those same sessions. Prices resolve through a registry that ships **3,134 models** offline and refreshes on demand.
+- spend composition across uncached input, cache reads, cache writes and output;
+- codec decisions joined to the sessions that carry priced turns;
+- the modelled total for those same sessions; and
+- a modelled avoided-cost band when the underlying pricing coverage is sufficient.
 
-The figure is deliberately a band, and deliberately labelled. It is modelled from token counters, never billed by a provider, and the report carries its own assumptions rather than burying them. When more than a quarter of the underlying cost comes from models with no published price, the tool stops printing dollars and leads with the percentage instead. **We would rather show you less than show you something we cannot stand behind.**
+The result changes as your local session history grows, so this README does not freeze a sample dollar amount. `laconic savings` writes the complete assumptions and current figures to `.laconic/spend/spend-composition.md`.
+
+The avoided-cost result is deliberately a band and deliberately labelled. It is modelled from token counters, never billed by a provider, and every assumption remains attached to the report. When more than a quarter of the underlying cost comes from models with no published price, Laconic withholds the dollar figures and leads with the percentage instead. **We would rather show you less than show you something we cannot stand behind.**
 
 ## Commands
 
@@ -173,14 +195,43 @@ What *is* measured is in [`docs/runtime-beta-report.md`](docs/runtime-beta-repor
 
 ## Contributing
 
+Read [`docs/grounding.md`](docs/grounding.md) first. It defines the product boundary and the invariants every change must preserve.
+
+### Repository map
+
+| Boundary | Responsibility | Start here |
+| --- | --- | --- |
+| CLI and setup | Detect hosts, install adapters, expose status, expansion and purge | `src/laconic/cli.py`, `src/laconic/setup.py` |
+| Host adapters | Normalize supported tool results and fail open to native host behavior | `src/laconic/runtime/omp/laconic.ts`, `src/laconic/runtime/claude_code.py` |
+| Runtime decision | Enforce tool eligibility, exact recovery and the strictly-smaller rule | `src/laconic/runtime/engine.py`, `src/laconic/runtime/protocol.py` |
+| Observation codecs | Dispatch by tool shape and build file, command or search presentations | `src/laconic/codec/observe.py`, `src/laconic/codec/encoders/` |
+| Recovery storage | Store exact raw observations, mint handles and expand full or ranged references | `src/laconic/ledger.py`, `src/laconic/runtime/storage.py` |
+| Local reporting | Join content-free runtime decisions with usage and offline model prices | `src/laconic/spend/`, `src/laconic/pricing/` |
+
+Keep host adapters thin. A decision that changes what reaches the model belongs in the canonical Python runtime or codec, not in a second host-specific implementation.
+
+The repository also contains qualification and research infrastructure under `src/laconic/beta/`, `src/laconic/gates/`, `src/laconic/replay/` and `src/laconic/study/`. These packages measure or validate the product; they are not alternate runtime paths.
+
+### Prove behavior at the consumer boundary
+
+Trace changes through the layer that consumes them. For example, extending error-line recognition starts in `src/laconic/codec/encoders/_elision.py`, requires positive and negative classifier cases, and finishes with a consumer-visible `elide_middle` test proving that a matching line survives from the omitted middle. A regex-only assertion does not prove the user-visible contract.
+
+### Run the local gate
+
 ```bash
-uv sync
-uv run ruff check . && uv run ruff format --check .
+uv sync --locked
+bun install --frozen-lockfile
+bun run typecheck
+bun test
+uv run ruff check .
+uv run ruff format --check .
 uv run mypy --strict src
-uv run python -m pytest -q
+uv run pytest -q
+uv run laconic --help
+uv run laconic --version
 ```
 
-Python 3.12+, `uv`, `mypy --strict`, 1,596 tests. [`docs/grounding.md`](docs/grounding.md) is the charter — read it before proposing a change that widens a claim.
+Development requires Python 3.12+, `uv` and Bun. CI also evaluates the committed recorded-response research fixtures; those checks make no live provider calls.
 
 ## License
 
