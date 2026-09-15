@@ -146,18 +146,16 @@ laconic setup --verify-only    # did it actually run?
 laconic savings
 ```
 
-```text
-Modelled cost avoided
-  $110.80 to $255.82  (4.58% to 10.58%)
-  against a modelled $2,418.27 for the sessions this estimate covers
-  A model, not a measurement: no session ran without the codec, so
-  this is what the removed characters would have cost, not a saving
-  anyone observed. Every assumption is listed in the written report.
-```
+The command reads your local session billing metadata and reports:
 
-You also get a full local breakdown of where your model spend actually went — uncached input, cache reads, cache writes, output — joined to what the codec did in those same sessions. Prices resolve through a registry that ships **3,134 models** offline and refreshes on demand.
+- spend composition across uncached input, cache reads, cache writes and output;
+- codec decisions joined to the sessions that carry priced turns;
+- the modelled total for those same sessions; and
+- a modelled avoided-cost band when the underlying pricing coverage is sufficient.
 
-The figure is deliberately a band, and deliberately labelled. It is modelled from token counters, never billed by a provider, and the report carries its own assumptions rather than burying them. When more than a quarter of the underlying cost comes from models with no published price, the tool stops printing dollars and leads with the percentage instead. **We would rather show you less than show you something we cannot stand behind.**
+The result changes as your local session history grows, so this README does not freeze a sample dollar amount. `laconic savings` writes the complete assumptions and current figures to `.laconic/spend/spend-composition.md`.
+
+The avoided-cost result is deliberately a band and deliberately labelled. It is modelled from token counters, never billed by a provider, and every assumption remains attached to the report. When more than a quarter of the underlying cost comes from models with no published price, Laconic withholds the dollar figures and leads with the percentage instead. **We would rather show you less than show you something we cannot stand behind.**
 
 ## Commands
 
