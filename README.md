@@ -1,6 +1,6 @@
 # Laconic
 
-**Shrink what your coding agent carries. Lose nothing.**
+**Carry less context. Keep every byte.**
 
 Laconic sits at your agent's tool boundary and replaces bulky tool results with a structural outline plus the lines that were actually asked for — while keeping the exact original bytes on disk, addressable, until you say otherwise.
 
@@ -47,7 +47,31 @@ src/laconic/ledger.py  745 lines
 
 **29,186 characters in, 810 out — 97% fewer characters at the tool boundary.** The agent still sees the shape of the whole file, gets the exact lines it asked for verbatim, and can pull any other part back by itself, mid-task, without asking you. The handle is right there on the first line.
 
-Asked for nothing in particular, that same file comes back as a 313-character outline.
+With no requested span, the complete recovery-bearing envelope is 313 characters and contains only the structural outline.
+
+## How it works
+
+Laconic is closer to a claim ticket than a trash compactor. The model carries a short handle and the useful part of a result; the complete original stays in a private local ledger.
+
+```mermaid
+flowchart TB
+    RESULT["Successful text tool result"] --> ADAPTER["Host adapter"]
+    ADAPTER --> RUNTIME["Canonical Python runtime"]
+    RUNTIME --> CODEC["Tool-shaped encoder"]
+    CODEC --> LEDGER[("Private session ledger")]
+    LEDGER --> CHECK{"Exact recovery succeeds and the full envelope is smaller"}
+    CHECK -->|"yes"| ENVELOPE["Model sees the envelope and handle"]
+    CHECK -->|"no"| ORIGINAL["Model sees the original result"]
+    ENVELOPE --> EXPAND["Agent expands exact full text or a line span"]
+```
+
+1. The host adapter intercepts an eligible successful text result. Tool errors, mixed content, unsupported tools and malformed responses remain unchanged.
+2. The shared runtime selects a file, command or search encoder. File results retain structure and requested lines; command and search results retain boundaries and salient errors.
+3. The encoder commits the exact raw result to the session ledger before returning a candidate.
+4. The runtime immediately expands the reference and compares the complete envelope with the original. Recovery mismatch or no size win means pass-through.
+5. The model receives either the smaller envelope or the untouched original. Any omitted content remains available through the handle.
+
+OMP and Claude Code use different host adapters but share this decision path. Compression policy, reference minting, recovery and storage are not reimplemented per host.
 
 ## What you get
 
