@@ -197,14 +197,43 @@ What *is* measured is in [`docs/runtime-beta-report.md`](docs/runtime-beta-repor
 
 ## Contributing
 
+Read [`docs/grounding.md`](docs/grounding.md) first. It defines the product boundary and the invariants every change must preserve.
+
+### Repository map
+
+| Boundary | Responsibility | Start here |
+| --- | --- | --- |
+| CLI and setup | Detect hosts, install adapters, expose status, expansion and purge | `src/laconic/cli.py`, `src/laconic/setup.py` |
+| Host adapters | Normalize supported tool results and fail open to native host behavior | `src/laconic/runtime/omp/laconic.ts`, `src/laconic/runtime/claude_code.py` |
+| Runtime decision | Enforce tool eligibility, exact recovery and the strictly-smaller rule | `src/laconic/runtime/engine.py`, `src/laconic/runtime/protocol.py` |
+| Observation codecs | Dispatch by tool shape and build file, command or search presentations | `src/laconic/codec/observe.py`, `src/laconic/codec/encoders/` |
+| Recovery storage | Store exact raw observations, mint handles and expand full or ranged references | `src/laconic/ledger.py`, `src/laconic/runtime/storage.py` |
+| Local reporting | Join content-free runtime decisions with usage and offline model prices | `src/laconic/spend/`, `src/laconic/pricing/` |
+
+Keep host adapters thin. A decision that changes what reaches the model belongs in the canonical Python runtime or codec, not in a second host-specific implementation.
+
+The repository also contains qualification and research infrastructure under `src/laconic/beta/`, `src/laconic/gates/`, `src/laconic/replay/` and `src/laconic/study/`. These packages measure or validate the product; they are not alternate runtime paths.
+
+### Prove behavior at the consumer boundary
+
+Trace changes through the layer that consumes them. For example, extending error-line recognition starts in `src/laconic/codec/encoders/_elision.py`, requires positive and negative classifier cases, and finishes with a consumer-visible `elide_middle` test proving that a matching line survives from the omitted middle. A regex-only assertion does not prove the user-visible contract.
+
+### Run the local gate
+
 ```bash
-uv sync
-uv run ruff check . && uv run ruff format --check .
+uv sync --locked
+bun install --frozen-lockfile
+bun run typecheck
+bun test
+uv run ruff check .
+uv run ruff format --check .
 uv run mypy --strict src
-uv run python -m pytest -q
+uv run pytest -q
+uv run laconic --help
+uv run laconic --version
 ```
 
-Python 3.12+, `uv`, `mypy --strict`, 1,596 tests. [`docs/grounding.md`](docs/grounding.md) is the charter — read it before proposing a change that widens a claim.
+Development requires Python 3.12+, `uv` and Bun. CI also evaluates the committed recorded-response research fixtures; those checks make no live provider calls.
 
 ## License
 
