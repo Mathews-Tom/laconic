@@ -1,0 +1,34 @@
+{
+  "census_id": "mcp-opportunity-post-v0.12.0",
+  "disposition": "HOLD \u2014 M22 MCP SUPPORT: failed=evidence_floor,materiality,emission,aggregate_reduction,validity",
+  "failed_predicates": [
+    "evidence_floor",
+    "materiality",
+    "emission",
+    "aggregate_reduction",
+    "validity"
+  ],
+  "limitations": [
+    "offline_fallback_probe_not_runtime_support",
+    "character_reduction_not_token_or_cost_savings",
+    "local_private_population_not_generalizable"
+  ],
+  "manifest_sha256": "de4d10ef1eb101b6174fb2d1a881a93b56992f65d619491adde9a5d4ee979242",
+  "population": {
+    "candidate_result_chars": 13982718,
+    "distinct_mcp_sessions": 9,
+    "eligible_mcp_results": 134,
+    "mcp_candidate_chars": 374157
+  },
+  "predicates": {
+    "aggregate_reduction": false,
+    "emission": false,
+    "evidence_floor": false,
+    "materiality": false,
+    "recoverability": true,
+    "validity": false
+  },
+  "provider_calls": 0,
+  "schema_version": 1,
+  "source_inventory_sha256": "5f24d134428f8b7a22ab30df7a025448fc30fb1e239bc856a5c176d6d32a59ce"
+}
