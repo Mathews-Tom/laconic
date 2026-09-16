@@ -20,6 +20,8 @@ Laconic is not:
 - a history-rewriting residency compactor or action/edit rewriter in the first runtime beta;
 - a source of universal token, cost, cache, or behavior claims from character reduction.
 
+An approved static project and evidence site is documentation publication, not a hosted Laconic runtime or service. It may explain the product and publish frozen, privacy-safe aggregate evidence, but it cannot transform results, collect telemetry, read private stores, call providers, or turn observed character reduction into a general savings claim.
+
 ## Product and research gates
 
 Two decisions have separate evidence requirements:
@@ -82,4 +84,4 @@ Before proposing work, verify that it:
 - does not revive historical replay, external data, or provider spend as a product prerequisite;
 - does not claim real-session token, cost, cache, or behavior savings from the synthetic fixture or raw character reduction;
 - does not treat K3 dry-run data as participant evidence;
-- does not expand the first beta into action rewriting, history compaction, MCP, hosted services, project state, routing, or orchestration without new runtime evidence and an explicit design decision.
+- does not expand the runtime into action rewriting, history compaction, MCP, hosted execution or telemetry services, project state, routing, or orchestration without new runtime evidence and an explicit design decision. Static documentation and frozen aggregate evidence publication remain allowed when they preserve the local-runtime, privacy, and claims boundaries above.
