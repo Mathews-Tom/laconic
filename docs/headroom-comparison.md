@@ -65,7 +65,7 @@ Headroom performs compression locally, but Headroom 0.37.0 separately enables an
 
 ### Claims constrained by evidence
 
-Laconic's real-OMP qualification covered ten sessions across three repositories and 137 eligible observations. Every safety counter was zero; encoding latency was 1.45 ms at p50 and 18.65 ms at p95; the read-heavy workload showed 35.84% character reduction.
+Laconic's real-OMP qualification covered ten sessions across three repositories and 162 eligible observations. Every safety counter was zero; encoding latency was 2.16 ms at p50 and 19.87 ms at p95; the read-heavy workload showed 51.77% character reduction.
 
 That result does not establish token, cost, cache, or behavior savings. Laconic's spend report is single-arm. M20-v1 ran once and returned its pre-registered [incomplete disposition](results/controlled-spend-pilot.md): 0 valid cells, no dispersion, correlation, effect, or confirmatory sample, and no reusable observation. M20-v2 is the mechanically corrected protocol, with a separate manifest, prompts, private root, and authorization gate. Neither result supports a savings, equivalence, direction, or superiority claim. M20-v2 then ran once and completed, publishing only dispersion, cross-arm cost correlations, mechanism and completion counters, pooled gateway spend, and a confirmatory sample size of 15 tasks at two repetitions. It reports no arm means and no paired effect, so it still does not establish that either tool costs less than the other.
 

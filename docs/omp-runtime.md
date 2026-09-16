@@ -136,24 +136,16 @@ The runtime reports character counts because it compares exact strings at the to
 
 The predeclared qualification campaign completed and its report is committed verbatim at [`docs/runtime-beta-report.md`](runtime-beta-report.md). It was generated from per-session receipts by `python -m laconic.beta report generate`, and `report check` refuses a committed report that has drifted from its evidence. Read that report with these facts about how it was produced:
 
-- **Campaign.** Ten OMP 18.1.10 sessions, all reaching a clean `session_shutdown`, across three canonical Git roots, producing 137 observations the codec actually evaluated. Every safety counter is zero: no emitted reference failed exact recovery, no tool error was compressed, no envelope was larger than its raw content, and no result corruption was observed.
+- **Campaign.** Ten OMP 18.1.10 sessions, all reaching a clean `session_shutdown`, across three canonical Git roots, producing 162 observations the codec actually evaluated. Every safety counter is zero: no emitted reference failed exact recovery, no tool error was compressed, no envelope was larger than its raw content, and no result corruption was observed.
 - **Sessions were agent-driven.** Nine sessions ran headless (`omp -p`) and one interactively, all performing read-only repository investigation under an automated prompt rather than a human's own coding work. Ledger contents are genuine engine output; the work those sessions performed is narrower than general daily use.
 - **Repositories were local clones** of three unrelated projects pinned at fixed commits, not live working checkouts.
-- **The observed 35.84% character reduction is descriptive of that workload only.** Read-heavy investigation is the shape the codec handles best; 96 of 137 eligible observations were still passed through unchanged because their envelope would not have been smaller. No minimum savings figure gates the beta, and none is claimed.
-- **Faults were injected deliberately** — absent interpreter, non-executable interpreter, engine killed mid-session, one malformed protocol frame, and one response stalled past the 250 ms deadline. In every case the host returned the original observation and the session completed; measured latency was 1.45 ms at p50 and 18.65 ms at p95.
-- **The qualified wheel predates one fix.** The campaign's crash scenarios exposed a defect in `laconic status` and `laconic purge --older-than`, which could not read a ledger whose writer had been killed. That fix landed after the candidate wheel was frozen, so the released wheel is not byte-identical to the qualified one — see below.
+- **The observed 51.77% character reduction is descriptive of that workload only.** Read-heavy investigation is the shape the codec handles best; 90 of 162 eligible observations were still passed through unchanged because their envelope would not have been smaller. No minimum savings figure gates the beta, and none is claimed.
+- **Faults were injected deliberately** — absent interpreter, non-executable interpreter, engine killed mid-session, one malformed protocol frame, and one response stalled past the 250 ms deadline. In every case the host returned the original observation and the session completed; measured latency was 2.16 ms at p50 and 19.87 ms at p95.
 
 ### Qualified artifact vs released artifact
 
-The campaign qualified wheel SHA-256 `d9c4f4c191915d86a43aee72cca832e940a8ae360e830f7b815f2a814a2aa0b6`, built from the qualification protocol's own commit. Version 0.9.0 ships one change to packaged code on top of it:
+The campaign qualified the `0.13.0` candidate wheel with SHA-256 `5c8d532b2bd87195357569b7fdd163bed328eff415778a95a5d1fbe0a1a60330`. Release review then found that the packaged README still quoted the preceding campaign's figures. Correcting those three claims produced the release wheel with SHA-256 `6965212ed6a284a65132df844f6a32d2b55a42375008279b0dc428d7fa07a23f`.
 
-```text
-src/laconic/runtime/operator.py | 31 +++++++++++++++++++++++++------
-1 file changed, 25 insertions(+), 6 deletions(-)
-```
+An archive-level comparison found exactly two changed wheel members: `laconic-0.13.0.dist-info/METADATA`, containing only the corrected README prose, and `laconic-0.13.0.dist-info/RECORD`, containing the corresponding integrity digest. Every runtime module, codec, ledger, protocol implementation, OMP extension asset, dependency declaration, entry point, and other wheel member is byte-identical to the qualified candidate. No qualification scenario is reachable from this metadata-only correction, so no scenario required re-execution.
 
-That is the entire difference: a `_query_only` helper, two call sites switched to it, and one import. No other file under `src/` changed, so the codec, ledger, session engine, JSONL protocol, and OMP extension asset are bit-for-bit the code the campaign qualified.
-
-The campaign was deliberately not re-run for it, because no acceptance criterion is reachable from that file. `operator.py` is read-only reporting — `status` and `purge --older-than`. It runs after a session, never inside one, and cannot influence a compression decision, an envelope, a recovery, or a latency sample; those come from `runtime/engine.py`, `ledger.py`, `codec/`, and the extension. Re-running would have reproduced identical safety counters.
-
-The changed lines were instead verified against the campaign's own damaged ledgers: after the fix, `status` read the post-crash store correctly, and both purge forms previewed and then applied against real retained ledgers, deleting only their intended targets. A future correction touching the engine, ledger, codec, protocol, or extension asset does **not** qualify for this treatment and requires re-running every affected scenario.
+A future correction touching the engine, ledger, codec, protocol, extension asset, or any other packaged wheel input requires measuring the qualified-to-release delta and re-running every affected scenario. Documentation-only changes outside the built distribution may proceed only after an exact wheel rebuild proves the candidate hash is unchanged.

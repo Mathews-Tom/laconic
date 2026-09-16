@@ -61,7 +61,7 @@
     "total": 0.0766,
     "uncached_input": 0.024
   },
-  "laconic_version": "0.12.0",
+  "laconic_version": "0.13.0",
   "limitations": [
     "single_arm_corpus_every_session_ran_with_the_codec_enabled",
     "no_counterfactual_exists_so_no_savings_figure_can_be_derived",
