@@ -1,0 +1,60 @@
+{
+  "cohort": "laconic_repository_development",
+  "estimate": {
+    "avoided_cost_usd_high": 2.0,
+    "avoided_cost_usd_low": 1.0,
+    "avoided_share_pct_high": 20.0,
+    "avoided_share_pct_low": 10.0,
+    "basis": "modelled_not_measured",
+    "cache_reread_multiplier": 2.0,
+    "chars_per_token_high": 5.0,
+    "chars_per_token_low": 3.0,
+    "denominator": {
+      "host_reported_sessions": 1,
+      "host_reported_usd": 8.0,
+      "kind": "matched_sessions_modelled_cost",
+      "modelled_sessions": 2,
+      "modelled_usd": 10.0
+    },
+    "fallback_priced_cost_share_pct": 0.0,
+    "reread_credited_high": 2.0,
+    "reread_credited_low": 1.0,
+    "status": "available"
+  },
+  "exclusive_end": "2026-09-16T17:30:00Z",
+  "generator_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "generator_version": "m23-pages-v1",
+  "inclusive_start": "2026-09-06T07:53:09Z",
+  "laconic_version": "0.12.0",
+  "limitations": [
+    "observed_characters_are_not_tokens_or_dollars",
+    "single_arm_cohort_has_no_counterfactual",
+    "modelled_avoided_cost_is_not_measured_savings",
+    "token_density_and_cache_rereads_are_unmeasured_assumptions",
+    "host_reported_cost_covers_only_hosts_that_report_one",
+    "fallback_pricing_withholds_dollars_above_25_percent",
+    "local_laconic_repository_cohort_is_not_generalizable"
+  ],
+  "manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "observed": {
+    "chars_avoided": 6000,
+    "eligible": 10,
+    "emitted": 8,
+    "full_expansions": 2,
+    "pass_through": 2,
+    "raw_chars": 10000,
+    "span_expansions": 3,
+    "visible_chars": 4000
+  },
+  "population": {
+    "joined_sessions": 2,
+    "nested_sessions": 1,
+    "priced_sessions": 3,
+    "root_sessions": 2,
+    "selected_sessions": 3
+  },
+  "provider_calls": 0,
+  "schema_version": 1,
+  "snapshot_id": "laconic-development-20260916T173000Z",
+  "source_inventory_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}
