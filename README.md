@@ -9,6 +9,8 @@ Laconic sits at your agent's tool boundary and replaces bulky tool results with 
 [![CI](https://github.com/Mathews-Tom/laconic/actions/workflows/ci.yml/badge.svg)](https://github.com/Mathews-Tom/laconic/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
+[Product showcase](https://mathews-tom.github.io/laconic/) · [Frozen self-use evidence](https://mathews-tom.github.io/laconic/evidence/) · [Methodology and limitations](https://mathews-tom.github.io/laconic/methodology/)
+
 ```bash
 uv tool install laconic
 laconic setup
