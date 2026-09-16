@@ -232,3 +232,8 @@ node_modules/
 # private source inventory; only the exact-key aggregate disposition under
 # docs/results/ is public.
 .laconic/research/mcp-census/
+
+# Local M23 Pages snapshot manifest. It contains transcript paths, session
+# identities, and selected runtime-row provenance; only its aggregate output
+# under docs/pages/ is public.
+.laconic/research/pages-snapshot/
