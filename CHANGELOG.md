@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-09-16
+
 ### Added
 
 - Published a deterministic [GitHub Pages product site](https://mathews-tom.github.io/laconic/) with a real-codec recovery demonstration, a [frozen repository-local self-use evidence ledger](https://mathews-tom.github.io/laconic/evidence/), and its [methodology and limitations](https://mathews-tom.github.io/laconic/methodology/). The frozen single-arm cohort contains 86 selected sessions and records 6,900,697 characters avoided from 23,914,138 raw characters (28.86%) at the tool boundary. Its $33.89–$76.00 band (3.87%–8.69% of the matched modelled denominator) remains explicitly `modelled_not_measured`; it is not measured savings and has no counterfactual. The site and canonical JSON are generated offline from committed aggregate evidence, contain no private session values, make zero provider calls, and do not add a hosted Laconic runtime.
@@ -16,6 +18,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Changed
 
 - The confirmatory-study draft now records session-length external validity as a fourth blocker. Its short isolated tasks cannot establish long-session cache-reuse compounding; a replacement workload contract and the remaining owner decisions are required before fixture authoring, manifest creation, credentials, provider calls, or spend.
+- Re-ran the complete ten-session OMP 18.1.10 runtime qualification campaign against the `0.13.0` candidate after the qualified-to-release audit found packaged engine, ledger, codec, and extension changes since the prior campaign. All 162 eligible observations completed with zero safety-counter failures. The committed report records the qualified candidate wheel SHA-256; release review then corrected stale campaign figures in packaged README metadata, and an archive comparison confirmed that only wheel `METADATA` and `RECORD` changed while every runtime member remained byte-identical.
 - Rewritten `README.md`. It previously opened with four sentences of release caveats before saying what Laconic does, and never showed the one thing that explains the product: a real encoded observation. It now leads with the measurement that forced this design — cache reads are 60.3% of a real session bill and human-facing prose is 2.30% — shows a verbatim 745-line file encoded to 3,097 characters — 3,227 including the recovery header, which is what the strictly-smaller rule actually compares — with its recovery handle on the first line, and keeps every claim boundary intact: the avoided-cost figure is still labelled a model and never a measurement, the K1 kill is still published as a kill, and there is still no general token, cost, cache, or behaviour savings claim.
 
 ### Fixed
@@ -228,7 +231,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Initial packaging, lint, strict typing, test, and CI surface, with an importable `laconic` package and a `laconic` console script exposing `--version` and `--help`.
 
-[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Mathews-Tom/Laconic/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.10.0...v0.11.0

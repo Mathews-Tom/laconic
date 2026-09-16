@@ -11,6 +11,8 @@ Laconic sits at your agent's tool boundary and replaces bulky tool results with 
 
 [Product showcase](https://mathews-tom.github.io/laconic/) · [Frozen self-use evidence](https://mathews-tom.github.io/laconic/evidence/) · [Methodology and limitations](https://mathews-tom.github.io/laconic/methodology/)
 
+**Source release:** `v0.13.0` (Beta). Ordinary-use evidence collection continues; generic MCP runtime support remains on HOLD under its frozen evidence gate.
+
 ```bash
 uv tool install laconic
 laconic setup
@@ -96,7 +98,7 @@ Command and search output take the other route — head and tail are kept, the m
 
 ### It only fires when it wins
 
-A replacement is emitted only when the complete envelope — handle, header and all — is strictly smaller than the original. In qualification it passed **96 of 137** eligible observations straight through untouched. Small results stay small. Nothing is compressed to look busy.
+A replacement is emitted only when the complete envelope — handle, header and all — is strictly smaller than the original. In qualification it passed **90 of 162** eligible observations straight through untouched. Small results stay small. Nothing is compressed to look busy.
 
 ### It fails open, in every direction
 
@@ -104,7 +106,7 @@ Engine missing, spawn failure, crash, malformed response, deadline breach, stora
 
 ### Fast enough to forget about
 
-**p50 1.45 ms. p95 18.65 ms.**
+**p50 2.16 ms. p95 19.87 ms.**
 
 ### Entirely yours
 
@@ -202,7 +204,7 @@ Upgrading from 0.8.0 or earlier? Offline research commands moved under an explic
 
 Laconic reduces characters at the tool boundary, and that is what it reports. It does not claim a general token, cost, cache, or behaviour saving, because the conversion from characters to tokens to money is lossy and workload-dependent and we do not have the paired evidence that would license it. Every session Laconic has recorded ran with the codec on, so there is no counterfactual to subtract.
 
-What *is* measured is in [`docs/runtime-beta-report.md`](docs/runtime-beta-report.md), generated and committed verbatim: ten sessions, three repositories, 137 eligible observations, all 26 required failure and lifecycle scenarios exercised, every safety counter at zero, and 35.84% character reduction on that workload.
+What *is* measured is in [`docs/runtime-beta-report.md`](docs/runtime-beta-report.md), generated and committed verbatim: ten sessions, three repositories, 162 eligible observations, all 26 required failure and lifecycle scenarios exercised, every safety counter at zero, and 51.77% character reduction on that workload.
 
 ## Contributing
 
