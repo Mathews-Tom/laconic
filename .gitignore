@@ -227,3 +227,8 @@ node_modules/
 # by an allowlist, but still a record of the owner's own sessions and their
 # cost -- local evidence, not a repository artifact.
 .laconic/spend/
+
+# Local M21 MCP census manifest and detailed report. The manifest retains a
+# private source inventory; only the exact-key aggregate disposition under
+# docs/results/ is public.
+.laconic/research/mcp-census/

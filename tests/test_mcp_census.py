@@ -344,3 +344,36 @@ def test_execution_is_single_use_and_refuses_output_inside_sources(tmp_path: Pat
     blocked_parent.write_text("not a directory", encoding="utf-8")
     with pytest.raises(CensusExecutionError):
         execute_census(blocked_parent / "out", omp_root=omp, claude_root=claude)
+
+
+def test_committed_public_disposition_is_exact_valid_and_binding() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "results"
+        / "mcp-opportunity-disposition.json"
+    )
+    payload = json.loads(path.read_text())
+
+    validate_disposition(payload)
+    assert set(payload) == set(PUBLIC_KEYS)
+    assert payload["disposition"] == (
+        "HOLD — M22 MCP SUPPORT: "
+        "failed=evidence_floor,materiality,emission,aggregate_reduction,validity"
+    )
+    assert payload["failed_predicates"] == [
+        "evidence_floor",
+        "materiality",
+        "emission",
+        "aggregate_reduction",
+        "validity",
+    ]
+    assert payload["predicates"] == {
+        "aggregate_reduction": False,
+        "emission": False,
+        "evidence_floor": False,
+        "materiality": False,
+        "recoverability": True,
+        "validity": False,
+    }
+    assert payload["provider_calls"] == 0

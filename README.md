@@ -190,6 +190,7 @@ The avoided-cost result is deliberately a band and deliberately labelled. It is 
 | [`docs/headroom-comparison.md`](docs/headroom-comparison.md) | Version-pinned comparison with Headroom, including where Headroom fits better |
 | [`docs/overview.md`](docs/overview.md) | The measurement behind the design, and the positioning it forces |
 | [`docs/research-disposition.md`](docs/research-disposition.md) | How Laconic got here: evidence, shipped tranches, and what stays unproven |
+| [`docs/results/mcp-opportunity-disposition.json`](docs/results/mcp-opportunity-disposition.json) | Binding aggregate-only HOLD disposition for generic MCP runtime support |
 | [`docs/observe-cli.md`](docs/observe-cli.md) | `laconic diagnostics observe`: content-free local diagnostics |
 | [`docs/runtime-beta-report.md`](docs/runtime-beta-report.md) | The qualification campaign's generated report, committed verbatim |
 
