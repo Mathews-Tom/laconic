@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from typing import Any, Final
 
+from laconic import __version__
 from laconic.spend.report import (
     ALLOWED_CODEC_KEYS,
     ALLOWED_COST_KEYS,
@@ -25,7 +26,11 @@ from laconic.spend.report import (
     ALLOWED_SESSION_KEYS,
     ALLOWED_TOKEN_KEYS,
     ESTIMATE_BASIS,
+    GENERATION_BASIS,
     LIMITATIONS,
+    PRIVACY_STATUS,
+    REPORT_SCHEMA_VERSION,
+    SOURCE_FRESHNESS,
 )
 
 _HEX_64: Final = frozenset("0123456789abcdef")
@@ -45,16 +50,27 @@ _COST_BLOCK_KEYS: Final = frozenset({"corpus_cost", "matched_cost", "host_report
 _SHARE_BLOCK_KEYS: Final = frozenset({"corpus_shares", "matched_shares"})
 
 #: Report keys whose value is a plain USD float.
-_USD_KEYS: Final = frozenset(
-    {"corpus_host_cost_usd", "matched_host_cost_usd", "fallback_priced_cost_share_pct"}
-)
+_USD_KEYS: Final = frozenset({"corpus_host_cost_usd", "matched_host_cost_usd"})
+
+#: Report keys whose value must be a bounded percentage.
+_PERCENT_KEYS: Final = frozenset({"fallback_priced_cost_share_pct"})
 
 #: Report keys whose value is a list of model or schema-key identifiers.
 _IDENTIFIER_LIST_KEYS: Final = frozenset({"unpriced_models", "unknown_usage_keys"})
 
 #: Report keys this module checks individually rather than by group.
 _INLINE_CHECKED_KEYS: Final = frozenset(
-    {"laconic_version", "codec", "sessions", "limitations", "estimate"}
+    {
+        "schema_version",
+        "laconic_version",
+        "generation_basis",
+        "source_freshness",
+        "privacy_status",
+        "codec",
+        "sessions",
+        "limitations",
+        "estimate",
+    }
 )
 
 #: Everything else must be a non-negative integer. Derived by set difference,
@@ -67,6 +83,7 @@ _INT_KEYS: Final = ALLOWED_REPORT_KEYS - (
     _TOKEN_BLOCK_KEYS
     | _COST_BLOCK_KEYS
     | _SHARE_BLOCK_KEYS
+    | _PERCENT_KEYS
     | _USD_KEYS
     | _IDENTIFIER_LIST_KEYS
     | _INLINE_CHECKED_KEYS
@@ -96,12 +113,21 @@ def _require_int(field: str, value: Any) -> int:
 def _require_float(field: str, value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise PrivacyViolationError(f"{field} must be a number")
+    result = float(value)
     # json.loads accepts bare NaN and Infinity, and json.dumps writes them
-    # back as literal tokens that are not JSON. This gate is the last place
-    # that can stop one reaching disk.
-    if not math.isfinite(value):
+    # back as literal tokens that are not JSON. Negative spend is invalid too.
+    if not math.isfinite(result):
         raise PrivacyViolationError(f"{field} must be finite")
-    return float(value)
+    if result < 0:
+        raise PrivacyViolationError(f"{field} must not be negative")
+    return result
+
+
+def _require_percentage(field: str, value: Any) -> float:
+    result = _require_float(field, value)
+    if result > 100 and not math.isclose(result, 100, abs_tol=1e-6):
+        raise PrivacyViolationError(f"{field} must not exceed 100")
+    return result
 
 
 def _require_exact_keys(field: str, value: Any, allowed: frozenset[str]) -> dict[str, Any]:
@@ -146,6 +172,14 @@ def _validate_cost_block(field: str, value: Any, *, optional: bool) -> None:
         _require_float(f"{field}.{key}", block[key])
 
 
+def _validate_share_block(field: str, value: Any) -> None:
+    if value is None:
+        return
+    block = _require_exact_keys(field, value, ALLOWED_COST_KEYS)
+    for key in sorted(ALLOWED_COST_KEYS):
+        _require_percentage(f"{field}.{key}", block[key])
+
+
 def validate_session_json(payload: Any) -> None:
     """Raise unless one per-session entry is exactly a content-free row."""
     entry = _require_exact_keys("session", payload, ALLOWED_SESSION_KEYS)
@@ -169,12 +203,10 @@ def _validate_estimate(value: Any) -> None:
     """Raise unless the avoided-cost block is a labelled, content-free model.
 
     ``None`` is allowed: a corpus with no cached tokens or no removed
-    characters cannot support the model, and saying so is honest.
-
-    The ``basis`` field is checked against a constant rather than merely
-    typed. A modelled dollar figure that loses the word saying it is
-    modelled is exactly the artifact this gate exists to stop -- it would
-    validate cleanly and read as a measured saving.
+    characters cannot support the model, and saying so is honest. Otherwise
+    every field is required and typed. A modelled dollar figure that loses
+    the word saying it is modelled is exactly the artifact this gate exists
+    to stop -- it would validate cleanly and read as a measured saving.
     """
     if value is None:
         return
@@ -186,7 +218,8 @@ def _validate_estimate(value: Any) -> None:
         )
     _require_int("estimate.chars_avoided", block["chars_avoided"])
     for name in sorted(ALLOWED_ESTIMATE_KEYS - {"basis", "chars_avoided"}):
-        _require_float(f"estimate.{name}", block[name])
+        validator = _require_percentage if name.endswith("_pct") else _require_float
+        validator(f"estimate.{name}", block[name])
     if block["avoided_cost_usd_low"] > block["avoided_cost_usd_high"]:
         raise PrivacyViolationError("estimate band is inverted")
 
@@ -194,8 +227,8 @@ def _validate_estimate(value: Any) -> None:
 def validate_report_json(payload: Any) -> None:
     """Raise unless ``payload`` is exactly a content-free spend report.
 
-    Checks the allowlist, every value's shape, and that the complete
-    limitations block is present and unaltered.
+    Checks the allowlist, every value's shape, the immutable provenance
+    labels, and the complete ordered limitation vocabulary.
     """
     report = _require_exact_keys("report", payload, ALLOWED_REPORT_KEYS)
 
@@ -203,6 +236,8 @@ def validate_report_json(payload: Any) -> None:
         _require_int(key, report[key])
     for key in sorted(_USD_KEYS):
         _require_float(key, report[key])
+    for key in sorted(_PERCENT_KEYS):
+        _require_percentage(key, report[key])
     for key in sorted(_TOKEN_BLOCK_KEYS):
         block = _require_exact_keys(key, report[key], ALLOWED_TOKEN_KEYS)
         for name in sorted(ALLOWED_TOKEN_KEYS):
@@ -210,7 +245,7 @@ def validate_report_json(payload: Any) -> None:
     for key in sorted(_COST_BLOCK_KEYS):
         _validate_cost_block(key, report[key], optional=False)
     for key in sorted(_SHARE_BLOCK_KEYS):
-        _validate_cost_block(key, report[key], optional=True)
+        _validate_share_block(key, report[key])
 
     _validate_estimate(report["estimate"])
 
@@ -218,9 +253,19 @@ def validate_report_json(payload: Any) -> None:
     for name in sorted(ALLOWED_CODEC_KEYS):
         _require_int(f"codec.{name}", codec[name])
 
+    if report["schema_version"] != REPORT_SCHEMA_VERSION:
+        raise PrivacyViolationError("unsupported spend report schema")
+    for field, expected in (
+        ("generation_basis", GENERATION_BASIS),
+        ("source_freshness", SOURCE_FRESHNESS),
+        ("privacy_status", PRIVACY_STATUS),
+    ):
+        if report[field] != expected:
+            raise PrivacyViolationError(f"{field} must be {expected!r}")
+
     version = report["laconic_version"]
-    if not isinstance(version, str) or not version:
-        raise PrivacyViolationError("laconic_version must be a non-empty string")
+    if version != __version__:
+        raise PrivacyViolationError("laconic_version must match the running package")
 
     for key in sorted(_IDENTIFIER_LIST_KEYS):
         values = report[key]

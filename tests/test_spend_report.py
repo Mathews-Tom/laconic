@@ -10,14 +10,19 @@ from typing import Any
 import pytest
 
 import laconic.spend.privacy as privacy_module
-from laconic.spend.cli import REPORT_JSON, REPORT_MARKDOWN, write_report
+from laconic.spend.cli import REPORT_HTML, REPORT_JSON, REPORT_MARKDOWN, write_report
+from laconic.spend.html import render_html
 from laconic.spend.join import join
 from laconic.spend.ledger import SessionDecisions
 from laconic.spend.omp import SessionUsage, TurnUsage
 from laconic.spend.privacy import PrivacyViolationError, validate_report_json
 from laconic.spend.report import (
     ALLOWED_REPORT_KEYS,
+    GENERATION_BASIS,
     LIMITATIONS,
+    PRIVACY_STATUS,
+    SOURCE_FRESHNESS,
+    SpendReport,
     build_report,
     render_markdown,
     session_hash,
@@ -86,6 +91,7 @@ def test_the_rendering_is_byte_identical_across_two_runs() -> None:
 
     assert first.to_json() == second.to_json()
     assert render_markdown(first) == render_markdown(second)
+    assert render_html(first) == render_html(second)
 
 
 def test_the_rendering_disclaims_savings_and_never_asserts_one() -> None:
@@ -132,6 +138,21 @@ def test_an_empty_corpus_reports_no_shares_rather_than_four_zeroes() -> None:
     validate_report_json(payload)
     assert payload["corpus_shares"] is None
     assert payload["corpus_cost"]["total"] == 0.0
+
+
+def test_provenance_labels_are_closed_and_privacy_validated() -> None:
+    payload = _payload()
+    assert payload["generation_basis"] == GENERATION_BASIS
+    assert payload["source_freshness"] == SOURCE_FRESHNESS
+    assert payload["privacy_status"] == PRIVACY_STATUS
+
+    for field in ("generation_basis", "source_freshness", "privacy_status"):
+        mutated = {**payload, field: "private/free text"}
+        with pytest.raises(PrivacyViolationError, match=field):
+            validate_report_json(mutated)
+    leaked = {**payload, "laconic_version": "/Users/owner/private"}
+    with pytest.raises(PrivacyViolationError, match="laconic_version"):
+        validate_report_json(leaked)
 
 
 def test_the_allowlist_rejects_an_added_key() -> None:
@@ -220,15 +241,25 @@ def test_a_boolean_smuggled_in_as_a_counter_is_rejected() -> None:
         validate_report_json(payload)
 
 
-def test_writing_the_report_produces_both_artifacts(tmp_path: Path) -> None:
+def test_writing_the_report_produces_the_complete_evidence_bundle(tmp_path: Path) -> None:
     composition = join([_usage(MATCHED)], [_decisions(MATCHED)])
 
     written = write_report(composition, tmp_path)
 
     assert written.json_path == tmp_path / REPORT_JSON
     assert written.markdown_path == tmp_path / REPORT_MARKDOWN
+    assert written.html_path == tmp_path / REPORT_HTML
     validate_report_json(json.loads(written.json_path.read_text(encoding="utf-8")))
-    assert "Limitations" in written.markdown_path.read_text(encoding="utf-8")
+    markdown = written.markdown_path.read_text(encoding="utf-8")
+    html = written.html_path.read_text(encoding="utf-8")
+    assert "Limitations" in markdown
+    assert written.report.sha256 in markdown
+    assert written.report.sha256 in html
+    assert "modelled_not_measured" in html
+    assert "single_arm_corpus_every_session_ran_with_the_codec_enabled" in html
+    assert "<script" not in html
+    assert "<svg" in html
+    assert "https://" not in html and "http://" not in html
 
 
 def test_writing_twice_produces_identical_bytes(tmp_path: Path) -> None:
@@ -239,6 +270,7 @@ def test_writing_twice_produces_identical_bytes(tmp_path: Path) -> None:
 
     assert first.json_path.read_bytes() == second.json_path.read_bytes()
     assert first.markdown_path.read_bytes() == second.markdown_path.read_bytes()
+    assert first.html_path.read_bytes() == second.html_path.read_bytes()
 
 
 def test_a_failing_privacy_check_writes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
@@ -251,6 +283,55 @@ def test_a_failing_privacy_check_writes_nothing(tmp_path: Path, monkeypatch: Any
         write_report(composition, tmp_path / "out")
 
     assert not (tmp_path / "out" / REPORT_JSON).exists()
+    assert not (tmp_path / "out" / REPORT_MARKDOWN).exists()
+    assert not (tmp_path / "out" / REPORT_HTML).exists()
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_render_failure_writes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
+    import laconic.spend.cli as cli_module
+
+    def fail_render(_report: SpendReport) -> str:
+        raise ValueError("render failed")
+
+    monkeypatch.setattr(cli_module, "render_html", fail_render)
+    composition = join([_usage(MATCHED)], [_decisions(MATCHED)])
+
+    with pytest.raises(ValueError, match="render failed"):
+        write_report(composition, tmp_path / "out")
+
+    assert not (tmp_path / "out").exists()
+
+
+def test_html_escapes_every_dynamic_identifier() -> None:
+    payload = _payload()
+    payload["unpriced_models"] = ["evil<script>"]
+    report = SpendReport(payload)
+
+    html = render_html(report)
+    assert "evil&lt;script&gt;" in html
+    assert "evil<script>" not in html
+
+
+def test_a_replacement_failure_names_the_failed_destination(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import laconic.spend.cli as cli_module
+
+    original_replace = cli_module.os.replace
+    output = tmp_path / "out"
+
+    def fail_html(source: Path, destination: Path) -> None:
+        if Path(destination).name == REPORT_HTML:
+            raise OSError("synthetic disk failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(cli_module.os, "replace", fail_html)
+    composition = join([_usage(MATCHED)], [_decisions(MATCHED)])
+
+    with pytest.raises(OSError, match=str(output / REPORT_HTML)):
+        write_report(composition, output)
 
 
 def test_no_savings_ratio_is_serialized_at_all() -> None:
@@ -276,6 +357,7 @@ def test_every_allowlisted_key_is_covered_by_a_shape_check() -> None:
         | privacy_module._COST_BLOCK_KEYS
         | privacy_module._SHARE_BLOCK_KEYS
         | privacy_module._USD_KEYS
+        | privacy_module._PERCENT_KEYS
         | privacy_module._IDENTIFIER_LIST_KEYS
         | privacy_module._INLINE_CHECKED_KEYS
     )
@@ -286,6 +368,7 @@ def test_every_allowlisted_key_is_covered_by_a_shape_check() -> None:
             privacy_module._COST_BLOCK_KEYS
             | privacy_module._SHARE_BLOCK_KEYS
             | privacy_module._USD_KEYS
+            | privacy_module._PERCENT_KEYS
             | privacy_module._IDENTIFIER_LIST_KEYS
             | privacy_module._INLINE_CHECKED_KEYS
         )
@@ -299,6 +382,15 @@ def test_a_non_finite_dollar_figure_is_refused_before_it_reaches_disk(value: flo
     payload["corpus_host_cost_usd"] = value
 
     with pytest.raises(PrivacyViolationError, match="must be finite"):
+        validate_report_json(payload)
+
+
+@pytest.mark.parametrize("value", [-0.01, 100.01])
+def test_an_out_of_range_percentage_is_refused_before_rendering(value: float) -> None:
+    payload = _payload()
+    payload["fallback_priced_cost_share_pct"] = value
+
+    with pytest.raises(PrivacyViolationError, match="negative|exceed"):
         validate_report_json(payload)
 
 
