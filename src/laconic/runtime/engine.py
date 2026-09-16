@@ -243,7 +243,7 @@ class RuntimeSession:
             ) from error
 
         reference = str(RuntimeReference.from_ledger_reference(self.session_id, record.handle))
-        envelope = _envelope(reference, record.encoded)
+        envelope = recovery_envelope(reference, record.encoded)
         recovered = ledger.expand(record.handle)
         if recovered != request.raw_text:
             return self._pass_through(
@@ -403,7 +403,8 @@ def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1_000
 
 
-def _envelope(reference: str, encoded: str) -> str:
+def recovery_envelope(reference: str, encoded: str) -> str:
+    """Render the exact recoverable envelope used for runtime size decisions."""
     argument = json.dumps({"reference": reference}, ensure_ascii=True, separators=(",", ":"))
     return f"[laconic {reference} | full: laconic_expand({argument})]\n{encoded}"
 

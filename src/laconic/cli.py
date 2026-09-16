@@ -57,6 +57,7 @@ from laconic.k1corpus.stage_c import (
 )
 from laconic.k1corpus.stage_c_report import generate_stage_c_report
 from laconic.ledger import InvalidSpanError, Ledger, UnknownHandleError
+from laconic.mcp_census.cli import CensusExecutionError, execute_census, public_json
 from laconic.observe.audit import DEFAULT_AUDIT_PATH
 from laconic.observe.contracts import ClientId
 from laconic.observe.installer import (
@@ -216,6 +217,7 @@ EXIT_RUNTIME_STORAGE_ERROR = 26
 EXIT_RUNTIME_REFERENCE_ERROR = 27
 EXIT_SPEND_SOURCE_ERROR = 28
 EXIT_SPEND_PRIVACY_ERROR = 29
+EXIT_MCP_CENSUS_ERROR = 30
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -428,6 +430,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="offline measurement, replay, evaluation, and K1 research tools",
     )
     research_subcommands = research.add_subparsers(dest="research_command")
+    mcp_census = research_subcommands.add_parser(
+        "mcp-census",
+        help="freeze and measure the local MCP tool-result opportunity once",
+        description=(
+            "Freeze the post-v0.12 local OMP and Claude Code population, replay "
+            "eligible MCP text through the existing fallback encoder offline, and "
+            "write an aggregate GO/HOLD disposition. Read-only; no provider call."
+        ),
+    )
+    mcp_census.add_argument(
+        "--omp-root",
+        type=Path,
+        default=Path.home() / ".omp" / "agent" / "sessions",
+        help="OMP session root",
+    )
+    mcp_census.add_argument(
+        "--claude-root",
+        type=Path,
+        default=Path.home() / ".claude" / "projects",
+        help="Claude Code project-session root",
+    )
+    mcp_census.add_argument(
+        "--output",
+        type=Path,
+        default=Path(".laconic/research/mcp-census"),
+        help="new directory for the frozen manifest and aggregate reports",
+    )
+    mcp_census.add_argument("--format", choices=["text", "json"], default="text")
+    mcp_census.set_defaults(handler=_mcp_census)
 
     diagnostics = subcommands.add_parser(
         "diagnostics",
@@ -2074,6 +2105,26 @@ def _savings(args: argparse.Namespace) -> int:
     print("  this is what the removed characters would have cost, not a saving")
     print("  anyone observed. Every assumption is listed in the written report.")
     return exit_code
+
+
+def _mcp_census(args: argparse.Namespace) -> int:
+    try:
+        artifacts = execute_census(
+            args.output,
+            omp_root=args.omp_root,
+            claude_root=args.claude_root,
+        )
+    except CensusExecutionError as error:
+        print(f"laconic research mcp-census: {error}", file=sys.stderr)
+        return EXIT_MCP_CENSUS_ERROR
+    if args.format == "json":
+        print(public_json(artifacts), end="")
+        return EXIT_OK
+    print(artifacts.report.payload["disposition"])
+    print(f"  manifest: {artifacts.manifest_path}")
+    print(f"  detailed report: {artifacts.report_path}")
+    print(f"  public disposition: {artifacts.disposition_path}")
+    return EXIT_OK
 
 
 def _spend_report(args: argparse.Namespace) -> int:
