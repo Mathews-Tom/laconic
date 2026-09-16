@@ -431,15 +431,24 @@ it won, the stale price was the one every published figure used (`H-139`).
 The registry is now the only source, and the override layer is where a model
 it does not carry belongs.
 
-The spend report that consumes these prices serializes at schema version 2.
+The spend report that consumes these prices serializes at schema version 3.
 Its `host_reporting_cost` block prices exactly the sessions whose host
 records a per-turn cost, so that figure and `corpus_host_cost_usd` cover one
 set; `corpus_cost` covers every priced session and is the coverage
 denominator, not a comparison. `matched_sessions_without_host_cost` carries
-the same certificate for the matched pair. Every serialized key is
-independently shape-checked by `laconic.spend.privacy`, whose allowlist is
-derived by set difference so a new key with no shape group fails loudly
-instead of reaching an artifact uncertified.
+the same certificate for the matched pair.
+
+`laconic savings` validates one canonical JSON payload in memory, derives
+Markdown and a self-contained HTML evidence ledger from it, then replaces
+all three destination files. The derived formats embed the canonical JSON
+SHA-256. The HTML renderer accepts no filesystem, clock, or network input;
+it emits escaped data, inline CSS, and inline SVG with no script, external
+asset, telemetry, or server. Generation basis, source freshness, privacy
+status, estimate basis, and the complete limitations vocabulary are visible
+claim boundaries. Every serialized key and numeric bound is independently
+checked by `laconic.spend.privacy`, whose allowlist is derived by set
+difference so a new key with no shape group fails loudly instead of reaching
+an artifact uncertified.
 
 ---
 ## 3. Integration

@@ -1,0 +1,23 @@
+{
+  "decisions": {
+    "eligible": 48,
+    "emitted": 19,
+    "full_expansions": 3,
+    "raw_chars": 240000,
+    "span_expansions": 2,
+    "visible_chars": 231600
+  },
+  "fixture_kind": "laconic_dashboard_synthetic_fixture",
+  "fixture_version": 1,
+  "session": {
+    "host_cost_usd": 0.09,
+    "input_tokens": 12000,
+    "model": "claude-sonnet-5",
+    "nested": false,
+    "output_tokens": 2000,
+    "provider": "synthetic-provider",
+    "prompt_cache_read_tokens": 88000,
+    "prompt_cache_write_tokens": 6000,
+    "session_id": "synthetic-dashboard-session"
+  }
+}

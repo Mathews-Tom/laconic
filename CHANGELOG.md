@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- `laconic savings` now writes a deterministic, self-contained HTML evidence ledger beside its canonical JSON and Markdown reports. All three derive from the same exact-key-validated payload, while the Markdown and HTML embed the canonical JSON SHA-256; the HTML uses escaped data, inline CSS and SVG, and no script, external asset, network request, telemetry, or server. Provenance, freshness, privacy state, the `modelled_not_measured` basis, and the single-arm limitation remain visible claim boundaries.
+- Added a public synthetic dashboard fixture under `docs/demo/`, including a deterministic SVG README preview, fixture-root-only generator, and drift/privacy/claim verifier. The demo contains invented values only and is visibly marked `synthetic fixture`.
+
 ### Changed
 
 - Rewritten `README.md`. It previously opened with four sentences of release caveats before saying what Laconic does, and never showed the one thing that explains the product: a real encoded observation. It now leads with the measurement that forced this design — cache reads are 60.3% of a real session bill and human-facing prose is 2.30% — shows a verbatim 745-line file encoded to 3,097 characters — 3,227 including the recovery header, which is what the strictly-smaller rule actually compares — with its recovery handle on the first line, and keeps every claim boundary intact: the avoided-cost figure is still labelled a model and never a measurement, the K1 kill is still published as a kill, and there is still no general token, cost, cache, or behaviour savings claim.

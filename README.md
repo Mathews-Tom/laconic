@@ -153,7 +153,15 @@ The command reads your local session billing metadata and reports:
 - the modelled total for those same sessions; and
 - a modelled avoided-cost band when the underlying pricing coverage is sufficient.
 
-The result changes as your local session history grows, so this README does not freeze a sample dollar amount. `laconic savings` writes the complete assumptions and current figures to `.laconic/spend/spend-composition.md`.
+The result changes as your local session history grows, so this README does not freeze a sample dollar amount. `laconic savings` writes the complete assumptions and current figures to `.laconic/spend/` as canonical JSON, Markdown, and self-contained HTML.
+
+### Offline evidence dashboard
+
+`laconic savings` writes the same validated evidence as canonical JSON, Markdown, and a self-contained HTML dashboard. The HTML contains inline CSS and SVG only: no script, font, CDN, network request, telemetry, or server.
+
+[![Synthetic Laconic evidence ledger preview](docs/demo/dashboard-preview.svg)](docs/demo/spend-composition.html)
+
+The preview and linked dashboard are a **synthetic fixture**, not production evidence. They are generated from [`docs/demo/fixtures/evidence-ledger.json`](docs/demo/fixtures/evidence-ledger.json), carry the canonical JSON digest, and keep the modelled band adjacent to its `modelled_not_measured` basis and single-arm limitation. See [`docs/demo/README.md`](docs/demo/README.md) for regeneration and verification.
 
 The avoided-cost result is deliberately a band and deliberately labelled. It is modelled from token counters, never billed by a provider, and every assumption remains attached to the report. When more than a quarter of the underlying cost comes from models with no published price, Laconic withholds the dollar figures and leads with the percentage instead. **We would rather show you less than show you something we cannot stand behind.**
 

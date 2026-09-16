@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+  <title>Laconic evidence ledger</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper:#f0eadf;--paper-deep:#dfd5c5;--ink:#191816;--muted:#69635b;
+      --rule:#b9ae9d;--red:#a33a2d;--red-soft:#ead3cd;--signal:#183c3b;
+      --signal-ink:#dce9df;--sand-dark:#9d8f79;--white:#fffdf8;
+      --serif:Georgia,'Times New Roman',serif;--mono:Menlo,Monaco,'Courier New',monospace;
+    }
+    *{box-sizing:border-box} html{background:var(--paper);color:var(--ink)}
+    body{margin:0;font-family:var(--serif);background:linear-gradient(90deg,transparent 0 7.5%,rgba(163,58,45,.07) 7.5% 7.65%,transparent 7.65%),var(--paper);line-height:1.45}
+    body:before{content:'';position:fixed;inset:0;pointer-events:none;opacity:.18;background-image:repeating-linear-gradient(0deg,transparent 0 3px,rgba(25,24,22,.08) 4px);mix-blend-mode:multiply}
+    .ledger{position:relative;max-width:1180px;margin:auto;padding:52px 42px 72px}
+    header{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:32px;border-top:4px solid var(--ink);border-bottom:1px solid var(--rule);padding:26px 0 28px}
+    .kicker,.eyebrow,.provenance dt,.basis,.fixture-marker{font:700 12px/1.3 var(--mono);letter-spacing:.13em;text-transform:uppercase}
+    h1{font-size:clamp(48px,8vw,104px);font-weight:400;line-height:.82;letter-spacing:-.055em;margin:12px 0 18px;max-width:760px}
+    .lede{font-size:clamp(18px,2vw,25px);max-width:700px;margin:0;color:#39352f}
+    .claim-stamp{align-self:end;width:210px;border:2px solid var(--red);color:var(--red);padding:18px;transform:rotate(-1.5deg);font:700 12px/1.5 var(--mono);text-transform:uppercase}
+    .fixture-marker{display:inline-block;background:var(--red);color:var(--white);padding:7px 10px;margin-top:16px}
+    .provenance{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;border-bottom:1px solid var(--rule)}
+    .provenance div{padding:16px 14px 18px 0;border-right:1px solid var(--rule)} .provenance div+div{padding-left:14px}
+    .provenance dt{color:var(--muted)} .provenance dd{margin:6px 0 0;font:13px/1.4 var(--mono);overflow-wrap:anywhere}
+    .section-title{display:flex;align-items:baseline;justify-content:space-between;gap:20px;margin:54px 0 18px;border-bottom:1px solid var(--ink)}
+    .section-title h2{font-size:34px;font-weight:400;margin:0 0 8px} .section-title span{font:12px var(--mono);color:var(--muted)}
+    .evidence-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+    .card{background:rgba(255,253,248,.58);border:1px solid var(--rule);min-height:168px;padding:18px;display:flex;flex-direction:column;justify-content:space-between}
+    .card:nth-child(1),.card:nth-child(2){grid-column:span 3} .card:nth-child(3),.card:nth-child(4){grid-column:span 3}
+    .card .value{font-size:44px;line-height:1;letter-spacing:-.04em} .card .label{font:12px var(--mono);text-transform:uppercase;color:var(--muted)}
+    .card p{margin:10px 0 0;color:var(--muted);font-size:14px}
+    .signal-band{margin:58px 0;padding:50px max(42px,calc((100% - 1096px)/2));background:var(--signal);color:var(--signal-ink);display:grid;grid-template-columns:.78fr 1.22fr;gap:60px;overflow:hidden}
+    .signal-band h2{font-size:46px;font-weight:400;line-height:1;margin:10px 0 18px} .signal-band p{max-width:500px}
+    .signal-graphic{position:relative;min-height:245px;border-left:1px solid rgba(220,233,223,.34);padding:18px 0 0 34px}
+    .signal-graphic svg{width:100%;height:auto;display:block} .signal-graphic text{fill:var(--signal-ink);font:13px var(--mono)} .signal-graphic .frame{fill:none;stroke:rgba(220,233,223,.38)} .signal-graphic .cut{stroke:#d98c78;stroke-width:3}
+    .signal-note{font:12px/1.5 var(--mono);color:#a9c2b8}
+    .estimate-card{border-top:5px solid var(--red);border-bottom:1px solid var(--rule);padding:28px 0;display:grid;grid-template-columns:1.2fr .8fr;gap:56px}
+    .estimate-card h2{font-size:clamp(38px,6vw,72px);line-height:.95;font-weight:400;margin:10px 0} .estimate-card h2 strong{font-weight:400}
+    .share-band{font-size:20px} .basis{display:inline-block;background:var(--red-soft);color:var(--red);padding:7px 9px}
+    .estimate-proof{border-left:1px solid var(--rule);padding-left:28px} .estimate-proof dl{margin:18px 0 0}
+    .estimate-proof dl div{display:flex;justify-content:space-between;gap:12px;border-top:1px solid var(--rule);padding:8px 0}
+    .estimate-proof dt{color:var(--muted)} .estimate-proof dd{font-family:var(--mono);margin:0;text-align:right}
+    .withheld,.warning{border-left:3px solid var(--red);padding-left:12px;color:var(--red)}
+    .composition{display:grid;grid-template-columns:1.15fr .85fr;gap:42px} .bar{height:28px;display:flex;border:1px solid var(--ink);overflow:hidden}
+    .segment{display:block;height:100%} table{border-collapse:collapse;width:100%;margin-top:20px} th,td{border-bottom:1px solid var(--rule);padding:9px 0;text-align:right} th{text-align:left;font-weight:400} td{font-family:var(--mono)}
+    .codec-plot{background:var(--white);border:1px solid var(--rule);padding:20px} .meter{height:22px;background:var(--paper-deep);position:relative;margin:10px 0 20px}
+    .meter span{display:block;height:100%;background:var(--red)} .meter.visible span{background:var(--signal)}
+    .meter-label{display:flex;justify-content:space-between;font:12px var(--mono)}
+    .limits{columns:2;column-gap:42px;padding:0;list-style:none} .limits li{break-inside:avoid;border-top:1px solid var(--rule);padding:12px 0 18px}
+    .limits code{display:block;color:var(--red);font:12px/1.4 var(--mono);overflow-wrap:anywhere;margin-bottom:7px} .limits span{color:#49443e}
+    .warning{margin:20px 0} .warning h3{margin:0} .warning ul{margin-bottom:0}
+    footer{margin-top:58px;padding-top:22px;border-top:4px solid var(--ink);display:grid;grid-template-columns:1fr 2fr;gap:32px}
+    footer code{font:12px/1.5 var(--mono);overflow-wrap:anywhere} footer p{margin:0;color:var(--muted)}
+    @media(max-width:800px){.ledger{padding:30px 20px 52px}header,.signal-band,.estimate-card,.composition,footer{grid-template-columns:1fr}.claim-stamp{width:auto}.provenance{grid-template-columns:1fr 1fr}.provenance div{border-bottom:1px solid var(--rule)}.card:nth-child(n){grid-column:span 6}.signal-band{padding:38px 20px;margin:42px 0}.limits{columns:1}}
+    @media(max-width:480px){h1{font-size:54px}.provenance{grid-template-columns:1fr}.card:nth-child(n){grid-column:span 12}.signal-band h2{font-size:36px}}
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+    @media print{body{background:#fff}body:before{display:none}.signal-band{margin-left:0;margin-right:0}}
+  </style>
+</head>
+<body>
+  <main>
+  <div class="ledger">
+    <header>
+      <div>
+        <p class="kicker">Laconic / local evidence ledger</p>
+        <h1>Context has a cost.</h1>
+        <p class="lede">A content-free account of where modelled spend accumulated and what the local runtime codec did in the same sessions.</p>
+        <span class="fixture-marker">synthetic fixture</span>
+      </div>
+      <aside class="claim-stamp" aria-label="Claim boundary">No savings claim<br>No counterfactual<br>Single-arm evidence</aside>
+    </header>
+
+    <dl class="provenance" aria-label="Report provenance">
+      <div><dt>Report</dt><dd>schema v3</dd></div>
+      <div><dt>Laconic</dt><dd>v0.12.0</dd></div>
+      <div><dt>Basis</dt><dd>local_read_only_aggregate_snapshot</dd></div>
+      <div><dt>Freshness</dt><dd>scanned_at_generation</dd></div>
+      <div><dt>Privacy</dt><dd>exact_key_validated</dd></div>
+    </dl>
+
+    <section aria-labelledby="evidence-title">
+      <div class="section-title"><h2 id="evidence-title">Evidence at a glance</h2><span>consumer-visible facts</span></div>
+      <div class="evidence-grid">
+        <article class="card"><span class="label">Priced sessions</span><strong class="value">1</strong><p>1 root · 0 subagent</p></article>
+        <article class="card"><span class="label">Matched sessions</span><strong class="value">1</strong><p>0 spend-only · 0 ledger-only</p></article>
+        <article class="card"><span class="label">Eligible observations</span><strong class="value">48</strong><p>19 replaced · 29 passed through</p></article>
+        <article class="card"><span class="label">Ledger health</span><strong class="value">0</strong><p>damaged ledgers · 3 full / 2 span expansions</p></article>
+      </div>
+    </section>
+  </div>
+
+  <section class="signal-band" aria-labelledby="signal-title">
+    <div>
+      <p class="eyebrow">Context signal / explanatory model</p>
+      <h2 id="signal-title">Excluded once. Absent later.</h2>
+      <p>Tool output removed before context entry is not resident in later turns. This diagram explains the mechanism; it is not a measured causal curve.</p>
+      <p class="signal-note">Measured per-session cache residency is not present in this payload.</p>
+    </div>
+    <div class="signal-graphic">
+      <svg viewBox="0 0 640 250" role="img" aria-labelledby="context-signal-title context-signal-description">
+        <title id="context-signal-title">Excluded context remains absent from later turns</title>
+        <desc id="context-signal-description">Four schematic context bars with an increasing hatched region. The hatching explains absence and is not measured volume.</desc>
+        <defs><pattern id="absence-hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="12" stroke="rgba(220,233,223,.28)" stroke-width="2"/></pattern></defs>
+        <g transform="translate(0 8)">
+          <rect class="frame" x="0" y="0" width="620" height="38"/><text x="14" y="24">turn 01 · context enters</text><rect x="484" y="0" width="136" height="38" fill="url(#absence-hatch)"/><line class="cut" x1="484" y1="0" x2="484" y2="38"/>
+          <rect class="frame" x="0" y="56" width="620" height="38"/><text x="14" y="80">turn 02 · earlier output excluded</text><rect x="360" y="56" width="260" height="38" fill="url(#absence-hatch)"/><line class="cut" x1="360" y1="56" x2="360" y2="94"/>
+          <rect class="frame" x="0" y="112" width="620" height="38"/><text x="14" y="136">turn 03 · exclusion compounds</text><rect x="242" y="112" width="378" height="38" fill="url(#absence-hatch)"/><line class="cut" x1="242" y1="112" x2="242" y2="150"/>
+          <rect class="frame" x="0" y="168" width="620" height="38"/><text x="14" y="192">turn 04 · context stays absent</text><rect x="136" y="168" width="484" height="38" fill="url(#absence-hatch)"/><line class="cut" x1="136" y1="168" x2="136" y2="206"/>
+          <text x="0" y="236" opacity=".7">hatched region = explanatory absence, not measured volume</text>
+        </g>
+      </svg>
+    </div>
+  </section>
+
+  <div class="ledger">
+    
+      <section class="estimate-card" aria-labelledby="estimate-title">
+        <div>
+          <p class="eyebrow">Modelled cost avoided</p>
+          <h2 id="estimate-title"><strong>$0.01–$0.02</strong></h2>
+          <p class="share-band">10.87%–19.86% of the matched modelled bill</p>
+          
+        </div>
+        <div class="estimate-proof">
+          <span class="basis">modelled_not_measured</span>
+          <p>Single arm. No codec-off counterfactual exists. This band is a model, not a measurement.</p>
+          <dl>
+            <div><dt>Denominator</dt><dd>$0.08</dd></div>
+            <div><dt>Characters avoided</dt><dd>8,400</dd></div>
+            <div><dt>Assumed chars / token</dt><dd>3.0–4.0</dd></div>
+            <div><dt>Measured cache re-read rate</dt><dd>14.7×</dd></div>
+          </dl>
+        </div>
+      </section>
+    
+
+    <section aria-labelledby="composition-title">
+      <div class="section-title"><h2 id="composition-title">Composition, not causation</h2><span>same canonical payload</span></div>
+      <div class="composition">
+        <div>
+          <p class="eyebrow">Whole-corpus modelled cost</p>
+          <div class="bar" role="img" aria-label="Cost composition by token category"><span class="segment" style="width:31.331593%;background:var(--ink)"></span><span class="segment" style="width:22.976501%;background:var(--signal)"></span><span class="segment" style="width:19.582245%;background:var(--red)"></span><span class="segment" style="width:26.109661%;background:var(--sand-dark)"></span></div>
+          <table>
+            <caption class="eyebrow">Modelled token-cost composition</caption>
+            <thead><tr><th scope="col">Component</th><th scope="col">USD</th><th scope="col">Share</th></tr></thead>
+            <tbody><tr><th scope="row">Uncached input</th><td>$0.02</td><td>31.33%</td></tr><tr><th scope="row">Cache read</th><td>$0.02</td><td>22.98%</td></tr><tr><th scope="row">Cache write</th><td>$0.01</td><td>19.58%</td></tr><tr><th scope="row">Output</th><td>$0.02</td><td>26.11%</td></tr><tr><th scope="row">Total</th><td>$0.08</td><td>100%</td></tr></tbody>
+          </table>
+        </div>
+        <div class="codec-plot">
+          <p class="eyebrow">Runtime codec</p>
+          <div class="meter-label"><span>Emission</span><span>39.58%</span></div>
+          <div class="meter" aria-label="Emission rate"><span style="width:39.583333%"></span></div>
+          <div class="meter-label"><span>Visible characters</span><span>96.50% of raw</span></div>
+          <div class="meter visible" aria-label="Visible character share"><span style="width:96.500000%"></span></div>
+          <dl class="estimate-proof">
+            <div><dt>Raw</dt><dd>240,000</dd></div>
+            <div><dt>Visible</dt><dd>231,600</dd></div>
+            <div><dt>Avoided</dt><dd>8,400</dd></div>
+          </dl>
+        </div>
+      </div>
+      
+    </section>
+
+    <section aria-labelledby="limits-title">
+      <div class="section-title"><h2 id="limits-title">Claim boundary</h2><span>closed limitation vocabulary</span></div>
+      <ul class="limits"><li><code>single_arm_corpus_every_session_ran_with_the_codec_enabled</code><span>Single-arm corpus. Every session measured here ran with the codec enabled.</span></li><li><code>no_counterfactual_exists_so_no_savings_figure_can_be_derived</code><span>No counterfactual exists in this data. Nothing here is a savings figure, and no arithmetic over these numbers can produce one.</span></li><li><code>character_reduction_is_not_token_reduction</code><span>Characters avoided is a character count. It is not tokens, and the relationship between the two is not measured here.</span></li><li><code>cost_is_modelled_from_token_counters_never_billed_by_a_provider</code><span>Both dollar figures are modelled from token counters. Providers return counters, not prices: the host figure is OMP&#x27;s own price table, the Laconic figure is laconic.costs. Neither is a bill.</span></li><li><code>cache_writes_are_priced_at_one_rate_although_lifetimes_bill_differently</code><span>Every cache write is priced at one rate per model. Anthropic bills a one-hour cache write at twice the input price where a five-minute write bills at 1.25x, and OMP&#x27;s transcripts mark which is which: on the development corpus 65.4% of cache-write tokens are one-hour. This under-prices, never over-prices, so it can only make a modelled figure smaller than the provider&#x27;s. It is not corrected here because the host&#x27;s own accounting cannot adjudicate it -- OMP charged the higher rate on only 14.7% of the tokens it had itself marked one-hour, so matching the host would mean pricing 85% of them against its own lower figure.</span></li><li><code>sessions_are_not_controlled_units_and_are_not_comparable</code><span>A session is not a controlled unit. Sessions differ in length, repository, task, and model, so per-session figures do not compare.</span></li><li><code>a_ledger_only_proves_the_codec_ran_not_that_it_covered_the_session</code><span>A matched session is one that has a ledger, not one the codec covered end to end. A long session that the extension only joined partway through contributes all of its spend and almost none of its codec activity; compare each row&#x27;s turns against its eligible count.</span></li><li><code>committed_k1_fixture_8_41_pct_still_bounds_general_savings_claims</code><span>The committed K1 fixture&#x27;s 8.41% remains the only bound on a general savings claim. This report does not move it.</span></li><li><code>host_reported_cost_covers_only_hosts_that_report_one</code><span>The host-reported total covers only sessions whose host records a per-turn cost. Claude Code records token counters but no cost, so its sessions contribute tokens and modelled cost while contributing nothing to that total.</span></li><li><code>avoided_cost_is_modelled_from_assumptions_and_is_not_a_measurement</code><span>The avoided-cost estimate is a model, not a measurement. It rests on unmeasured assumptions -- characters per token, how much of the corpus&#x27;s cache re-read rate removed tokens would really have seen, and that the removed text would have been cached at all -- and is reported as a band because of them. No session was ever run without the codec to check it against.</span></li><li><code>avoided_cost_assumes_removed_text_would_have_been_cached_and_re_read</code><span>The estimate assumes removed text would have been written to the prompt cache once and re-read at the corpus&#x27;s own measured rate. Text removed from a turn that was never followed by another turn would have been re-read fewer times, and is overcounted by that assumption.</span></li></ul>
+    </section>
+
+    <footer>
+      <div><p class="eyebrow">Canonical evidence</p><code>sha256:de9dee13e8313afb161035c01f0afb96fcf9f6bc7436fb4c4d968f794702ce22</code></div>
+      <p>Generated from local read-only aggregate sources. The HTML contains inline CSS and SVG only: no script, remote asset, telemetry, or network request. The canonical JSON is the semantic source for this page.</p>
+    </footer>
+  </div>
+  </main>
+</body>
+</html>
