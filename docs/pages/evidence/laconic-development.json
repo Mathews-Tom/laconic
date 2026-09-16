@@ -1,0 +1,60 @@
+{
+  "cohort": "laconic_repository_development",
+  "estimate": {
+    "avoided_cost_usd_high": 75.997677,
+    "avoided_cost_usd_low": 33.890298,
+    "avoided_share_pct_high": 8.688083,
+    "avoided_share_pct_low": 3.874352,
+    "basis": "modelled_not_measured",
+    "cache_reread_multiplier": 57.052922,
+    "chars_per_token_high": 4.0,
+    "chars_per_token_low": 3.0,
+    "denominator": {
+      "host_reported_sessions": 85,
+      "host_reported_usd": 887.23983501,
+      "kind": "matched_sessions_modelled_cost",
+      "modelled_sessions": 85,
+      "modelled_usd": 874.7346837599999
+    },
+    "fallback_priced_cost_share_pct": 0.0,
+    "reread_credited_high": 57.052922,
+    "reread_credited_low": 28.526461,
+    "status": "available"
+  },
+  "exclusive_end": "2026-09-16T19:01:24Z",
+  "generator_commit": "05fcea7298224de80d2119fdd7a5a6093f7e2798",
+  "generator_version": "m23-pages-v1",
+  "inclusive_start": "2026-09-06T07:53:09Z",
+  "laconic_version": "0.12.0",
+  "limitations": [
+    "observed_characters_are_not_tokens_or_dollars",
+    "single_arm_cohort_has_no_counterfactual",
+    "modelled_avoided_cost_is_not_measured_savings",
+    "token_density_and_cache_rereads_are_unmeasured_assumptions",
+    "host_reported_cost_covers_only_hosts_that_report_one",
+    "fallback_pricing_withholds_dollars_above_25_percent",
+    "local_laconic_repository_cohort_is_not_generalizable"
+  ],
+  "manifest_sha256": "27fd80b960a1aaa582f3808ee5a65cc8df6e8c4c1a99eeded156297ad30b75bb",
+  "observed": {
+    "chars_avoided": 6900697,
+    "eligible": 5967,
+    "emitted": 1225,
+    "full_expansions": 57,
+    "pass_through": 4742,
+    "raw_chars": 23914138,
+    "span_expansions": 60,
+    "visible_chars": 17013441
+  },
+  "population": {
+    "joined_sessions": 85,
+    "nested_sessions": 77,
+    "priced_sessions": 86,
+    "root_sessions": 9,
+    "selected_sessions": 86
+  },
+  "provider_calls": 0,
+  "schema_version": 1,
+  "snapshot_id": "laconic-development-20260916T190124Z",
+  "source_inventory_sha256": "2f62746b11b1ba9a81bb778e69ba667b3a94b8a5bd9ef8ad814f2841eb813b75"
+}

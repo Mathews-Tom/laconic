@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Laconic is a local, fail-open, exactly recoverable context codec for coding agents.">
+  <meta name="laconic-evidence-sha256" content="040af507d26496469914d581cd7e11c58f25ee068e7cd02e68e54289664930ee">
+  <title>Laconic — Smaller tool results. Exact recovery.</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body data-json-sha256="040af507d26496469914d581cd7e11c58f25ee068e7cd02e68e54289664930ee">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header><nav class="site-nav" aria-label="Primary"><a class="wordmark" href="index.html" aria-label="Laconic home">laconic<span aria-hidden="true">.</span></a><div class="nav-links"><a href="index.html" aria-current="page">Product</a><a href="evidence/index.html">Evidence</a><a href="methodology/index.html">Methodology</a><a class="nav-install" href="https://github.com/Mathews-Tom/laconic#installation">Install</a></div></nav></header>
+  <main id="main"><section class="hero" aria-labelledby="hero-title"><div class="hero-copy"><p class="eyebrow">Local context efficiency for coding agents</p><h1 id="hero-title">Smaller tool results.<br>Exact recovery.</h1><p>Laconic transforms noisy file, command, and search results before they enter an agent's context. The original stays in a private local ledger, available by exact full or ranged expansion.</p><div class="hero-actions"><a class="button" href="#transformation">See the transformation</a><a class="button secondary" href="#system-title">How it works</a></div></div><div class="hero-code" aria-label="Laconic recovery envelope example"><p>Strict-smaller decision</p><strong>3,682 → 286 characters</strong><code>pages-demo/F1</code><span>Full or ranged exact expansion</span></div></section><section class="demo-section" id="transformation" aria-labelledby="demo-title">
+  <div class="section-heading"><div><p class="eyebrow">Deterministic transformation</p><h2 id="demo-title">A real codec run.<br>Every omitted byte recoverable.</h2></div><p>This committed fixture passes through Laconic's file encoder and exact recovery envelope. The complete envelope is strictly smaller than the original before it is shown.</p></div>
+  <div class="demo-grid">
+    <article class="terminal-card" aria-labelledby="envelope-title"><p class="terminal-title" id="envelope-title">READ · 3,682 raw characters</p><pre>[laconic pages-demo/F1 | full: laconic_expand({&quot;reference&quot;:&quot;pages-demo/F1&quot;})]
+demo/recovery.py  108 lines
+  outline: RecoveryEntry:9-11  checkpoint_1:13-19  checkpoint_2:21-27  checkpoint_3:29-35  checkpoint_4:37-43  checkpoint_5:45-51  checkpoint_6:53-59  checkpoint_7:61-67  [+5 more]</pre><p class="terminal-result"><strong>286 visible characters · 92.23% fewer</strong><br>Original retained locally under <code>pages-demo/F1</code>.</p></article>
+    <aside class="recovery-card" aria-labelledby="recovery-title"><p class="eyebrow">Exact recovery proof</p><h3 id="recovery-title">Full and ranged.</h3><dl><div><dt>Full handle</dt><dd><code>pages-demo/F1</code></dd></div><div><dt>Range handle</dt><dd><code>pages-demo/F1:1-12</code></dd></div><div><dt>Recovered SHA-256</dt><dd><code class="digest">486976ae75cac4eb75dd118e638f9d9c8307699fe757a4ba1420ec98d37df5cc</code></dd></div></dl><pre>&quot;&quot;&quot;A deterministic recovery ledger used by the public Laconic demo.&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class RecoveryEntry:
+    key: str
+    value: str
+</pre></aside>
+  </div>
+</section><section class="observed-strip" aria-labelledby="observed-strip-title">
+  <div><p class="data-label observed-label">Observed</p><h2 id="observed-strip-title">While developing Laconic.</h2><p>Actual codec counters, separate from economic modelling.</p></div>
+  <dl class="strip-stats">
+    <div><dt>Fewer visible chars</dt><dd>6,900,697</dd></div>
+    <div><dt>Boundary reduction</dt><dd>28.86%</dd></div>
+    <div><dt>Exact expansions</dt><dd>117</dd></div>
+  </dl>
+  <p class="scope-note">Frozen local Laconic-repository cohort only. Not representative of other users, repositories, hosts, or workloads. <a href="evidence/index.html">Inspect the evidence</a>.</p>
+</section><section class="paper-section" aria-labelledby="system-title">
+  <div class="section-heading"><div><p class="eyebrow">The system</p><h2 id="system-title">Reduce first.<br>Recover exactly.</h2></div><p>The host adapter sends a completed tool result to one canonical runtime. The runtime accepts a recovery-bearing envelope only when exact expansion succeeds and the complete visible result is strictly smaller.</p></div>
+  <img class="system-diagram" src="assets/diagram.svg" alt="Five-step Laconic path from host tool result through runtime, encoder, private ledger, and recovery-bearing envelope.">
+</section><section class="dark-section" aria-labelledby="contract-title"><div class="section-heading"><div><p class="eyebrow light">Fail-open contract</p><h2 id="contract-title">Compression is optional.<br>Correctness is not.</h2></div><p>Every decision preserves the host's result unless a complete, exactly recoverable, smaller replacement has already been proven.</p></div><div class="contract-grid"><article><h3>Strictly smaller</h3><p>Laconic counts the complete recovery-bearing envelope, not an optimistic intermediate encoding.</p></article><article><h3>Raw retained first</h3><p>The original remains in the private local ledger until recovery and size checks succeed.</p></article><article><h3>Original on failure</h3><p>Unsupported tools, errors, malformed shapes, and non-smaller candidates return the original unchanged.</p></article></div></section><section class="paper-section install-section" aria-labelledby="install-title"><div><p class="eyebrow">Install entry point</p><h2 id="install-title">Use the maintained instructions.</h2><p>The repository README owns installation and host setup. The site does not fork a second guide that can drift.</p></div><a class="button" href="https://github.com/Mathews-Tom/laconic#installation">Open installation instructions</a></section><section class="claim-section" aria-labelledby="claims-title"><div class="section-heading"><div><p class="eyebrow">Claim boundary</p><h2 id="claims-title">What happened.<br>What is modelled.</h2></div><p>Observed character counters and modelled economic implications never share a label, card, or color. Unsupported token, cache, behavior, and general-benefit claims remain out of scope.</p></div><div class="claim-grid"><article class="observed-card"><p class="data-label observed-label">Observed</p><h3>6,900,697</h3><p>fewer characters visible at the tool-result boundary</p><dl><div><dt>Raw → visible</dt><dd>23,914,138 → 17,013,441</dd></div><div><dt>Emitted</dt><dd>1,225</dd></div></dl></article><article class="modelled-card"><p class="data-label modelled-label">modelled_not_measured</p><h3>$33.89–$76.00</h3><p>3.87–8.69% of the named modelled denominator</p><dl><div><dt>Modelled denominator</dt><dd>$874.73 across 85 joined sessions</dd></div><div><dt>Host-reported partial denominator</dt><dd>$887.24 across 85 reporting sessions</dd></div><div><dt>Fallback-priced share</dt><dd>0.000000%</dd></div></dl><p class="adjacent-limit">Single-arm model with no counterfactual. Not measured, billed, token, cache, or behavior savings.</p></article></div><p class="claim-link"><a href="evidence/index.html">Read the frozen evidence ledger</a> and <a href="methodology/index.html">its methodology and limitations</a>.</p></section></main>
+  <footer class="site-footer">
+    <p><strong>laconic.</strong> Local by default. Fail open. Exactly recoverable.</p>
+    <p><a href="evidence/index.html">Evidence</a> · <a href="evidence/laconic-development.json">Canonical JSON</a> · <a href="methodology/index.html">Methodology</a> · <a href="https://github.com/Mathews-Tom/laconic">GitHub</a><br>No telemetry · No hosted service</p>
+  </footer>
+</body>
+</html>
