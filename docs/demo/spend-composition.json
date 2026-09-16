@@ -1,0 +1,136 @@
+{
+  "codec": {
+    "chars_avoided": 8400,
+    "eligible": 48,
+    "emitted": 19,
+    "full_expansions": 3,
+    "pass_through": 29,
+    "raw_chars": 240000,
+    "sessions": 1,
+    "span_expansions": 2,
+    "visible_chars": 231600
+  },
+  "codec_active_sessions_without_priced_turns": 0,
+  "corpus_cost": {
+    "cache_read": 0.0176,
+    "cache_write": 0.015,
+    "output": 0.02,
+    "total": 0.0766,
+    "uncached_input": 0.024
+  },
+  "corpus_host_cost_usd": 0.09,
+  "corpus_shares": {
+    "cache_read": 22.97650130548303,
+    "cache_write": 19.582245430809397,
+    "output": 26.109660574412533,
+    "total": 99.99999999999999,
+    "uncached_input": 31.331592689295036
+  },
+  "corpus_tokens": {
+    "cache_read": 88000,
+    "cache_write": 6000,
+    "output": 2000,
+    "uncached_input": 12000
+  },
+  "damaged_ledgers": 0,
+  "estimate": {
+    "avoided_cost_usd_high": 0.015213,
+    "avoided_cost_usd_low": 0.00833,
+    "avoided_share_pct_high": 19.860748,
+    "avoided_share_pct_low": 10.874674,
+    "basis": "modelled_not_measured",
+    "cache_reread_multiplier": 14.666667,
+    "chars_avoided": 8400,
+    "chars_per_token_high": 4.0,
+    "chars_per_token_low": 3.0,
+    "denominator_usd": 0.0766,
+    "effective_cache_read_usd_per_token": 2e-07,
+    "effective_cache_write_usd_per_token": 2.5e-06,
+    "fallback_priced_cost_share_pct": 0.0,
+    "reread_credited_high": 14.666667,
+    "reread_credited_low": 7.333333,
+    "tokens_removed_high": 2800.0,
+    "tokens_removed_low": 2100.0
+  },
+  "fallback_priced_cost_share_pct": 0.0,
+  "generation_basis": "local_read_only_aggregate_snapshot",
+  "host_reporting_cost": {
+    "cache_read": 0.0176,
+    "cache_write": 0.015,
+    "output": 0.02,
+    "total": 0.0766,
+    "uncached_input": 0.024
+  },
+  "laconic_version": "0.12.0",
+  "limitations": [
+    "single_arm_corpus_every_session_ran_with_the_codec_enabled",
+    "no_counterfactual_exists_so_no_savings_figure_can_be_derived",
+    "character_reduction_is_not_token_reduction",
+    "cost_is_modelled_from_token_counters_never_billed_by_a_provider",
+    "cache_writes_are_priced_at_one_rate_although_lifetimes_bill_differently",
+    "sessions_are_not_controlled_units_and_are_not_comparable",
+    "a_ledger_only_proves_the_codec_ran_not_that_it_covered_the_session",
+    "committed_k1_fixture_8_41_pct_still_bounds_general_savings_claims",
+    "host_reported_cost_covers_only_hosts_that_report_one",
+    "avoided_cost_is_modelled_from_assumptions_and_is_not_a_measurement",
+    "avoided_cost_assumes_removed_text_would_have_been_cached_and_re_read"
+  ],
+  "matched_cost": {
+    "cache_read": 0.0176,
+    "cache_write": 0.015,
+    "output": 0.02,
+    "total": 0.0766,
+    "uncached_input": 0.024
+  },
+  "matched_host_cost_usd": 0.09,
+  "matched_sessions": 1,
+  "matched_sessions_without_host_cost": 0,
+  "matched_shares": {
+    "cache_read": 22.97650130548303,
+    "cache_write": 19.582245430809397,
+    "output": 26.109660574412533,
+    "total": 99.99999999999999,
+    "uncached_input": 31.331592689295036
+  },
+  "matched_tokens": {
+    "cache_read": 88000,
+    "cache_write": 6000,
+    "output": 2000,
+    "uncached_input": 12000
+  },
+  "nested_sessions": 0,
+  "priced_sessions_without_host_cost": 0,
+  "priced_turns": 1,
+  "privacy_status": "exact_key_validated",
+  "root_sessions": 1,
+  "schema_version": 3,
+  "sessions": [
+    {
+      "chars_avoided": 8400,
+      "eligible": 48,
+      "emitted": 19,
+      "full_expansions": 3,
+      "host_cost_usd": 0.09,
+      "modelled_cost_usd": 0.0766,
+      "nested": false,
+      "raw_chars": 240000,
+      "session_hash": "0310c71f28dee2fc9b7dd2f01e4a91f318b9880f0aca5673abef12fcad30ad6e",
+      "span_expansions": 2,
+      "tokens": {
+        "cache_read": 88000,
+        "cache_write": 6000,
+        "output": 2000,
+        "uncached_input": 12000
+      },
+      "turns": 1,
+      "visible_chars": 231600
+    }
+  ],
+  "sessions_with_spend": 1,
+  "sessions_without_priced_turns": 0,
+  "source_freshness": "scanned_at_generation",
+  "unknown_usage_keys": [],
+  "unmatched_ledger_sessions": 0,
+  "unmatched_spend_sessions": 0,
+  "unpriced_models": []
+}

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc" data-basis="modelled_not_measured" data-json-sha256="de9dee13e8313afb161035c01f0afb96fcf9f6bc7436fb4c4d968f794702ce22">
+  <title id="title">Laconic evidence ledger synthetic fixture</title>
+  <desc id="desc">A deterministic preview of the offline evidence dashboard using synthetic values only.</desc>
+  <rect width="1200" height="630" fill="#f2eadc"/>
+  <rect x="38" y="34" width="1124" height="562" rx="8" fill="#fbf7ef" stroke="#27231f" stroke-width="2"/>
+  <rect x="76" y="57" width="505" height="36" rx="3" fill="#a33a2b"/>
+  <text x="91" y="82" fill="#fffdf8" font-family="ui-monospace, monospace" font-size="17" font-weight="700" letter-spacing="2">SYNTHETIC FIXTURE · OFFLINE EVIDENCE</text>
+  <text x="76" y="139" fill="#211e1a" font-family="Georgia, serif" font-size="49" font-weight="700">Laconic evidence ledger</text>
+  <text x="76" y="178" fill="#5d554c" font-family="ui-monospace, monospace" font-size="16">schema 3 · exact-key validated · JSON sha256 de9dee13e8313afb…</text>
+  <rect x="76" y="216" width="1048" height="126" rx="4" fill="#16191d"/>
+  <path d="M104 307 C230 260 322 316 432 267 S650 291 750 247 S952 269 1096 232" fill="none" stroke="#e55b45" stroke-width="4"/>
+  <path d="M104 319 C230 296 322 327 432 300 S650 315 750 282 S952 302 1096 271" fill="none" stroke="#d9c8aa" stroke-width="2" stroke-dasharray="8 8"/>
+  <text x="104" y="248" fill="#f0e4d2" font-family="ui-monospace, monospace" font-size="15">SYNTHETIC SCHEMATIC · NOT A MEASURED CAUSAL CURVE</text>
+  <g transform="translate(76 378)">
+    <rect width="318" height="154" rx="4" fill="#fffdf8" stroke="#c9bda9"/>
+    <text x="24" y="35" fill="#6a6157" font-family="ui-monospace, monospace" font-size="14">EMISSION</text>
+    <text x="24" y="86" fill="#211e1a" font-family="Georgia, serif" font-size="42" font-weight="700">39.6%</text>
+    <text x="24" y="122" fill="#6a6157" font-family="ui-monospace, monospace" font-size="14">19 of 48 synthetic observations</text>
+  </g>
+  <g transform="translate(416 378)">
+    <rect width="318" height="154" rx="4" fill="#fffdf8" stroke="#c9bda9"/>
+    <text x="24" y="35" fill="#6a6157" font-family="ui-monospace, monospace" font-size="14">CHARACTER REDUCTION</text>
+    <text x="24" y="86" fill="#211e1a" font-family="Georgia, serif" font-size="42" font-weight="700">3.5%</text>
+    <text x="24" y="122" fill="#6a6157" font-family="ui-monospace, monospace" font-size="14">8,400 synthetic characters excluded</text>
+  </g>
+  <g transform="translate(756 378)">
+    <rect width="368" height="154" rx="4" fill="#fffdf8" stroke="#a33a2b" stroke-width="2"/>
+    <text x="24" y="35" fill="#a33a2b" font-family="ui-monospace, monospace" font-size="14">MODELLED · NOT MEASURED</text>
+    <text x="24" y="86" fill="#211e1a" font-family="Georgia, serif" font-size="38" font-weight="700">$0.01–$0.02</text>
+    <text x="24" y="122" fill="#6a6157" font-family="ui-monospace, monospace" font-size="14">synthetic model · single arm</text>
+  </g>
+  <text x="76" y="568" fill="#6a6157" font-family="ui-monospace, monospace" font-size="14">Generated from docs/demo/fixtures/evidence-ledger.json · values are synthetic</text>
+</svg>
