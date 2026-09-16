@@ -237,3 +237,7 @@ node_modules/
 # identities, and selected runtime-row provenance; only its aggregate output
 # under docs/pages/ is public.
 .laconic/research/pages-snapshot/
+
+# Deterministic Pages generator rollback tree. A cleanup failure leaves the
+# prior public tree here without changing the newly published site.
+docs/.pages.previous/
