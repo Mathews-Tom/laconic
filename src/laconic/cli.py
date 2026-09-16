@@ -684,7 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--format",
         choices=["text", "json"],
         default="text",
-        help="stdout format; both files are written regardless",
+        help="stdout format; JSON, Markdown, and HTML files are always written",
     )
     spend_report.set_defaults(handler=_spend_report)
 
@@ -2067,7 +2067,11 @@ def _print_spend_summary(written: WrittenReport) -> None:
         print(f"  models with no list price: {', '.join(payload['unpriced_models'])}")
     if payload["unknown_usage_keys"]:
         print(f"  unmodelled host usage keys: {', '.join(payload['unknown_usage_keys'])}")
-    print(f"\n  wrote {written.json_path}\n  wrote {written.markdown_path}")
+    print(
+        f"\n  wrote {written.json_path}\n"
+        f"  wrote {written.markdown_path}\n"
+        f"  wrote {written.html_path}"
+    )
 
 
 def _savings(args: argparse.Namespace) -> int:
