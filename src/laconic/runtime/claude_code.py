@@ -55,7 +55,8 @@ from laconic.runtime.protocol import (
     RuntimePolicy,
     ShutdownRequest,
 )
-from laconic.runtime.storage import resolve_data_dir
+from laconic.runtime.references import InvalidSessionIdError, validate_session_id
+from laconic.runtime.storage import RuntimeStorage, resolve_data_dir
 
 #: Overrides the runtime storage root. Exists so this repository's tests can
 #: point at a scratch directory; a real installed hook never sets it.
@@ -146,6 +147,14 @@ def _request_id(payload: dict[str, Any], sequence: int) -> str:
     return f"cc-{sequence}"
 
 
+def _validated_session_id(session_id: str) -> str:
+    """Validate a hook session id without exposing it through hook diagnostics."""
+    try:
+        return validate_session_id(session_id)
+    except InvalidSessionIdError as error:
+        raise ValueError("invalid Claude Code session identifier") from error
+
+
 def transform(payload: dict[str, Any], *, data_dir: Path | None = None) -> dict[str, Any] | None:
     """Return one hook response, or ``None`` to leave the output untouched.
 
@@ -180,38 +189,46 @@ def transform(payload: dict[str, Any], *, data_dir: Path | None = None) -> dict[
     except _Unsupported:
         return None
 
-    session = RuntimeSession()
-    try:
-        initialized = session.handle(
-            InitializeRequest(
-                request_id="cc-init",
-                session_id=session_id,
-                working_directory=working_directory,
-                data_directory=str(resolve_data_dir(data_dir)),
-                policy=DEFAULT_POLICY,
-            )
-        )
-        assert isinstance(initialized, InitializeResponse)
-        encoded = session.handle(
-            EncodeObservationRequest(
-                # Unique per session, or the ledger rejects the second call:
-                # every tool call in one Claude Code session shares a
-                # session_id, so a constant id would transform the first
-                # observation and fail open on every one after it.
-                request_id=_request_id(payload, initialized.next_sequence),
-                tool_name=tool_name,
-                tool_input=cast("dict[str, JsonValue]", tool_input),
-                raw_text=raw_text,
-                success=True,
-                sequence=initialized.next_sequence,
-            )
-        )
-        assert isinstance(encoded, EncodeObservationResponse)
-    finally:
+    checked_session_id = _validated_session_id(session_id)
+    data_root = resolve_data_dir(data_dir)
+    storage = RuntimeStorage(data_root)
+    with storage.session_lock(checked_session_id):
+        session = RuntimeSession()
         try:
-            session.handle(ShutdownRequest(request_id="cc-shutdown"))
-        except Exception:  # noqa: BLE001 -- shutdown must not mask a decision
-            pass
+            initialized = session.handle(
+                InitializeRequest(
+                    request_id="cc-init",
+                    session_id=checked_session_id,
+                    working_directory=working_directory,
+                    data_directory=str(data_root),
+                    policy=DEFAULT_POLICY,
+                )
+            )
+            assert isinstance(initialized, InitializeResponse)
+            encoded = session.handle(
+                EncodeObservationRequest(
+                    # Unique per session, or the ledger rejects the second call:
+                    # every tool call in one Claude Code session shares a
+                    # session_id, so a constant id would transform the first
+                    # observation and fail open on every one after it.
+                    request_id=_request_id(payload, initialized.next_sequence),
+                    tool_name=tool_name,
+                    tool_input=cast("dict[str, JsonValue]", tool_input),
+                    raw_text=raw_text,
+                    success=True,
+                    sequence=initialized.next_sequence,
+                )
+            )
+            assert isinstance(encoded, EncodeObservationResponse)
+        finally:
+            try:
+                session.handle(ShutdownRequest(request_id="cc-shutdown"))
+            except Exception:  # noqa: BLE001 -- shutdown must not mask a decision
+                pass
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001 -- descriptor release must proceed
+                pass
 
     if encoded.decision != "emitted" or encoded.content is None:
         # The engine declined: the encoding was not strictly smaller. Leaving
