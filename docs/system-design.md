@@ -4,7 +4,7 @@
 
 Laconic sits at the **tool-result boundary** of an existing coding agent. The first runtime product is an explicitly installed OMP extension backed by one session-owned Python engine. The host adapter owns the session-scoped engine process lifecycle and result mutation; the engine owns encoding, recovery, decisions, and local storage.
 
-Version 0.12.0's installable package contains the OMP runtime shown below, a transforming Claude Code `PostToolUse` codec hook, guided setup, and read-only spend-composition reporting with a modelled avoided-cost estimate priced through a refreshable model-price registry. The source repository also contains controlled-spend research tooling, whose M20-v2 pilot has now run once and completed. M18 qualification passed and its human review gate is signed. Versions up to 0.8.0 had no live codec integration.
+Version 0.13.0's installable package contains the OMP runtime shown below, a transforming Claude Code `PostToolUse` codec hook, guided setup, and read-only spend-composition reporting with a modelled avoided-cost estimate priced through a refreshable model-price registry. The source repository also contains controlled-spend research tooling, whose M20-v2 pilot has now run once and completed. M18 qualification passed and its human review gate is signed. Versions up to 0.8.0 had no live codec integration.
 
 ```mermaid
 graph TB
@@ -49,7 +49,7 @@ Thin adapters share this canonical engine. OMP was first; the Claude Code adapte
 ---
 ## 2. Component Design
 
-**Maturity boundary:** version 0.12.0 packages the codec, ledger, replay, renderer, action codec, residency decision accounting, session runtime, namespaced envelope, OMP adapter, Claude Code adapter, operator controls, and read-only research reporting including a modelled avoided-cost estimate. It does not package the controlled-spend research tooling, and no further provider-backed comparison is authorized. Action rewriting and applied residency compaction are not part of the beta.
+**Maturity boundary:** version 0.13.0 packages the codec, ledger, replay, renderer, action codec, residency decision accounting, session runtime, namespaced envelope, OMP adapter, Claude Code adapter, operator controls, and read-only research reporting including a modelled avoided-cost estimate. It does not package the controlled-spend research tooling, and no further provider-backed comparison is authorized. Action rewriting and applied residency compaction are not part of the beta.
 
 ### 2.1 Handle ledger (`src/laconic/ledger.py`)
 
@@ -484,9 +484,9 @@ The TypeScript extension uses OMP result middleware, session lifecycle events, r
 
 The Python process is owned by one active OMP session and communicates over a versioned JSONL protocol. Protocol frames use stdout; diagnostics use stderr and never include raw content, subjects, tool arguments, prompts, credentials, or paths.
 
-### 3.2 Deferred adapters
+### 3.2 Claude Code transforming adapter
 
-Claude Code is the second host target only after the protocol survives OMP dogfood. It reuses the engine and ledger semantics rather than copying codec policy into plugin code.
+Claude Code runs every `PostToolUse` hook callback in a fresh process. The adapter drives the canonical `RuntimeSession` rather than copying codec policy into hook code, and takes a private SHA-256-named POSIX sidecar lock for the callback's session before opening the ledger. The lock covers runtime initialization, encoding, persistence, shutdown, explicit close, and descriptor release, enforcing the ledger's one-writer-per-session invariant. It is bounded to 250 ms with monotonic time; contention fails open before ledger mutation, while callbacks for different sessions remain independent.
 
 An MCP gateway is not a substitute for the OMP adapter because it cannot intercept built-in tool results. It remains deferred, along with additional tool shapes, action rewriting, applied residency compaction, and hosted synchronization.
 
