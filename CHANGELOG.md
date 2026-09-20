@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code `PostToolUse` callbacks for one session now serialize their complete runtime lifecycle through a private bounded POSIX sidecar lock. A contended callback fails open before ledger mutation after 250 ms; different sessions remain independent.
+
 ## [0.13.0] — 2026-09-16
 
 ### Added
