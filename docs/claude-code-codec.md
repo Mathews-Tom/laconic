@@ -68,12 +68,14 @@ The adapter therefore deep-copies the observed `tool_response` and overwrites on
 
 ## Failure behaviour
 
-The hook is fail-open in every direction. A malformed payload, an unavailable ledger, or any unexpected error writes nothing to stdout and exits zero, so Claude Code keeps the original tool result. A crash costs compression, never correctness. Diagnostics go to stderr, which an exit-zero hook routes to the client's debug log rather than to the model.
+The hook is fail-open in every direction. A malformed payload, unavailable ledger, contended same-session lock, or any unexpected error writes nothing to stdout and exits zero, so Claude Code keeps the original tool result. A crash costs compression, never correctness. Diagnostics go to stderr, which an exit-zero hook routes to the client's debug log rather than to the model.
 
 The adapter never constructs a decision of its own. It drives the same `RuntimeSession` the OMP transport drives, so the strictly-smaller rule, the ledger, reference minting, and exact recovery are shared rather than forked.
+
+For each callback, the adapter takes a private, SHA-256-named POSIX sidecar lock for its Claude session before opening the runtime ledger, and releases it only after shutdown and close. This serializes the complete ledger lifecycle for that session while allowing different sessions to proceed independently. Contention has a monotonic 250 ms limit; a callback that cannot acquire its lock makes no ledger mutation and keeps the original tool result.
 
 ## Known limits
 
 - **Long single lines are not compressible.** Elision is line-based. A result with few but enormous lines — a 150,000-character diff over 24 lines appears in the measured corpus — passes through untouched.
-- **Parallel tool batches lose some compression.** Claude Code fires `PostToolUse` concurrently for batched tool calls. Each hook is a separate process that reads its sequence number from the ledger, so two concurrent calls in one session can select the same sequence; the ledger's `PRIMARY KEY (session_id, sequence)` rejects the second, which then fails open and keeps its original output. Nothing is corrupted and nothing is double-emitted — the raced call is simply not compressed. Expect a transform rate below the measured figures under heavy parallel batching.
+- **Same-session contention fails open.** Claude Code invokes every `PostToolUse` hook in a fresh process. Laconic serializes same-session callbacks with a bounded lock so they cannot collide on sequence or handle allocation. A callback that waits more than 250 ms keeps its original output without opening or mutating the ledger; this trades a bounded compression opportunity for the existing fail-open guarantee.
 - **Acceptance is not observable from inside the hook.** Claude Code reports nothing back when it rejects a replacement. The adapter's defence is that it never builds a shape; confirmation requires inspecting a session transcript.
