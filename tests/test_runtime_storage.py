@@ -8,11 +8,15 @@ import pytest
 
 from laconic.ledger import ObservationKind
 from laconic.runtime import storage as storage_module
+from laconic.runtime.operator import runtime_storage_status
+from laconic.runtime.references import InvalidSessionIdError
 from laconic.runtime.storage import (
     DATA_DIR_ENV_VAR,
     PrivateStorageUnavailableError,
     RuntimeStorage,
+    UnsafeStoragePathError,
     default_data_dir,
+    session_lock_path,
 )
 
 
@@ -70,3 +74,66 @@ def test_reopening_a_session_preserves_handles_and_exact_content(tmp_path: Path)
 
     assert (first.handle, second.handle) == ("F1", "F2")
     assert storage.expand("session-1/F1:2-3") == "line two\nline three"
+
+
+def test_session_lock_sidecars_are_opaque_private_and_persistent(tmp_path: Path) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+    session_id = "opaque-lock-session"
+    path = session_lock_path(session_id, storage.root)
+
+    with storage.session_lock(session_id):
+        assert path.exists()
+        inode = path.stat().st_ino
+
+    with storage.session_lock(session_id):
+        assert path.stat().st_ino == inode
+
+    assert path.parent == storage.root / "locks"
+    assert session_id not in path.name
+    assert _mode(path.parent) == 0o700
+    assert _mode(path) == 0o600
+    status = runtime_storage_status(storage.root)
+    assert (status.sessions, status.storage_bytes) == (0, 0)
+
+
+def test_session_lock_rejects_invalid_identifiers_without_creating_sidecars(tmp_path: Path) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+
+    with pytest.raises(InvalidSessionIdError):
+        with storage.session_lock("not/a-session"):
+            pass
+
+    assert not (storage.root / "locks").exists()
+
+
+def test_session_lock_rejects_symlinked_lock_directory(tmp_path: Path) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (storage.root / "locks").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UnsafeStoragePathError):
+        with storage.session_lock("session-1"):
+            pass
+
+
+def test_session_lock_rejects_nonordinary_sidecars(tmp_path: Path) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+    path = storage.lock_path("session-1")
+    path.mkdir()
+
+    with pytest.raises(UnsafeStoragePathError):
+        with storage.session_lock("session-1"):
+            pass
+
+
+def test_session_lock_fails_closed_when_owner_only_storage_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RuntimeStorage(tmp_path / "data")
+    monkeypatch.setattr(storage_module, "_owner_only_storage_supported", lambda: False)
+
+    with pytest.raises(PrivateStorageUnavailableError, match="owner-only"):
+        with storage.session_lock("session-1"):
+            pass
