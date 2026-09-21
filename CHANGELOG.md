@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-21
+
 ### Fixed
 
 - Claude Code `PostToolUse` callbacks for one session now serialize their complete runtime lifecycle through a private bounded POSIX sidecar lock. A contended callback fails open before ledger mutation after 250 ms; different sessions remain independent.
@@ -235,8 +237,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Initial packaging, lint, strict typing, test, and CI surface, with an importable `laconic` package and a `laconic` console script exposing `--version` and `--help`.
 
-[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.13.0...HEAD
-[0.13.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.12.0...v0.13.0
+[Unreleased]: https://github.com/Mathews-Tom/Laconic/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.13.0...v0.14.0
 [0.12.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Mathews-Tom/Laconic/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/Mathews-Tom/Laconic/compare/v0.10.0...v0.11.0
