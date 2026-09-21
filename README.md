@@ -11,7 +11,7 @@ Laconic sits at your agent's tool boundary and replaces bulky tool results with 
 
 [Product showcase](https://mathews-tom.github.io/laconic/) · [Frozen self-use evidence](https://mathews-tom.github.io/laconic/evidence/) · [Methodology and limitations](https://mathews-tom.github.io/laconic/methodology/)
 
-**Source release:** `v0.13.0` (Beta). Ordinary-use evidence collection continues; generic MCP runtime support remains on HOLD under its frozen evidence gate.
+**Source release:** `v0.14.0` (Beta). Ordinary-use evidence collection continues; generic MCP runtime support remains on HOLD under its frozen evidence gate.
 
 ```bash
 uv tool install laconic
